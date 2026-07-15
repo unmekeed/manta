@@ -4,7 +4,7 @@
 -- доставка replay.parsed, новая версия экстрактора) замещает старые строки
 -- последней версией — идемпотентность at-least-once на уровне хранилища.
 
-CREATE TABLE IF NOT EXISTS dota_analyst.PlayerMatchFeatures (
+CREATE TABLE IF NOT EXISTS manta.PlayerMatchFeatures (
     match_id        UInt64,
     player_id       UInt64,           -- 0-4 Radiant, 5-9 Dire
     team            UInt8,            -- 2 = Radiant, 3 = Dire
@@ -30,7 +30,7 @@ ORDER BY (match_id, player_id);
 
 -- Поминутный таймлайн командных дифференциалов — вход Win Probability
 -- (Гл. 6.2.2): net worth diff, XP diff, суммарные убийства.
-CREATE TABLE IF NOT EXISTS dota_analyst.MatchTimelineFeatures (
+CREATE TABLE IF NOT EXISTS manta.MatchTimelineFeatures (
     match_id        UInt64,
     game_time       Int32,            -- секунды, шаг 60
     networth_diff   Int32,            -- Radiant - Dire

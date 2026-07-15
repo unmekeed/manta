@@ -1,6 +1,6 @@
 -- Миграция 001: аналитический слой ClickHouse (Гл. 4.4 спецификации).
 
-CREATE TABLE IF NOT EXISTS dota_analyst.ReplayEvents (
+CREATE TABLE IF NOT EXISTS manta.ReplayEvents (
     match_id      UInt64,
     tick          UInt32,
     game_time     Int32,
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS dota_analyst.ReplayEvents (
 PARTITION BY toYYYYMM(FROM_UNIXTIME(game_time))
 ORDER BY (match_id, event_type, tick, player_id);
 
-CREATE TABLE IF NOT EXISTS dota_analyst.EconomyTimeline (
+CREATE TABLE IF NOT EXISTS manta.EconomyTimeline (
     match_id       UInt64,
     player_id      UInt64,
     game_time      Int32,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS dota_analyst.EconomyTimeline (
 PARTITION BY toYYYYMM(FROM_UNIXTIME(game_time))
 ORDER BY (match_id, player_id, game_time);
 
-CREATE TABLE IF NOT EXISTS dota_analyst.PositionSnapshots (
+CREATE TABLE IF NOT EXISTS manta.PositionSnapshots (
     match_id   UInt64,
     player_id  UInt64,
     game_time  Int32,

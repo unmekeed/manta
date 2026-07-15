@@ -1,6 +1,6 @@
-# Локальная инфраструктура разработки Dota AI Analyst (Гл. 12.6 спецификации).
+# Локальная инфраструктура разработки Manta (Гл. 12.6 спецификации).
 # Облегчённые одноузловые версии всех хранилищ и брокера.
-name: dota-ai-analyst
+name: manta
 
 services:
   postgres:
@@ -8,13 +8,13 @@ services:
     environment:
       POSTGRES_USER: dota
       POSTGRES_PASSWORD: dota_dev_password
-      POSTGRES_DB: dota_analyst
+      POSTGRES_DB: manta
     ports:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dota -d dota_analyst"]
+      test: ["CMD-SHELL", "pg_isready -U dota -d manta"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -24,7 +24,7 @@ services:
     environment:
       CLICKHOUSE_USER: dota
       CLICKHOUSE_PASSWORD: dota_dev_password
-      CLICKHOUSE_DB: dota_analyst
+      CLICKHOUSE_DB: manta
     ports:
       - "8123:8123"   # HTTP
       - "9000:9000"   # native
@@ -100,12 +100,12 @@ services:
       - "8080:8080"
     environment: &app-env
       KAFKA_BROKERS: kafka:29092
-      POSTGRES_DSN: postgresql://dota:dota_dev_password@postgres:5432/dota_analyst
+      POSTGRES_DSN: postgresql://dota:dota_dev_password@postgres:5432/manta
       S3_ENDPOINT: minio:9000
       S3_ACCESS_KEY: dota
       S3_SECRET_KEY: dota_dev_password
       CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_DB: dota_analyst
+      CLICKHOUSE_DB: manta
       CLICKHOUSE_USER: dota
       CLICKHOUSE_PASSWORD: dota_dev_password
     depends_on:

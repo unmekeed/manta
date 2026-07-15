@@ -57,7 +57,7 @@ def main() -> None:
     cfg = CollectorConfig(
         postgres_dsn=os.getenv(
             "POSTGRES_DSN",
-            "postgresql://dota:dota_dev_password@localhost:5432/dota_analyst"),
+            "postgresql://dota:dota_dev_password@localhost:5432/manta"),
         kafka_brokers=os.getenv("KAFKA_BROKERS", "localhost:9092"),
         s3_endpoint=os.getenv("S3_ENDPOINT", "localhost:9500"),
         s3_access_key=os.getenv("S3_ACCESS_KEY", "dota"),

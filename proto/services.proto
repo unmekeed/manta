@@ -1,10 +1,10 @@
-// gRPC-контракты внутренних сервисов платформы Dota AI Analyst.
+// gRPC-контракты внутренних сервисов платформы Manta.
 // Транспорт: gRPC поверх HTTP/2 + mTLS. Совместимость схем: BACKWARD.
 syntax = "proto3";
 
 package dota.core.v1;
 
-option go_package = "github.com/dota-ai-analyst/proto/core/v1;corev1";
+option go_package = "github.com/unmekeed/manta/proto/core/v1;corev1";
 
 import "google/protobuf/timestamp.proto";
 

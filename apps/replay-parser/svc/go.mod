@@ -1,4 +1,4 @@
-module github.com/dota-ai-analyst/replay-parser-svc
+module github.com/unmekeed/manta/replay-parser-svc
 
 go 1.24.7
 

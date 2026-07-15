@@ -5,9 +5,9 @@ export default function App() {
     <div className="layout">
       <header className="topbar">
         <Link to="/" className="brand">
-          Dota <span>AI</span> Analyst
+          Man<span>ta</span>
         </Link>
-        <span className="tagline">разбор матчей · Win Probability · ошибки</span>
+        <span className="tagline">аналитика Dota 2 · Win Probability · разбор ошибок</span>
       </header>
       <main>
         <Outlet />

@@ -1,4 +1,4 @@
-module github.com/dota-ai-analyst/api-gateway
+module github.com/unmekeed/manta/api-gateway
 
 go 1.24.7
 

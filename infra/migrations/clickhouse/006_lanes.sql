@@ -7,7 +7,7 @@
 -- среднего ПРЯМЫХ оппонентов по линии (пусто/нет оппонентов → 0);
 -- источник честного laning_score в отчётах.
 
-ALTER TABLE dota_analyst.PlayerMatchFeatures
+ALTER TABLE manta.PlayerMatchFeatures
     ADD COLUMN IF NOT EXISTS lane String DEFAULT '' AFTER dn_at_10;
-ALTER TABLE dota_analyst.PlayerMatchFeatures
+ALTER TABLE manta.PlayerMatchFeatures
     ADD COLUMN IF NOT EXISTS lane_nw_diff_at_10 Int32 DEFAULT 0 AFTER lane;

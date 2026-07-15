@@ -19,7 +19,7 @@
 ## 13.2. Корневое дерево монорепозитория
 
 ```
-dota-ai-analyst/
+manta/
 ├── .github/
 │   └── workflows/
 │       ├── ci-cd-pipeline.yml
@@ -45,7 +45,7 @@ dota-ai-analyst/
 │   └── schemas/                # Avro/JSON-схемы Kafka
 ├── proto/                      # исходные .proto (источник истины)
 ├── openapi/
-│   └── dota-ai-analyst.yaml
+│   └── manta.yaml
 ├── deployments/
 │   ├── docker-compose.yml
 │   ├── helm/

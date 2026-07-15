@@ -64,7 +64,7 @@ func FromEnv() Config {
 		S3UseSSL:    getenv("S3_USE_SSL", "") == "true",
 
 		ClickHouseURL:      getenv("CLICKHOUSE_URL", "http://localhost:8123"),
-		ClickHouseDB:       getenv("CLICKHOUSE_DB", "dota_analyst"),
+		ClickHouseDB:       getenv("CLICKHOUSE_DB", "manta"),
 		ClickHouseUser:     getenv("CLICKHOUSE_USER", "dota"),
 		ClickHousePassword: getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"),
 

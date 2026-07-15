@@ -6,8 +6,8 @@
 -- Значение прокидывается конвейером из Data Collector
 -- (match.downloaded.payload.tier → replay.parsed → Feature Extractor).
 
-ALTER TABLE dota_analyst.MatchTimelineFeatures
+ALTER TABLE manta.MatchTimelineFeatures
     ADD COLUMN IF NOT EXISTS tier String DEFAULT '' AFTER radiant_win;
 
-ALTER TABLE dota_analyst.PlayerMatchFeatures
+ALTER TABLE manta.PlayerMatchFeatures
     ADD COLUMN IF NOT EXISTS tier String DEFAULT '' AFTER won;

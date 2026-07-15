@@ -46,7 +46,7 @@ class ExtractorConfig:
     clickhouse_url: str = field(
         default_factory=lambda: os.getenv("CLICKHOUSE_URL", "http://localhost:8123"))
     clickhouse_db: str = field(
-        default_factory=lambda: os.getenv("CLICKHOUSE_DB", "dota_analyst"))
+        default_factory=lambda: os.getenv("CLICKHOUSE_DB", "manta"))
     clickhouse_user: str = field(
         default_factory=lambda: os.getenv("CLICKHOUSE_USER", "dota"))
     clickhouse_password: str = field(

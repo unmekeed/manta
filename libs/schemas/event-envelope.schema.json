@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dota-ai-analyst.com/schemas/event-envelope/1.0.0",
+  "$id": "https://manta.gg/schemas/event-envelope/1.0.0",
   "title": "KafkaEventEnvelope",
   "description": "Единый конверт события шины данных (Гл. 2.3.3 спецификации). Полезная нагрузка payload специфична для event_type и валидируется собственной схемой.",
   "type": "object",

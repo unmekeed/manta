@@ -1,4 +1,4 @@
-# Корневые цели монорепозитория Dota AI Analyst (Гл. 13.7 спецификации).
+# Корневые цели монорепозитория Manta (Гл. 13.7 спецификации).
 
 GO_SERVICES := apps/api-gateway apps/replay-parser/svc
 COMPOSE     := docker compose -f deployments/docker-compose.yml
@@ -23,13 +23,13 @@ topics:        ## Создать Kafka-топики по реестру Гл. 2.
 migrate: migrate-pg migrate-ch  ## Применить все миграции
 
 migrate-pg:    ## Миграции PostgreSQL
-	PGPASSWORD=dota_dev_password psql -h localhost -U dota -d dota_analyst \
+	PGPASSWORD=dota_dev_password psql -h localhost -U dota -d manta \
 		-v ON_ERROR_STOP=1 -f infra/migrations/postgres/001_init.sql
 
 migrate-ch:    ## Миграции ClickHouse (все файлы по порядку)
 	@for f in infra/migrations/clickhouse/*.sql; do \
 		echo ">> $$f"; \
-		docker exec -i dota-ai-analyst-clickhouse-1 clickhouse-client \
+		docker exec -i manta-clickhouse-1 clickhouse-client \
 			--user dota --password dota_dev_password --multiquery \
 			< $$f || exit 1; \
 	done
@@ -91,6 +91,9 @@ report-gen:    ## Запустить Report Generator (Kafka-петля)
 
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
+
+ml-status:     ## Статус обучения: production-версия, разрыв датасета, кандидаты
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.status
 
 stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
 	$(COMPOSE) --profile apps up -d --build

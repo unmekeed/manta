@@ -9,9 +9,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/dota-ai-analyst/api-gateway/internal/events"
-	"github.com/dota-ai-analyst/api-gateway/internal/middleware"
-	"github.com/dota-ai-analyst/api-gateway/internal/storage"
+	"github.com/unmekeed/manta/api-gateway/internal/events"
+	"github.com/unmekeed/manta/api-gateway/internal/middleware"
+	"github.com/unmekeed/manta/api-gateway/internal/storage"
 )
 
 // Handlers объединяет зависимости HTTP-обработчиков шлюза.

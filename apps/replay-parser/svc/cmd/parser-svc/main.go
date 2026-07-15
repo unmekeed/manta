@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/dota-ai-analyst/replay-parser-svc/internal/config"
-	"github.com/dota-ai-analyst/replay-parser-svc/internal/consumer"
-	"github.com/dota-ai-analyst/replay-parser-svc/internal/pipeline"
+	"github.com/unmekeed/manta/replay-parser-svc/internal/config"
+	"github.com/unmekeed/manta/replay-parser-svc/internal/consumer"
+	"github.com/unmekeed/manta/replay-parser-svc/internal/pipeline"
 )
 
 func main() {

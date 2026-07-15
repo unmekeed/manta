@@ -9,8 +9,8 @@
 --    событий воспроизводим повторным прогоном реплеев.
 -- 2. PositionSnapshots получает имя героя.
 
-DROP TABLE IF EXISTS dota_analyst.ReplayEvents;
-CREATE TABLE dota_analyst.ReplayEvents (
+DROP TABLE IF EXISTS manta.ReplayEvents;
+CREATE TABLE manta.ReplayEvents (
     match_id      UInt64,
     tick          UInt32,
     game_time     Int32,
@@ -29,5 +29,5 @@ CREATE TABLE dota_analyst.ReplayEvents (
 PARTITION BY intDiv(match_id, 1000000)
 ORDER BY (match_id, event_type, tick, attacker, target);
 
-ALTER TABLE dota_analyst.PositionSnapshots
+ALTER TABLE manta.PositionSnapshots
     ADD COLUMN IF NOT EXISTS hero String DEFAULT '' AFTER is_alive;

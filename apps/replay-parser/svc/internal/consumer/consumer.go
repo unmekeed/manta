@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/dota-ai-analyst/replay-parser-svc/internal/pipeline"
+	"github.com/unmekeed/manta/replay-parser-svc/internal/pipeline"
 )
 
 const producerName = "replay-parser-svc@0.1.0"

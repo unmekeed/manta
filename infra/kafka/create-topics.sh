@@ -5,8 +5,8 @@
 set -euo pipefail
 
 BROKER="${KAFKA_BROKER:-localhost:9092}"
-KAFKA_TOPICS="${KAFKA_TOPICS_CMD:-docker exec dota-ai-analyst-kafka-1 /opt/kafka/bin/kafka-topics.sh}"
-KAFKA_CONFIGS="${KAFKA_CONFIGS_CMD:-docker exec dota-ai-analyst-kafka-1 /opt/kafka/bin/kafka-configs.sh}"
+KAFKA_TOPICS="${KAFKA_TOPICS_CMD:-docker exec manta-kafka-1 /opt/kafka/bin/kafka-topics.sh}"
+KAFKA_CONFIGS="${KAFKA_CONFIGS_CMD:-docker exec manta-kafka-1 /opt/kafka/bin/kafka-configs.sh}"
 
 # topic:partitions_dev:retention_ms   (prod partitions: см. комментарий)
 TOPICS=(

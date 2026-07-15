@@ -1,4 +1,4 @@
-# Dota AI Analyst — Platform Monorepo
+# Manta — Platform Monorepo
 
 Реализация интеллектуальной платформы анализа матчей Dota 2 по
 [спецификации v2.0.0](docs/specification/ru/README.md).

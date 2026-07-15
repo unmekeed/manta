@@ -15,7 +15,7 @@
 
 ```mermaid
 gantt
-    title Dota AI Analyst Roadmap
+    title Manta Roadmap
     dateFormat  YYYY-MM-DD
     axisFormat  %m/%y
 

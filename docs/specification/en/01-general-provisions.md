@@ -3,7 +3,7 @@
 ## 1.1. Business goals and platform purpose
 
 This specification defines the architectural, functional, technical and mathematical requirements
-for the **Dota AI Analyst** intelligent analytics platform. The project's goal is the aggregation,
+for the **Manta** intelligent analytics platform. The project's goal is the aggregation,
 processing, long-term storage and deep intelligent analysis of Dota 2 game data.
 
 The system is intended to address the following key business tasks:
@@ -129,7 +129,7 @@ flowchart TB
         U3["Administrator"]
     end
 
-    subgraph Platform["Dota AI Analyst (System Boundary)"]
+    subgraph Platform["Manta (System Boundary)"]
         CORE["Analytics platform<br/>12 microservices"]
     end
 

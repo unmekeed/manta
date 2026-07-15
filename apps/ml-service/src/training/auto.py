@@ -46,7 +46,7 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     """Одна итерация; возвращает статус для лога/теста."""
     ds = load_from_clickhouse(
         os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
-        os.getenv("CLICKHOUSE_DB", "dota_analyst"),
+        os.getenv("CLICKHOUSE_DB", "manta"),
         os.getenv("CLICKHOUSE_USER", "dota"),
         os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
     DATASET_MATCHES.set(ds.n_matches)

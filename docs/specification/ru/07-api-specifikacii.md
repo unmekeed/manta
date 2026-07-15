@@ -21,7 +21,7 @@
 ```yaml
 openapi: 3.0.3
 info:
-  title: Dota AI Analyst Core API
+  title: Manta Core API
   version: 2.0.0
 paths:
   /api/v1/matches/upload:
@@ -61,7 +61,7 @@ paths:
           description: Ошибка авторизации токена доступа
 ```
 
-Полный контракт вынесен в отдельный файл: [openapi/dota-ai-analyst.yaml](../openapi/dota-ai-analyst.yaml).
+Полный контракт вынесен в отдельный файл: [openapi/manta.yaml](../openapi/manta.yaml).
 
 ---
 
@@ -173,7 +173,7 @@ paths:
 
 ```json
 {
-  "type": "https://api.dota-ai-analyst.com/errors/invalid-replay",
+  "type": "https://api.manta.gg/errors/invalid-replay",
   "title": "Invalid replay file",
   "status": 400,
   "detail": "Файл не является валидным Source 2 Demo (.dem).",

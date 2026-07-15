@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/dota-ai-analyst/api-gateway/internal/middleware"
+	"github.com/unmekeed/manta/api-gateway/internal/middleware"
 )
 
 // JobStatusConsumer переводит AnalysisJobs по событиям конвейера:

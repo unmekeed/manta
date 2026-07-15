@@ -19,7 +19,7 @@ approach simplifies atomic changes to cross-service contracts and a unified CI.
 ## 13.2. Monorepo root tree
 
 ```
-dota-ai-analyst/
+manta/
 ├── .github/
 │   └── workflows/
 │       ├── ci-cd-pipeline.yml
@@ -45,7 +45,7 @@ dota-ai-analyst/
 │   └── schemas/                # Avro/JSON Kafka schemas
 ├── proto/                      # source .proto (source of truth)
 ├── openapi/
-│   └── dota-ai-analyst.yaml
+│   └── manta.yaml
 ├── deployments/
 │   ├── docker-compose.yml
 │   ├── helm/

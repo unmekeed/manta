@@ -27,7 +27,7 @@ type Config struct {
 func Load() Config {
 	return Config{
 		ListenAddr:      getEnv("GATEWAY_LISTEN_ADDR", ":8080"),
-		PostgresDSN:     getEnv("POSTGRES_DSN", "postgres://dota:dota_dev_password@localhost:5432/dota_analyst"),
+		PostgresDSN:     getEnv("POSTGRES_DSN", "postgres://dota:dota_dev_password@localhost:5432/manta"),
 		ShutdownTimeout: getDuration("GATEWAY_SHUTDOWN_TIMEOUT", 10*time.Second),
 		RateLimitRPS:    getInt("GATEWAY_RATE_LIMIT_RPS", 20),
 		RateLimitBurst:  getInt("GATEWAY_RATE_LIMIT_BURST", 40),

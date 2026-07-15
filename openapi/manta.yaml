@@ -1,19 +1,19 @@
 openapi: 3.0.3
 info:
-  title: Dota AI Analyst Core API
+  title: Manta Core API
   version: 2.0.0
   description: >
     Полный контракт публичного REST API интеллектуальной платформы анализа
-    матчей Dota 2 «Dota AI Analyst». Внутренние вызовы реализованы через gRPC
+    матчей Dota 2 «Manta». Внутренние вызовы реализованы через gRPC
     (см. каталог proto/).
   contact:
-    name: Dota AI Analyst Platform Team
+    name: Manta Platform Team
   license:
     name: Proprietary
 servers:
-  - url: https://api.dota-ai-analyst.com
+  - url: https://api.manta.gg
     description: Production
-  - url: https://staging.api.dota-ai-analyst.com
+  - url: https://staging.api.manta.gg
     description: Staging
 security:
   - bearerAuth: []

@@ -15,7 +15,7 @@
 
 ```mermaid
 gantt
-    title Дорожная карта Dota AI Analyst
+    title Дорожная карта Manta
     dateFormat  YYYY-MM-DD
     axisFormat  %m/%y
 

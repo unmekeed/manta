@@ -71,7 +71,7 @@ def main() -> int:
     curve = model.wp_curve(
         args.match_id,
         os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
-        os.getenv("CLICKHOUSE_DB", "dota_analyst"),
+        os.getenv("CLICKHOUSE_DB", "manta"),
         os.getenv("CLICKHOUSE_USER", "dota"),
         os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
     if not curve:

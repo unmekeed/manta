@@ -49,14 +49,14 @@ class ReportgenConfig:
     clickhouse_url: str = field(
         default_factory=lambda: os.getenv("CLICKHOUSE_URL", "http://localhost:8123"))
     clickhouse_db: str = field(
-        default_factory=lambda: os.getenv("CLICKHOUSE_DB", "dota_analyst"))
+        default_factory=lambda: os.getenv("CLICKHOUSE_DB", "manta"))
     clickhouse_user: str = field(
         default_factory=lambda: os.getenv("CLICKHOUSE_USER", "dota"))
     clickhouse_password: str = field(
         default_factory=lambda: os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
     postgres_dsn: str = field(default_factory=lambda: os.getenv(
         "POSTGRES_DSN",
-        "postgresql://dota:dota_dev_password@localhost:5432/dota_analyst"))
+        "postgresql://dota:dota_dev_password@localhost:5432/manta"))
     ml_grpc_addr: str = field(
         default_factory=lambda: os.getenv("ML_GRPC_ADDR", "localhost:50051"))
 

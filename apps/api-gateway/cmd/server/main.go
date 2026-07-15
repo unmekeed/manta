@@ -11,11 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/dota-ai-analyst/api-gateway/internal/config"
-	"github.com/dota-ai-analyst/api-gateway/internal/events"
-	"github.com/dota-ai-analyst/api-gateway/internal/handlers"
-	"github.com/dota-ai-analyst/api-gateway/internal/router"
-	"github.com/dota-ai-analyst/api-gateway/internal/storage"
+	"github.com/unmekeed/manta/api-gateway/internal/config"
+	"github.com/unmekeed/manta/api-gateway/internal/events"
+	"github.com/unmekeed/manta/api-gateway/internal/handlers"
+	"github.com/unmekeed/manta/api-gateway/internal/router"
+	"github.com/unmekeed/manta/api-gateway/internal/storage"
 )
 
 func main() {

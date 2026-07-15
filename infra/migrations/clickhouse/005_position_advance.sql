@@ -6,5 +6,5 @@
 -- Dire означает контроль карты Radiant'ами и наоборот (прокси Map
 -- Control, Гл. 6.1.3). Источник — PositionSnapshots.
 
-ALTER TABLE dota_analyst.MatchTimelineFeatures
+ALTER TABLE manta.MatchTimelineFeatures
     ADD COLUMN IF NOT EXISTS position_advance Float32 DEFAULT 0 AFTER kills_dire;

@@ -1,10 +1,10 @@
 # SYSTEM SPECIFICATION (TECHNICAL REQUIREMENTS)
 
-## Dota 2 Intelligent Match Analysis Platform — "Dota AI Analyst"
+## Dota 2 Intelligent Match Analysis Platform — "Manta"
 
 | Parameter | Value |
 |---|---|
-| **Project codename** | Dota AI Analyst |
+| **Project codename** | Manta |
 | **Specification version** | 2.0.0-RELEASE |
 | **Status** | Approved |
 | **Authoring language** | Russian (source of truth), English (translation) |
@@ -48,7 +48,7 @@ self-contained and can serve as a working brief for the corresponding team.
 
 **Appendices:**
 
-- [OpenAPI specification](../openapi/dota-ai-analyst.yaml) — full REST API v1 contract.
+- [OpenAPI specification](../openapi/manta.yaml) — full REST API v1 contract.
 - [gRPC Protobuf contracts](../proto/) — internal RPC service definitions.
 
 ---

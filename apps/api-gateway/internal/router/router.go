@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/dota-ai-analyst/api-gateway/internal/handlers"
-	"github.com/dota-ai-analyst/api-gateway/internal/middleware"
+	"github.com/unmekeed/manta/api-gateway/internal/handlers"
+	"github.com/unmekeed/manta/api-gateway/internal/middleware"
 )
 
 // New собирает маршрутизатор шлюза с цепочкой middleware (Гл. 3.2, Гл. 7.3).

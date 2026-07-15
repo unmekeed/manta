@@ -28,7 +28,7 @@ TOPIC = "match.downloaded"
 
 @dataclass
 class CollectorConfig:
-    postgres_dsn: str = "postgresql://dota:dota_dev_password@localhost:5432/dota_analyst"
+    postgres_dsn: str = "postgresql://dota:dota_dev_password@localhost:5432/manta"
     kafka_brokers: str = "localhost:9092"
     s3_endpoint: str = "localhost:9500"
     s3_access_key: str = "dota"

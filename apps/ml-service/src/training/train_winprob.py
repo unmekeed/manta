@@ -180,7 +180,7 @@ def main() -> int:
 
     real = load_from_clickhouse(
         os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
-        os.getenv("CLICKHOUSE_DB", "dota_analyst"),
+        os.getenv("CLICKHOUSE_DB", "manta"),
         os.getenv("CLICKHOUSE_USER", "dota"),
         os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
     logger.info("real matches: %d (%d rows)", real.n_matches, len(real.y))
