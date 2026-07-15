@@ -1,15 +1,20 @@
 """Автономное переобучение Win Probability (Гл. 10.4: continuous training).
 
-Цикл: раз в RETRAIN_INTERVAL_S проверить, сколько матчей прибавилось в
-витринах со времени production-версии (метаданные реестра хранят размер
-датасета каждой тренировки). Если новых матчей >= RETRAIN_MIN_NEW_MATCHES —
-переобучить и загрузить в реестр; продвижение решает гейт по метрике на
-про-эталоне (should_promote), поэтому деградация в сервинг не попадает
-даже при полностью автономной работе.
+Цикл: раз в RETRAIN_INTERVAL_S проверить размер витрины. Если он изменился
+на >= RETRAIN_MIN_NEW_MATCHES с момента последнего переобучения в этом
+процессе (по модулю — устойчиво к сбросу/перестройке витрины) — переобучить
+и загрузить в реестр; продвижение решает гейт по метрике на про-эталоне
+(should_promote), поэтому деградация в сервинг не попадает даже при
+полностью автономной работе. Первый прогон при наличии >= RETRAIN_MIN_TOTAL
+матчей обучает сразу.
+
+Уведомления о старте и каждом переобучении шлёт TelegramNotifier (см.
+training.notify) — включается переменными TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
 
 Запуск: python -m training.auto [--once]
 Env: RETRAIN_INTERVAL_S (21600), RETRAIN_MIN_NEW_MATCHES (20),
-     RETRAIN_MIN_TOTAL_MATCHES (50), CLICKHOUSE_*, S3_* (реестр).
+     RETRAIN_MIN_TOTAL_MATCHES (50), CLICKHOUSE_*, S3_* (реестр),
+     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (опционально).
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ from prometheus_client import Counter, Gauge, start_http_server
 from registry import registry_from_env
 
 from .dataset import load_from_clickhouse
+from .notify import TelegramNotifier
 from .train_winprob import MODEL_NAME, push_with_gate, train
 
 logger = logging.getLogger("auto-train")
@@ -41,9 +47,20 @@ PROD_MATCHES = Gauge("training_production_matches",
 RETRAINS = Counter("retrains_total", "Итоги переобучений",
                    ["outcome"])  # promoted | rejected
 
+_notifier = TelegramNotifier()
+
+# Размер датасета последнего переобучения В ЭТОМ ПРОЦЕССЕ. Триггер считает
+# дельту относительно него, а НЕ относительно production: это устойчиво к
+# сбросу/перестройке витрины (после сброса |n - last| снова растёт и обучение
+# запустится, тогда как разница с production ушла бы в минус и застряла).
+# None — в этом процессе ещё не обучались; первый прогон при n >= min_total
+# запускает обучение сразу.
+_last_trained_n: int | None = None
+
 
 def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     """Одна итерация; возвращает статус для лога/теста."""
+    global _last_trained_n
     ds = load_from_clickhouse(
         os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
         os.getenv("CLICKHOUSE_DB", "manta"),
@@ -56,18 +73,19 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
 
     reg = registry_from_env()
     prod = reg.stage_metadata(MODEL_NAME)
-    trained_on = (prod or {}).get("dataset", {}).get("matches", 0)
-    PROD_MATCHES.set(trained_on)
-    new_matches = ds.n_matches - trained_on
-    if prod is not None and new_matches < min_new:
-        logger.info("новых матчей %d < %d (в датасете %d, production обучена "
-                    "на %d) — пропуск", new_matches, min_new,
-                    ds.n_matches, trained_on)
+    PROD_MATCHES.set((prod or {}).get("dataset", {}).get("matches", 0))
+    if _last_trained_n is not None and abs(ds.n_matches - _last_trained_n) < min_new:
+        logger.info("изменение датасета %+d < %d (сейчас %d, в прошлый раз "
+                    "обучались на %d) — пропуск",
+                    ds.n_matches - _last_trained_n, min_new,
+                    ds.n_matches, _last_trained_n)
         return "not-enough-new"
 
-    logger.info("переобучение: %d матчей (+%d новых)", ds.n_matches,
-                new_matches if prod else ds.n_matches)
+    delta = 0 if _last_trained_n is None else ds.n_matches - _last_trained_n
+    logger.info("переобучение: %d матчей (изменение %+d с прошлого раза)",
+                ds.n_matches, delta)
     artifact = train(ds)
+    _last_trained_n = ds.n_matches
     out_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(artifact, out_path)
     logger.info("metrics: %s", artifact["metrics"])
@@ -81,6 +99,10 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     promoted = (after or {}).get("registry_version") != (
         (before or {}).get("registry_version"))
     RETRAINS.labels("promoted" if promoted else "rejected").inc()
+    from .train_winprob import should_promote
+    _, reason = should_promote(m, (prod or {}).get("metrics"))
+    if _notifier.enabled:
+        _notifier.on_retrain(m, promoted, reason, ds.n_matches)
     return "trained"
 
 
@@ -106,6 +128,8 @@ def main() -> int:
         start_http_server(metrics_port)
     logger.info("auto-train started: interval=%ds min_new=%d min_total=%d "
                 "metrics=:%d", interval, min_new, min_total, metrics_port)
+    if _notifier.enabled:
+        _notifier.send("🚀 <b>Manta</b>: авто-обучение запущено\n" + _notifier.summary())
     while True:
         try:
             check_and_train(min_new, min_total, out)

@@ -173,6 +173,10 @@ services:
       RETRAIN_MIN_NEW_MATCHES: "20"     # переобучать при +20 матчах
       RETRAIN_MIN_TOTAL_MATCHES: "50"
       MODEL_OUT: /tmp/win_probability.pkl
+      # Telegram-уведомления (опционально): значения берутся из окружения/.env
+      # хоста, пусто по умолчанию — тогда уведомления выключены. НЕ коммитить.
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     depends_on:
       clickhouse: { condition: service_healthy }
       minio: { condition: service_healthy }

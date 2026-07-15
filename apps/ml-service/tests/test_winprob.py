@@ -78,42 +78,49 @@ def test_should_promote_gate():
 
 
 def test_autotrain_thresholds(monkeypatch, tmp_path):
-    """check_and_train: пороги «мало данных» / «мало новых» / «обучаем»."""
+    """check_and_train: пороги «мало данных» / «мало новых» / «обучаем»
+    считаются по дельте датасета относительно ПОСЛЕДНЕГО обучения в процессе
+    (а не относительно production) — устойчиво к сбросу витрины."""
     from training import auto
 
-    ds = synth_matches(60)
+    # Триггер держит состояние последнего обучения в модульной переменной.
+    monkeypatch.setattr(auto, "_last_trained_n", None)
+
+    holder = {"n": 60}  # текущий размер витрины, меняем между вызовами
 
     class FakeReg:
-        def __init__(self, trained_on):
-            self.meta = ({"dataset": {"matches": trained_on}}
-                         if trained_on is not None else None)
-
         def stage_metadata(self, name):
-            return self.meta
+            return {"dataset": {"matches": 40}}  # влияет только на метрику
 
     pushed = []
     monkeypatch.setattr(auto, "load_from_clickhouse",
-                        lambda *a, **k: ds)
+                        lambda *a, **k: synth_matches(holder["n"]))
     monkeypatch.setattr(auto, "push_with_gate",
                         lambda art, path, log: pushed.append(art))
     monkeypatch.setattr(auto, "train",
                         lambda d: {"metrics": {"brier_calibrated": 0.1}})
+    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg())
 
     out = tmp_path / "m.pkl"
     # Всего матчей меньше минимума.
-    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(0))
+    holder["n"] = 60
     assert auto.check_and_train(20, 100, out) == "not-enough-data"
-    # Production обучена на 50, новых 10 < 20 — пропуск.
-    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(50))
-    assert auto.check_and_train(20, 50, out) == "not-enough-new"
     assert not pushed
-    # Новых 25 >= 20 — обучаем и пушим.
-    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(35))
+    # Первый прогон при достаточном датасете — обучаем сразу.
     assert auto.check_and_train(20, 50, out) == "trained"
     assert len(pushed) == 1
-    # Production нет вообще — обучаем при достаточном датасете.
-    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(None))
+    # Прибавилось 10 (60→70) < 20 — пропуск.
+    holder["n"] = 70
+    assert auto.check_and_train(20, 50, out) == "not-enough-new"
+    assert len(pushed) == 1
+    # Прибавилось 25 (60→85) >= 20 — обучаем.
+    holder["n"] = 85
     assert auto.check_and_train(20, 50, out) == "trained"
+    assert len(pushed) == 2
+    # Сброс витрины: 85→51, |−34| >= 20 — снова обучаем (не застреваем).
+    holder["n"] = 51
+    assert auto.check_and_train(20, 50, out) == "trained"
+    assert len(pushed) == 3
 
 
 def test_mirror_xy_symmetry():
