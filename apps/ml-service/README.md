@@ -1,0 +1,137 @@
+# ML Service
+
+Модели машинного обучения платформы (Гл. 6.2, Гл. 13.3.3). Спринт 10 —
+бейзлайн **Win Probability** (Гл. 6.2.2): LightGBM (binary) + изотоническая
+калибровка поверх сырого выхода.
+
+## Структура
+
+```
+src/
+├── app.py                  # gRPC-сервер MLService (Predict/PredictStream)
+├── gen/                    # стабы из proto/services.proto (make proto-gen)
+├── training/
+│   ├── dataset.py          # датасет из MatchTimelineFeatures + синтетика
+│   └── train_winprob.py    # обучение + калибровка + артефакт
+└── predictors/
+    └── win_probability.py  # загрузка артефакта, WP-кривая матча (CLI)
+models/                     # артефакты (в git не попадают — реестр/S3)
+tests/                      # юнит-тесты конвейера + in-process gRPC-тесты
+```
+
+## gRPC-инференс (Гл. 3.7)
+
+Контракт — `proto/services.proto` (источник истины, Гл. 13). Реализовано:
+
+- `MLService.Predict(PredictRequest) → PredictResponse` — WP Radiant по
+  `FeatureVector.values` (ключи `training.dataset.FEATURES`; отсутствие
+  ключа — `INVALID_ARGUMENT`, неизвестная модель — `NOT_FOUND`);
+- `MLService.PredictStream(stream FeatureFrame) → stream WinProbability`
+  — потоковая WP-кривая (Гл. 6.2.2: пересчёт каждые N секунд).
+
+```bash
+make proto-gen          # перегенерировать стабы после правки proto
+make ml-serve           # gRPC на :50051 (GRPC_PORT, MODEL_PATH)
+```
+
+## Датасет
+
+Строка — снапшот матча в минуту t из `MatchTimelineFeatures`
+(`game_time`, `networth_diff`, `xp_diff`, `kills_diff`, `kills_total`),
+target — `radiant_win`. Сплит train/valid — **по матчам** (group split):
+снапшоты одного матча скоррелированы, разрез по строкам дал бы утечку.
+
+Пока реальных матчей мало, `--synthetic N` дополняет датасет симуляцией
+(преимущество по золоту → sigmoid-вероятность победы). Доля синтетики
+фиксируется в метаданных артефакта; такая модель — только для smoke.
+
+## Запуск
+
+```bash
+pip install -r requirements.txt
+PYTHONPATH=src python -m training.train_winprob --synthetic 200
+PYTHONPATH=src python -m predictors.win_probability 8892914077   # WP-кривая
+pytest tests/
+```
+
+## Обучающая выборка и эталон
+
+Разделение по `tier` (колонка витрин, прокидывается конвейером из
+Data Collector):
+
+- **train/valid** — высокоранговые паблики (`Premium`, Immortal-скобка
+  ≈ 6000+ MMR; Valve раздаёт реплеи пабликов примерно до этого уровня,
+  выше — только про-игры) текущего патча, источник `opendota-public`;
+- **эталон** — матчи про-команд (`Professional`): в train НЕ попадают
+  никогда, на них считается `brier_benchmark_pro` каждой версии.
+
+Промоушен-гейт сравнивает версии по метрике на про-эталоне
+(фиксированная популяция); валидационные Brier разных датасетов
+несопоставимы — маленькая валидация льстит метрике.
+
+Текущая production-версия (163 реальных матча патча 7.41: 105 Immortal
+train + 58 pro benchmark, синтетики нет):
+
+| Метрика | Значение | Цель спеки |
+|---|---|---|
+| Brier calibrated (valid, 21 паблик) | 0.174 | ≤ 0.18 |
+| **Brier на про-эталоне (58 матчей, 4008 снапшотов)** | **0.148** | — |
+
+Модель, обученная на высокоранговых пабликах, на тир-1 матчи
+переносится даже лучше, чем на паблик-валидацию. WP-кривые без
+насыщения в 0/1 (артефакт малых данных ушёл вместе с синтетикой).
+
+## Артефакт
+
+`models/win_probability.pkl` (joblib): booster (model_to_string),
+калибратор, список фич, метрики, отпечаток датасета, версия. Валидация
+совместимости фич выполняется при загрузке предиктора.
+
+## Реестр моделей (Гл. 10.6)
+
+`src/registry` — версионированные артефакты в MinIO (bucket `models`):
+
+```
+{name}/versions/{semver}-{run_id}/model.pkl + metadata.json
+{name}/stages/production.json          # указатель на версию
+```
+
+- `train_winprob --push` загружает версию и продвигает её в
+  `production` через **гейт по метрике**: promote только если Brier
+  calibrated не хуже текущей production-версии; регресс сохраняется
+  как версия, но в сервинг не попадает (продвигается вручную —
+  `registry.promote`). Откат = promote старой версии.
+- Сервер: `MODEL_PATH=registry://win_probability/production` — артефакт
+  скачивается из реестра при старте (проверено против живого MinIO:
+  вторая, худшая тренировка гейтом не продвинута).
+- `.github/workflows/ml-retrain.yml` — еженедельная проверка конвейера
+  обучения на синтетике + ручной запуск переобучения.
+
+Интерфейс push/promote/resolve повторяет семантику MLflow Registry —
+замена на MLflow при развёртывании Фазы 4 не тронет вызывающий код.
+
+## Автономное переобучение (Гл. 10.4)
+
+`training/auto.py` — цикл continuous training: раз в
+`RETRAIN_INTERVAL_S` (6 ч) сравнивает число матчей в витринах с
+размером датасета production-версии (хранится в метаданных реестра);
+если новых ≥ `RETRAIN_MIN_NEW_MATCHES` (20) — переобучает и пушит.
+Продвижение решает гейт по про-эталону, поэтому автономная деградация
+невозможна: худшая версия сохраняется, но не сервится.
+
+```bash
+make ml-auto-train        # хост-процесс
+make stack-up             # ВЕСЬ конвейер в контейнерах (профиль apps):
+                          # collector → parser → extractor → reports +
+                          # ml-service (gRPC) + ml-autotrain
+```
+
+Живой прогон цикла: авто-обнаружено +90 матчей → переобучение →
+эталонный Brier улучшился 0.1478 → **0.1246** → авто-promote;
+следующая итерация корректно пропущена (+9 < 20 порога).
+Динамика с ростом данных: 163 матча → 0.148; 253 матча → 0.125.
+
+## Дальше
+
+- Онлайн-фичи из Feature Store для стриминг-инференса (Гл. 3.6).
+- SHAP-объяснения (`explain/`) и Laning/Error модели (Гл. 6.2).

@@ -1,0 +1,48 @@
+# Переобучение Win Probability (Гл. 10.4/10.6).
+#
+# Расписание — валидация конвейера обучения на синтетике (CI не имеет
+# доступа к продовому ClickHouse); реальное переобучение запускается
+# workflow_dispatch окружением, у которого есть секреты и сеть до
+# хранилищ (self-hosted runner / оператор). Гейт продвижения по Brier
+# живёт в самом train_winprob (--push), а не в CI.
+name: ml-retrain
+
+on:
+  workflow_dispatch:
+    inputs:
+      synthetic:
+        description: "Синтетических матчей в добавку (0 = только реальные)"
+        default: "0"
+      push_to_registry:
+        description: "Загрузить в реестр моделей (true/false)"
+        default: "false"
+  schedule:
+    - cron: "0 6 * * 1"   # еженедельная проверка конвейера
+
+
+jobs:
+  train-pipeline-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install pytest -r apps/ml-service/requirements.txt
+      - name: Unit tests (датасет, обучение, калибровка, реестр, gRPC)
+        run: pytest apps/ml-service/tests -q
+      - name: Train smoke on synthetic
+        working-directory: apps/ml-service
+        run: |
+          PYTHONPATH=src python -m training.train_winprob \
+            --synthetic 120 --min-matches 100 --out /tmp/wp-ci.pkl
+      - name: Verify artifact loads
+        working-directory: apps/ml-service
+        run: |
+          PYTHONPATH=src python - <<'EOF'
+          import joblib
+          art = joblib.load("/tmp/wp-ci.pkl")
+          assert art["metrics"]["brier_calibrated"] < 0.25, art["metrics"]
+          print("artifact OK:", art["metrics"])
+          EOF

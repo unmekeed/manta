@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dota-ai-analyst.com/schemas/event-envelope/1.0.0",
+  "title": "KafkaEventEnvelope",
+  "description": "Единый конверт события шины данных (Гл. 2.3.3 спецификации). Полезная нагрузка payload специфична для event_type и валидируется собственной схемой.",
+  "type": "object",
+  "required": ["event_id", "event_type", "schema_version", "trace_id", "occurred_at", "producer", "partition_key", "payload"],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Уникальный идентификатор события (идемпотентность консьюмеров, NFR-REL-02)."
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "match.downloaded",
+        "replay.parsed",
+        "features.calculated",
+        "prediction.completed",
+        "report.generated",
+        "meta.updated",
+        "dlq.parser"
+      ]
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semver версии схемы payload; совместимость BACKWARD."
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "Сквозной идентификатор трассировки W3C (NFR-MNT-02)."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "type": "string",
+      "description": "Имя и версия сервиса-продюсера, напр. replay-parser@2.0.0."
+    },
+    "partition_key": {
+      "type": "string",
+      "description": "Ключ партиционирования, как правило match_id:<id>."
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

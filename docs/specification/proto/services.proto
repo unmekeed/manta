@@ -1,0 +1,171 @@
+// gRPC-контракты внутренних сервисов платформы Dota AI Analyst.
+// Транспорт: gRPC поверх HTTP/2 + mTLS. Совместимость схем: BACKWARD.
+syntax = "proto3";
+
+package dota.core.v1;
+
+option go_package = "github.com/dota-ai-analyst/proto/core/v1;corev1";
+
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// ML Service
+// ---------------------------------------------------------------------------
+service MLService {
+  rpc Predict(PredictRequest) returns (PredictResponse);
+  rpc PredictStream(stream FeatureFrame) returns (stream WinProbability);
+}
+
+message PredictRequest {
+  uint64 match_id = 1;
+  FeatureVector features = 2;
+  string model_name = 3;      // win_probability | laning | draft | error_detection
+  string model_version = 4;   // опционально; по умолчанию — production
+}
+
+message PredictResponse {
+  double win_probability_radiant = 1;
+  repeated PlayerScore player_scores = 2;
+  repeated DetectedError errors = 3;
+  string model_version = 4;
+}
+
+message PlayerScore {
+  uint64 player_id = 1;
+  double laning_score = 2;
+  double impact_score = 3;
+}
+
+message DetectedError {
+  uint64 player_id = 1;
+  string type = 2;
+  int32 game_time = 3;
+  double delta_wp = 4;
+  double safety_index = 5;
+  repeated FeatureContribution top_contributions = 6; // SHAP
+}
+
+message FeatureContribution {
+  string feature_name = 1;
+  double contribution = 2;
+}
+
+message FeatureFrame {
+  uint64 match_id = 1;
+  int32 game_time = 2;
+  FeatureVector features = 3;
+}
+
+message WinProbability {
+  int32 game_time = 1;
+  double radiant = 2;
+  double confidence = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Feature Store
+// ---------------------------------------------------------------------------
+service FeatureStore {
+  rpc GetOnlineFeatures(FeatureRequest) returns (FeatureVector);
+  rpc WriteFeatures(FeatureBatch) returns (WriteAck);
+}
+
+message FeatureRequest {
+  repeated string feature_refs = 1; // напр. "laning_fv:lh_5"
+  map<string, string> entity_keys = 2;
+}
+
+message FeatureVector {
+  map<string, double> values = 1;
+  google.protobuf.Timestamp event_timestamp = 2;
+}
+
+message FeatureBatch {
+  repeated FeatureVector vectors = 1;
+  string feature_view = 2;
+}
+
+message WriteAck {
+  uint64 written = 1;
+  bool ok = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Similarity Engine
+// ---------------------------------------------------------------------------
+service SimilarityService {
+  rpc FindSimilar(SimilarityQuery) returns (SimilarityResult);
+  rpc RetrieveContext(ContextQuery) returns (ContextResult); // для RAG
+}
+
+message SimilarityQuery {
+  string entity = 1; // match | player | situation
+  uint64 reference_id = 2;
+  uint32 top_k = 3;
+}
+
+message SimilarityResult {
+  repeated SimilarHit hits = 1;
+}
+
+message SimilarHit {
+  uint64 id = 1;
+  double score = 2;
+}
+
+message ContextQuery {
+  repeated double query_embedding = 1;
+  uint32 top_k = 2;
+}
+
+message ContextResult {
+  repeated string documents = 1;
+  repeated double scores = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Draft Engine
+// ---------------------------------------------------------------------------
+service DraftService {
+  rpc SimulateDraft(DraftState) returns (DraftRecommendation);
+}
+
+message DraftState {
+  string patch = 1;
+  repeated uint32 radiant_picks = 2;
+  repeated uint32 dire_picks = 3;
+  repeated uint32 bans = 4;
+  string next_action = 5;
+}
+
+message DraftRecommendation {
+  double predicted_winrate_radiant = 1;
+  repeated HeroSuggestion suggestions = 2;
+}
+
+message HeroSuggestion {
+  uint32 hero_id = 1;
+  double expected_winrate = 2;
+  string reason = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Recommendation Engine
+// ---------------------------------------------------------------------------
+service RecommendationService {
+  rpc BuildPlan(PlanRequest) returns (TrainingPlan);
+}
+
+message PlanRequest {
+  uint64 player_id = 1;
+}
+
+message TrainingPlan {
+  repeated PlanItem items = 1;
+}
+
+message PlanItem {
+  string skill = 1;
+  uint32 priority = 2;
+  string resource_url = 3;
+}

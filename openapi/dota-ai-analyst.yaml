@@ -1,0 +1,374 @@
+openapi: 3.0.3
+info:
+  title: Dota AI Analyst Core API
+  version: 2.0.0
+  description: >
+    Полный контракт публичного REST API интеллектуальной платформы анализа
+    матчей Dota 2 «Dota AI Analyst». Внутренние вызовы реализованы через gRPC
+    (см. каталог proto/).
+  contact:
+    name: Dota AI Analyst Platform Team
+  license:
+    name: Proprietary
+servers:
+  - url: https://api.dota-ai-analyst.com
+    description: Production
+  - url: https://staging.api.dota-ai-analyst.com
+    description: Staging
+security:
+  - bearerAuth: []
+tags:
+  - name: Matches
+  - name: Players
+  - name: Draft
+  - name: Similarity
+  - name: Meta
+  - name: Jobs
+paths:
+  /api/v1/matches/upload:
+    post:
+      tags: [Matches]
+      summary: Загрузка бинарного файла реплея (.dem) для экспресс-анализа
+      operationId: uploadReplay
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, user_id]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        '202':
+          description: Файл принят и поставлен в очередь на обработку ETL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      summary: Статус задания анализа
+      operationId: getJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Статус задания
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/matches/{matchId}/analysis:
+    get:
+      tags: [Matches]
+      summary: Результат анализа матча
+      operationId: getMatchAnalysis
+      parameters:
+        - name: matchId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Полный результат анализа
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MatchAnalysis' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/matches/{matchId}/timeline:
+    get:
+      tags: [Matches]
+      summary: Тайм-серия Win Probability и net worth
+      operationId: getMatchTimeline
+      parameters:
+        - name: matchId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Тайм-серия
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Timeline' }
+  /api/v1/players/{playerId}/profile:
+    get:
+      tags: [Players]
+      summary: Профиль игрока
+      operationId: getPlayerProfile
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Профиль
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerProfile' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/players/{playerId}/training-plan:
+    get:
+      tags: [Players]
+      summary: Персональный план тренировок (Premium)
+      operationId: getTrainingPlan
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: План тренировок
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrainingPlan' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/draft/simulate:
+    post:
+      tags: [Draft]
+      summary: Симуляция драфта и рекомендация следующего действия
+      operationId: simulateDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftState' }
+      responses:
+        '200':
+          description: Рекомендация драфта
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DraftRecommendation' }
+  /api/v1/similarity/search:
+    post:
+      tags: [Similarity]
+      summary: Поиск похожих матчей/игроков
+      operationId: searchSimilar
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SimilarityQuery' }
+      responses:
+        '200':
+          description: Результаты поиска
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimilarityResult' }
+  /api/v1/meta/heroes:
+    get:
+      tags: [Meta]
+      summary: Мета героев (винрейты, популярность)
+      operationId: getMetaHeroes
+      security: []
+      parameters:
+        - name: patch
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Мета героев
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/HeroMeta' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: Неверный запрос
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Не авторизован
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Недостаточно прав
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Не найдено
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    RateLimited:
+      description: Превышен лимit запросов
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        trace_id: { type: string }
+    JobAccepted:
+      type: object
+      properties:
+        job_id: { type: string, format: uuid }
+        estimated_time_seconds: { type: integer, example: 10 }
+    Job:
+      type: object
+      properties:
+        job_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [queued, downloading, parsing, validating, completed, failed]
+        match_id: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+    Timeline:
+      type: object
+      properties:
+        match_id: { type: integer, format: int64 }
+        points:
+          type: array
+          items:
+            type: object
+            properties:
+              game_time: { type: integer }
+              radiant_wp: { type: number, format: float }
+              net_worth_diff: { type: integer }
+    MatchAnalysis:
+      type: object
+      properties:
+        match_id: { type: integer, format: int64 }
+        status: { type: string }
+        win_probability:
+          type: object
+          properties:
+            final_radiant: { type: number, format: float }
+        players:
+          type: array
+          items: { $ref: '#/components/schemas/PlayerAnalysis' }
+        narrative: { type: string }
+        partial: { type: boolean }
+    PlayerAnalysis:
+      type: object
+      properties:
+        player_id: { type: integer, format: int64 }
+        hero_id: { type: integer }
+        laning_score: { type: number, format: float }
+        impact_score: { type: number, format: float }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/GameError' }
+    GameError:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [positional_failure, suboptimal_rotation, critical_death, economic_error, draft_error]
+        game_time: { type: integer }
+        delta_wp: { type: number, format: float }
+        safety_index: { type: number, format: float }
+        explanation: { type: string }
+    PlayerProfile:
+      type: object
+      properties:
+        player_id: { type: integer, format: int64 }
+        nickname: { type: string }
+        mmr: { type: integer }
+        main_role: { type: string }
+        historical_winrate: { type: number, format: float }
+    TrainingPlan:
+      type: object
+      properties:
+        player_id: { type: integer, format: int64 }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              skill: { type: string }
+              priority: { type: integer }
+              resource_url: { type: string }
+    DraftState:
+      type: object
+      required: [patch, next_action]
+      properties:
+        patch: { type: string }
+        radiant_picks: { type: array, items: { type: integer } }
+        dire_picks: { type: array, items: { type: integer } }
+        bans: { type: array, items: { type: integer } }
+        next_action:
+          type: string
+          enum: [radiant_pick, dire_pick, radiant_ban, dire_ban]
+    DraftRecommendation:
+      type: object
+      properties:
+        predicted_winrate_radiant: { type: number, format: float }
+        recommendations:
+          type: array
+          items:
+            type: object
+            properties:
+              hero_id: { type: integer }
+              expected_winrate: { type: number, format: float }
+              reason: { type: string }
+    SimilarityQuery:
+      type: object
+      properties:
+        entity: { type: string, enum: [match, player, situation] }
+        reference_id: { type: integer, format: int64 }
+        top_k: { type: integer, default: 10 }
+    SimilarityResult:
+      type: object
+      properties:
+        matches:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer, format: int64 }
+              score: { type: number, format: float }
+    HeroMeta:
+      type: object
+      properties:
+        hero_id: { type: integer }
+        patch: { type: string }
+        winrate: { type: number, format: float }
+        pick_rate: { type: number, format: float }
+        ban_rate: { type: number, format: float }

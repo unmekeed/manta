@@ -1,0 +1,196 @@
+# Локальная инфраструктура разработки Dota AI Analyst (Гл. 12.6 спецификации).
+# Облегчённые одноузловые версии всех хранилищ и брокера.
+name: dota-ai-analyst
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dota
+      POSTGRES_PASSWORD: dota_dev_password
+      POSTGRES_DB: dota_analyst
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dota -d dota_analyst"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: dota
+      CLICKHOUSE_PASSWORD: dota_dev_password
+      CLICKHOUSE_DB: dota_analyst
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # native
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "dota", "--password", "dota_dev_password", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:29093,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: dota
+      MINIO_ROOT_PASSWORD: dota_dev_password
+    ports:
+      - "9500:9000"
+      - "9501:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Профиль apps: весь конвейер платформы поверх инфраструктуры.
+  #   docker compose --profile apps up -d --build
+  # Внутрисетевые адреса: kafka:29092, postgres:5432, clickhouse:8123,
+  # minio:9000. Топики Kafka создаются заранее: make topics.
+  # ---------------------------------------------------------------------------
+
+  api-gateway:
+    profiles: ["apps"]
+    build: ../apps/api-gateway
+    ports:
+      - "8080:8080"
+    environment: &app-env
+      KAFKA_BROKERS: kafka:29092
+      POSTGRES_DSN: postgresql://dota:dota_dev_password@postgres:5432/dota_analyst
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: dota
+      S3_SECRET_KEY: dota_dev_password
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: dota_analyst
+      CLICKHOUSE_USER: dota
+      CLICKHOUSE_PASSWORD: dota_dev_password
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  data-collector:
+    profiles: ["apps"]
+    build: ../apps/data-collector
+    environment:
+      <<: *app-env
+      COLLECTOR_SOURCE: opendota-public   # Immortal-паблики текущего патча
+      COLLECTOR_INTERVAL_SECONDS: "60"
+      OPENDOTA_LIMIT: "3"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  parser-svc:
+    profiles: ["apps"]
+    build: ../apps/replay-parser
+    environment:
+      <<: *app-env
+      WORK_DIR: /tmp
+    depends_on:
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    restart: unless-stopped
+
+  feature-extractor:
+    profiles: ["apps"]
+    build: ../apps/feature-extractor
+    environment: *app-env
+    depends_on:
+      kafka: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    restart: unless-stopped
+
+  ml-service:
+    profiles: ["apps"]
+    build: ../apps/ml-service
+    command: ["-m", "app"]
+    environment:
+      <<: *app-env
+      MODEL_PATH: registry://win_probability/production
+    ports:
+      - "50051:50051"
+    depends_on:
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  ml-autotrain:
+    profiles: ["apps"]
+    build: ../apps/ml-service
+    command: ["-m", "training.auto"]
+    environment:
+      <<: *app-env
+      RETRAIN_INTERVAL_S: "21600"       # проверка раз в 6 часов
+      RETRAIN_MIN_NEW_MATCHES: "20"     # переобучать при +20 матчах
+      RETRAIN_MIN_TOTAL_MATCHES: "50"
+      MODEL_OUT: /tmp/win_probability.pkl
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  report-generator:
+    profiles: ["apps"]
+    build: ../apps/report-generator
+    environment:
+      <<: *app-env
+      ML_GRPC_ADDR: ml-service:50051
+    depends_on:
+      kafka: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  ch_data:
+  kafka_data:
+  minio_data:
