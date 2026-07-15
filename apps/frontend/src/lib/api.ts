@@ -23,6 +23,7 @@ export interface PlayerAnalysis {
   player_id: number;
   hero_id: number;
   hero: string;
+  lane: string;
   player_name: string;
   laning_score: number;
   impact_score: number;

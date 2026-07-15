@@ -108,3 +108,44 @@ def test_timeline_includes_position_advance():
     assert all(row["position_advance"] == 0.5 for row in rows)
     rows0 = timeline_features(economy_rows(), [], r)
     assert all(row["position_advance"] == 0.0 for row in rows0)
+
+
+def test_detect_lanes_geometry():
+    from extractor.features import detect_lanes
+
+    def pts(x, y):
+        return [(t, x, y) for t in range(150, 481, 30)]
+
+    lanes = detect_lanes({
+        "kez": pts(-6800, 3000),        # top (d = -9800)
+        "puck": pts(-300, 100),         # mid
+        "nagasiren": pts(5200, -4900),  # bot (d = +10100)
+        "earthspirit": pts(-2000, 1800),  # d = -3800 → между порогами
+        "outofphase": [(1000, 0, 0)],   # нет точек фазы лейнинга
+    }, game_start=0)
+    assert lanes == {"kez": "top", "puck": "mid", "nagasiren": "bot",
+                     "earthspirit": "roam", "outofphase": "roam"}
+
+
+def test_player_features_lane_and_duel():
+    from extractor.features import player_features
+
+    r = Roster.from_players(PLAYERS, "Radiant")
+    # Оба героя — мид: дуэль 1в1, у axe экономика сильнее (см. economy_rows).
+    positions = []
+    for t in range(130, 620, 30):
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Axe",
+                          "x": 100, "y": -100})
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Kez",
+                          "x": -200, "y": 150})
+    rows = player_features(economy_rows(), r, duration_s=1200,
+                           positions=positions)
+    by_pid = {row["player_id"]: row for row in rows}
+    assert by_pid[0]["lane"] == "mid" and by_pid[5]["lane"] == "mid"
+    # nw@10: старт=130 → сэмпл t=730 (active=610): axe 6100, kez 4880.
+    assert by_pid[0]["lane_nw_diff_at_10"] == 1220
+    assert by_pid[5]["lane_nw_diff_at_10"] == -1220
+    # Без позиций — пустая линия и нулевая дуэль.
+    rows0 = player_features(economy_rows(), r, duration_s=1200)
+    assert all(row["lane"] == "" and row["lane_nw_diff_at_10"] == 0
+               for row in rows0)

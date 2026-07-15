@@ -22,6 +22,7 @@ function PlayersTable({ players }: { players: PlayerAnalysis[] }) {
         <tr>
           <th>Игрок</th>
           <th>Герой</th>
+          <th>Линия</th>
           <th>Лейнинг</th>
           <th>Импакт</th>
           <th>Ошибки</th>
@@ -32,6 +33,7 @@ function PlayersTable({ players }: { players: PlayerAnalysis[] }) {
           <tr key={p.player_id} className={p.player_id < 5 ? "team-radiant" : "team-dire"}>
             <td>{p.player_name || `Игрок ${p.player_id}`}</td>
             <td className="hero-name">{heroLabel(p.hero)}</td>
+            <td>{p.lane || "—"}</td>
             <td>
               <ScoreBar value={p.laning_score} />
             </td>

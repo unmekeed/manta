@@ -58,9 +58,17 @@ def build_timeline(match_id: int, rows: list[dict],
     return {"match_id": match_id, "points": points}
 
 
+import math
+
+
 def _laning_score(p: dict) -> float:
-    """Бейзлайн лейнинга: ласт-хиты и денаи к 10-й минуте, нормированные
-    к типичному максимуму кора (~80 LH). Диапазон 0..1."""
+    """Лейнинг = исход дуэли на линии: sigmoid от разницы net worth на
+    10-й минуте против прямых оппонентов по линии (lane_nw_diff_at_10 из
+    витрины; масштаб 1500 золота ≈ выигранная линия). 0.5 — ровная линия.
+    Для roam/неопределённой линии диффа нет — fallback на LH-прокси."""
+    diff = float(p.get("lane_nw_diff_at_10", 0) or 0)
+    if diff != 0:
+        return round(1.0 / (1.0 + math.exp(-diff / 1500.0)), 3)
     raw = (float(p.get("lh_at_10", 0)) + 2.0 * float(p.get("dn_at_10", 0))) / 80.0
     return round(min(max(raw, 0.0), 1.0), 3)
 
@@ -204,6 +212,7 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
             {
                 "player_id": int(p["player_id"]),
                 "hero_id": hero_id(str(p.get("hero", ""))),
+                "lane": p.get("lane", ""),
                 "hero": p.get("hero", ""),
                 "player_name": p.get("player_name", ""),
                 "laning_score": _laning_score(p),

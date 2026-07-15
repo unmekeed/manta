@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FEATURE_VERSION = "1.1.0"  # 1.1.0: + position_advance
+FEATURE_VERSION = "1.2.0"  # 1.2.0: + lane, lane_nw_diff_at_10
 
 WINDOW_S = 60  # шаг таймлайна фич
 
@@ -80,8 +80,14 @@ def _value_at(samples: list[tuple[int, dict]], t: int) -> dict | None:
 
 
 def player_features(economy: list[dict], roster: Roster,
-                    duration_s: float) -> list[dict]:
-    """Строки PlayerMatchFeatures из накопительной экономики."""
+                    duration_s: float,
+                    positions: list[dict] | None = None) -> list[dict]:
+    """Строки PlayerMatchFeatures из накопительной экономики.
+
+    positions — снапшоты PositionSnapshots ({"game_time","hero","x","y"},
+    имя героя — класс сущности) для определения линии и исхода лейнинга;
+    None → lane='' и lane_nw_diff_at_10=0 (старые данные).
+    """
     by_player: dict[int, list[tuple[int, dict]]] = {}
     for row in sorted(economy, key=lambda r: (r["player_id"], r["game_time"])):
         by_player.setdefault(int(row["player_id"]), []).append(
@@ -98,6 +104,34 @@ def player_features(economy: list[dict], roster: Roster,
         team = roster.teams.get(pid, 0)
         if team in team_networth:
             team_networth[team] += int(row["net_worth"])
+
+    # Линии: позиции группируются по нормализованному имени героя и
+    # сопоставляются слотам через ростер.
+    by_hero: dict[str, list[tuple[int, float, float]]] = {}
+    for p in positions or []:
+        by_hero.setdefault(_normalize_hero(str(p.get("hero", ""))), []).append(
+            (int(p["game_time"]), float(p["x"]), float(p["y"])))
+    hero_lanes = detect_lanes(by_hero, start) if by_hero else {}
+    player_lane = {
+        pid: hero_lanes.get(_normalize_hero(hero), "")
+        for pid, hero in roster.heroes.items()
+    }
+
+    nw10 = {pid: int((_value_at(samples, start + 600) or {}).get("net_worth", 0))
+            for pid, samples in by_player.items()}
+
+    def lane_diff(pid: int) -> int:
+        """nw@10 против среднего прямых оппонентов по линии (0 — нет данных)."""
+        lane = player_lane.get(pid, "")
+        if lane in ("", "roam"):
+            return 0
+        my_team = roster.teams.get(pid, 0)
+        opp = [nw10[q] for q in nw10
+               if roster.teams.get(q, 0) not in (0, my_team)
+               and player_lane.get(q, "") == lane]
+        if not opp:
+            return 0
+        return nw10[pid] - round(sum(opp) / len(opp))
 
     out = []
     for pid, samples in sorted(by_player.items()):
@@ -122,6 +156,8 @@ def player_features(economy: list[dict], roster: Roster,
             "dn_at_5": int(at5.get("dn", 0)),
             "lh_at_10": int(at10.get("lh", 0)),
             "dn_at_10": int(at10.get("dn", 0)),
+            "lane": player_lane.get(pid, ""),
+            "lane_nw_diff_at_10": lane_diff(pid),
             "net_worth_at_10": int(at10.get("net_worth", 0)),
             "net_worth_at_20": int(at20.get("net_worth", 0)),
             "net_worth_final": int(final["net_worth"]),
@@ -143,6 +179,42 @@ def _normalize_hero(name: str) -> str:
         if name.startswith(prefix):
             name = name[len(prefix):]
     return name.replace("_", "").lower()
+
+
+# Пороги классификации линии по средней проекции d = x - y за 2-8 минуты:
+# top d <= -4500, bot d >= 4500, mid |d| < 3000, иначе jungle/roam.
+# Калибровано по реальным матчам (лейнеры |d| ~ 6800-10000, миды ~ 350).
+LANE_EDGE_D = 4500.0
+LANE_MID_D = 3000.0
+LANING_FROM_S = 120
+LANING_TO_S = 480
+
+
+def detect_lanes(positions_by_hero: dict[str, list[tuple[int, float, float]]],
+                 game_start: int) -> dict[str, str]:
+    """Линия каждого героя по средним позициям фазы лейнинга.
+
+    positions_by_hero: НОРМАЛИЗОВАННОЕ имя героя (см. _normalize_hero) →
+    [(game_time, x, y)]. Возвращает имя → top|mid|bot|roam.
+    """
+    lo = game_start + LANING_FROM_S
+    hi = game_start + LANING_TO_S
+    lanes: dict[str, str] = {}
+    for hero, pts in positions_by_hero.items():
+        ds = [x - y for t, x, y in pts if lo <= t <= hi]
+        if not ds:
+            lanes[hero] = "roam"
+            continue
+        d = sum(ds) / len(ds)
+        if abs(d) < LANE_MID_D:
+            lanes[hero] = "mid"
+        elif d <= -LANE_EDGE_D:
+            lanes[hero] = "top"
+        elif d >= LANE_EDGE_D:
+            lanes[hero] = "bot"
+        else:
+            lanes[hero] = "roam"
+    return lanes
 
 
 def position_advance_by_window(positions: list[dict], max_t: int) -> dict[int, float]:

@@ -83,13 +83,14 @@ class Extractor:
             " ORDER BY game_time",
             {"match_id": match_id})
         positions = self.ch.select(
-            "SELECT game_time, x, y FROM PositionSnapshots"
+            "SELECT game_time, hero, x, y FROM PositionSnapshots"
             " WHERE match_id = {match_id:UInt64} ORDER BY game_time",
             {"match_id": match_id})
         if not economy:
             raise ValueError(f"no economy rows for match {match_id}")
 
-        prows = player_features(economy, roster, duration_s)
+        prows = player_features(economy, roster, duration_s,
+                                positions=positions)
         trows = timeline_features(economy, kills, roster, positions=positions)
         for r in prows:
             r["match_id"] = match_id
@@ -130,24 +131,27 @@ class Extractor:
             match_ids = [int(r["match_id"]) for r in rows]
         done = 0
         for mid in match_ids:
-            prows = self.ch.select(
-                "SELECT player_id, team, hero, player_name, won, duration_s"
-                "  FROM PlayerMatchFeatures FINAL"
-                " WHERE match_id = {match_id:UInt64} ORDER BY player_id",
-                {"match_id": mid})
-            if not prows:
-                logger.warning("match %s: нет PlayerMatchFeatures, пропуск", mid)
-                continue
-            players = [{"team": int(r["team"]), "name": r["player_name"],
-                        "hero": r["hero"]} for r in prows]
-            won_teams = {int(r["team"]) for r in prows if int(r["won"]) == 1}
-            winner = "Radiant" if won_teams == {2} else "Dire"
-            duration = float(prows[0].get("duration_s", 0))
-            tier_rows = self.ch.select(
-                "SELECT any(tier) AS tier FROM MatchTimelineFeatures"
-                " WHERE match_id = {match_id:UInt64}", {"match_id": mid})
-            tier = str(tier_rows[0]["tier"]) if tier_rows else ""
+            # Любой сбой одного матча (в т.ч. транзиентный 503 ClickHouse
+            # на подготовительных запросах) не прерывает весь бэкфилл.
             try:
+                prows = self.ch.select(
+                    "SELECT player_id, team, hero, player_name, won, duration_s"
+                    "  FROM PlayerMatchFeatures FINAL"
+                    " WHERE match_id = {match_id:UInt64} ORDER BY player_id",
+                    {"match_id": mid})
+                if not prows:
+                    logger.warning("match %s: нет PlayerMatchFeatures, пропуск",
+                                   mid)
+                    continue
+                players = [{"team": int(r["team"]), "name": r["player_name"],
+                            "hero": r["hero"]} for r in prows]
+                won_teams = {int(r["team"]) for r in prows if int(r["won"]) == 1}
+                winner = "Radiant" if won_teams == {2} else "Dire"
+                duration = float(prows[0].get("duration_s", 0))
+                tier_rows = self.ch.select(
+                    "SELECT any(tier) AS tier FROM MatchTimelineFeatures"
+                    " WHERE match_id = {match_id:UInt64}", {"match_id": mid})
+                tier = str(tier_rows[0]["tier"]) if tier_rows else ""
                 self.process_match(mid, players, winner, duration,
                                    trace_id=None, tier=tier)
                 done += 1

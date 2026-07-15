@@ -92,7 +92,7 @@ class ReportGenerator:
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT player_id, team, hero, player_name, won, gpm, xpm,"
-            "       lh_at_10, dn_at_10, gold_share"
+            "       lh_at_10, dn_at_10, lane, lane_nw_diff_at_10, gold_share"
             "  FROM PlayerMatchFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY player_id", match_id)
 
