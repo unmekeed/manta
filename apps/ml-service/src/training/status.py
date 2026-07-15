@@ -56,9 +56,15 @@ def main() -> int:
     if n is not None and prod is not None:
         gap = n - prod["dataset"]["matches"]
         thr = int(os.getenv("RETRAIN_MIN_NEW_MATCHES", "20"))
-        print(f"\nдатасет сейчас     : {n} матчей  (+{gap} к production)")
-        print(f"порог переобучения : +{thr}  →  "
-              f"{'готово к переобучению' if gap >= thr else 'ждём ещё матчей'}")
+        sign = f"+{gap}" if gap >= 0 else str(gap)
+        print(f"\nдатасет сейчас     : {n} матчей  ({sign} к production)")
+        if gap < 0:
+            print("порог переобучения : датасет меньше production "
+                  "(перенаполняется) — переобучение при +"
+                  f"{thr} к текущему")
+        else:
+            print(f"порог переобучения : +{thr}  →  "
+                  f"{'готово к переобучению' if gap >= thr else 'ждём ещё матчей'}")
 
     print(f"\nвсего версий в реестре: {len(versions)}")
     print("последние кандидаты (гейт сравнивает по эталону):")
