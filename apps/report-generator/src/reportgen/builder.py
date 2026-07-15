@@ -9,7 +9,39 @@ partial=true, пока список ошибок пуст и нарратив ш
 """
 from __future__ import annotations
 
-REPORT_VERSION = "0.1.0"
+import json
+from pathlib import Path
+
+REPORT_VERSION = "0.2.0"  # 0.2.0: hero_id из словаря, errors (ΔWP)
+
+# Словарь героев (libs/data/heroes.json, снапшот OpenDota constants):
+# npc_dota_hero_* → числовой id и локализованное имя. Путь зависит от
+# раскладки (монорепо: <root>/libs/data; docker-образ: /app/libs/data),
+# поэтому кандидаты перебираются; HEROES_PATH переопределяет.
+
+
+def _load_heroes() -> dict:
+    import os
+    here = Path(__file__).resolve()
+    candidates = [Path(os.environ["HEROES_PATH"])] if os.getenv("HEROES_PATH") else []
+    candidates += [
+        here.parents[4] / "libs" / "data" / "heroes.json",  # монорепо
+        here.parents[2] / "libs" / "data" / "heroes.json",  # /app в образе
+    ]
+    for c in candidates:
+        try:
+            return json.loads(c.read_text())
+        except (OSError, IndexError):
+            continue
+    return {}
+
+
+HEROES = _load_heroes()
+
+
+def hero_id(npc_name: str) -> int:
+    """Числовой ID героя; 0 — неизвестный (новый герой до обновления словаря)."""
+    return int(HEROES.get(npc_name, {}).get("id", 0))
 
 
 def build_timeline(match_id: int, rows: list[dict],
@@ -171,7 +203,7 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
         "players": [
             {
                 "player_id": int(p["player_id"]),
-                "hero_id": 0,  # числовые ID героев — после словаря героев
+                "hero_id": hero_id(str(p.get("hero", ""))),
                 "hero": p.get("hero", ""),
                 "player_name": p.get("player_name", ""),
                 "laning_score": _laning_score(p),

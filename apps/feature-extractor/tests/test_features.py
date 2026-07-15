@@ -77,3 +77,34 @@ def test_point_in_time_no_leakage():
     p0 = next(row for row in rows if row["player_id"] == 0)
     final_lh = max(row["lh"] for row in econ if row["player_id"] == 0)
     assert p0["lh_at_5"] < p0["lh_at_10"] < final_lh
+
+
+def test_position_advance_windows_and_gaps():
+    from extractor.features import position_advance_by_window
+
+    positions = [
+        # окно 60: двое у базы Radiant (-8000,-8000) и в центре.
+        {"game_time": 30, "x": -8000, "y": -8000},
+        {"game_time": 50, "x": 0, "y": 0},
+        # окно 180 (в 120 снапшотов нет): у базы Dire.
+        {"game_time": 170, "x": 8000, "y": 8000},
+        # за пределами max_t — игнор.
+        {"game_time": 500, "x": 8000, "y": 8000},
+    ]
+    adv = position_advance_by_window(positions, max_t=240)
+    assert adv[60] == -0.5           # среднее(-1, 0)
+    assert adv[120] == -0.5          # пропуск наследует последнее значение
+    assert adv[180] == 1.0
+    assert adv[240] == 1.0
+    # Пустые позиции → все окна 0 (старые матчи без снапшотов).
+    assert position_advance_by_window([], 120) == {60: 0.0, 120: 0.0}
+
+
+def test_timeline_includes_position_advance():
+    r = Roster.from_players(PLAYERS, "Dire")
+    positions = [{"game_time": t, "x": 4000, "y": 4000}
+                 for t in range(10, 1321, 50)]
+    rows = timeline_features(economy_rows(), [], r, positions=positions)
+    assert all(row["position_advance"] == 0.5 for row in rows)
+    rows0 = timeline_features(economy_rows(), [], r)
+    assert all(row["position_advance"] == 0.0 for row in rows0)

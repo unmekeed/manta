@@ -29,7 +29,7 @@ def channel(tmp_path_factory):
 
 def fv(**overrides):
     values = {"game_time": 1800.0, "networth_diff": 0.0, "xp_diff": 0.0,
-              "kills_diff": 0.0, "kills_total": 20.0}
+              "kills_diff": 0.0, "kills_total": 20.0, "position_advance": 0.0}
     values.update(overrides)
     return services_pb2.FeatureVector(values=values)
 
@@ -45,9 +45,11 @@ def test_predict_returns_probability(channel):
 def test_predict_reacts_to_advantage(channel):
     stub = services_pb2_grpc.MLServiceStub(channel)
     ahead = stub.Predict(services_pb2.PredictRequest(
-        features=fv(networth_diff=25000.0, xp_diff=30000.0, kills_diff=10.0)))
+        features=fv(networth_diff=25000.0, xp_diff=30000.0, kills_diff=10.0,
+                    position_advance=0.6)))
     behind = stub.Predict(services_pb2.PredictRequest(
-        features=fv(networth_diff=-25000.0, xp_diff=-30000.0, kills_diff=-10.0)))
+        features=fv(networth_diff=-25000.0, xp_diff=-30000.0, kills_diff=-10.0,
+                    position_advance=-0.6)))
     assert ahead.win_probability_radiant > 0.6
     assert behind.win_probability_radiant < 0.4
 
@@ -74,7 +76,8 @@ def test_predict_stream_curve(channel):
         services_pb2.FeatureFrame(
             match_id=1, game_time=t,
             features=fv(game_time=float(t), networth_diff=float(t) * 15,
-                        xp_diff=float(t) * 18, kills_diff=float(t) / 200))
+                        xp_diff=float(t) * 18, kills_diff=float(t) / 200,
+                        position_advance=min(float(t) / 3000, 1.0)))
         for t in range(60, 1801, 300)
     )
     curve = list(stub.PredictStream(frames))

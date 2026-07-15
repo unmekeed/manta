@@ -36,7 +36,7 @@ def test_prediction_monotone_in_networth():
     cal = art["calibrator"]
     t = 1800.0
     diffs = np.linspace(-30000, 30000, 13)
-    X = np.array([[t, d, d * 1.2, d / 3000, 20] for d in diffs])
+    X = np.array([[t, d, d * 1.2, d / 3000, 20, d / 30000] for d in diffs])
     wp = cal.predict(booster.predict(X))
     # Допускаем плато (изотоника), но не убывание.
     assert all(b - a >= -1e-9 for a, b in zip(wp, wp[1:]))

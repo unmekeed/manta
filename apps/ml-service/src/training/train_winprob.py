@@ -31,7 +31,20 @@ from .dataset import (FEATURES, Dataset, dataset_hash, load_from_clickhouse,
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.1.0"
+MODEL_VERSION = "0.2.0"  # 0.2.0: + position_advance
+
+# Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
+# победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
+# территории; по времени и суммарным убийствам знак не фиксирован.
+# Порядок соответствует dataset.FEATURES.
+MONOTONE = {
+    "game_time": 0,
+    "networth_diff": 1,
+    "xp_diff": 1,
+    "kills_diff": 1,
+    "kills_total": 0,
+    "position_advance": 1,
+}
 
 LGB_PARAMS = {
     "objective": "binary",
@@ -39,6 +52,7 @@ LGB_PARAMS = {
     "num_leaves": 31,
     "learning_rate": 0.05,
     "feature_fraction": 0.9,
+    "monotone_constraints": [MONOTONE[f] for f in FEATURES],
     "verbose": -1,
     "seed": 42,
 }

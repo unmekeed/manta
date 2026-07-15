@@ -23,17 +23,18 @@ import numpy as np
 
 from gen import services_pb2, services_pb2_grpc
 from predictors.win_probability import DEFAULT_MODEL, WinProbability
-from training.dataset import FEATURES
 
 logger = logging.getLogger("ml-service")
 
 
-def _vector_from_features(fv) -> np.ndarray:
-    """FeatureVector → матрица (1, n) в порядке FEATURES."""
-    missing = [f for f in FEATURES if f not in fv.values]
+def _vector_from_features(fv, features: list[str]) -> np.ndarray:
+    """FeatureVector → матрица (1, n) в порядке фич АРТЕФАКТА: сервер
+    обслуживает ту версию модели, что загружена; лишние ключи клиента
+    игнорируются (клиент новее модели — это нормально)."""
+    missing = [f for f in features if f not in fv.values]
     if missing:
         raise KeyError(", ".join(missing))
-    return np.array([[fv.values[f] for f in FEATURES]])
+    return np.array([[fv.values[f] for f in features]])
 
 
 def _confidence(wp: float) -> float:
@@ -51,7 +52,7 @@ class MLService(services_pb2_grpc.MLServiceServicer):
             context.abort(grpc.StatusCode.NOT_FOUND,
                           f"model {request.model_name!r} is not served yet")
         try:
-            X = _vector_from_features(request.features)
+            X = _vector_from_features(request.features, self.model.features)
         except KeyError as missing:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                           f"missing features: {missing}")
@@ -64,7 +65,7 @@ class MLService(services_pb2_grpc.MLServiceServicer):
     def PredictStream(self, request_iterator, context):
         for frame in request_iterator:
             try:
-                X = _vector_from_features(frame.features)
+                X = _vector_from_features(frame.features, self.model.features)
             except KeyError as missing:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                               f"frame t={frame.game_time}: missing features: "

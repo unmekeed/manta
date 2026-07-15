@@ -15,7 +15,7 @@ import lightgbm as lgb
 import numpy as np
 import requests
 
-from training.dataset import FEATURES, row_to_features
+from training.dataset import row_to_features
 
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "win_probability.pkl"
 
@@ -25,10 +25,11 @@ class WinProbability:
         art = joblib.load(artifact_path)
         self.booster = lgb.Booster(model_str=art["booster"])
         self.calibrator = art["calibrator"]
+        # Набор фич — из артефакта: предиктор обязан работать и со
+        # старыми версиями модели (меньше фич), и с новыми.
         self.features = art["features"]
         self.version = art["model_version"]
         self.metrics = art["metrics"]
-        assert self.features == FEATURES, "артефакт обучен на другом наборе фич"
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Калиброванная вероятность победы Radiant для матрицы фич."""
@@ -43,7 +44,7 @@ class WinProbability:
             params={"database": db, "default_format": "JSONEachRow",
                     "param_match_id": str(match_id)},
             data="SELECT game_time, networth_diff, xp_diff,"
-                 "       kills_radiant, kills_dire"
+                 "       kills_radiant, kills_dire, position_advance"
                  "  FROM MatchTimelineFeatures FINAL"
                  " WHERE match_id = {match_id:UInt64} ORDER BY game_time",
             headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
@@ -53,6 +54,8 @@ class WinProbability:
         if not rows:
             return []
         X = np.array([row_to_features(r) for r in rows])
+        # Старый артефакт (меньше фич) — режем вектор до его набора.
+        X = X[:, :len(self.features)]
         wp = self.predict(X)
         return [{"game_time": int(r["game_time"]), "wp_radiant": round(float(p), 4)}
                 for r, p in zip(rows, wp)]

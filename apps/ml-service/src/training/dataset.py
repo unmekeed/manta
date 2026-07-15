@@ -22,6 +22,7 @@ FEATURES = [
     "xp_diff",
     "kills_diff",
     "kills_total",
+    "position_advance",   # территориальное продвижение [-1,1] (миграция 005)
 ]
 
 
@@ -72,6 +73,7 @@ def row_to_features(row: dict) -> list[float]:
         float(row["xp_diff"]),
         kills_r - kills_d,
         kills_r + kills_d,
+        float(row.get("position_advance", 0.0)),
     ]
 
 
@@ -81,7 +83,8 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
         url,
         params={"database": database, "default_format": "JSONEachRow"},
         data="SELECT match_id, game_time, networth_diff, xp_diff,"
-             "       kills_radiant, kills_dire, radiant_win, tier"
+             "       kills_radiant, kills_dire, position_advance,"
+             "       radiant_win, tier"
              "  FROM MatchTimelineFeatures FINAL ORDER BY match_id, game_time",
         headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
         timeout=120,
@@ -125,7 +128,8 @@ def synth_matches(n: int, seed: int = 7) -> Dataset:
                 else:
                     kills_r += int(rng.integers(0, 2))
                     kills_d += int(rng.integers(0, 3))
-            Xs.append([t, nw, xp, kills_r - kills_d, kills_r + kills_d])
+            adv = max(-1.0, min(1.0, nw / 25000.0 + rng.normal(0, 0.15)))
+            Xs.append([t, nw, xp, kills_r - kills_d, kills_r + kills_d, adv])
             gs.append(match_id)
         p_radiant = 1.0 / (1.0 + math.exp(-nw / 8000.0))
         radiant_win = 1 if rng.random() < p_radiant else 0

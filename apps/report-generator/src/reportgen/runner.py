@@ -78,7 +78,7 @@ class ReportGenerator:
     def _timeline_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT game_time, networth_diff, xp_diff, kills_radiant,"
-            "       kills_dire, radiant_win"
+            "       kills_dire, position_advance, radiant_win"
             "  FROM MatchTimelineFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY game_time", match_id)
 
@@ -109,6 +109,7 @@ class ReportGenerator:
                         "xp_diff": float(r["xp_diff"]),
                         "kills_diff": kills_r - kills_d,
                         "kills_total": kills_r + kills_d,
+                        "position_advance": float(r.get("position_advance", 0)),
                     }))
 
         wp = [p.radiant for p in self.ml.PredictStream(frames())]
@@ -122,6 +123,7 @@ class ReportGenerator:
                 "xp_diff": float(last["xp_diff"]),
                 "kills_diff": float(last["kills_radiant"]) - float(last["kills_dire"]),
                 "kills_total": float(last["kills_radiant"]) + float(last["kills_dire"]),
+                "position_advance": float(last.get("position_advance", 0)),
             })))
         return wp, resp.model_version
 

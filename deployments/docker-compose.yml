@@ -180,7 +180,9 @@ services:
 
   report-generator:
     profiles: ["apps"]
-    build: ../apps/report-generator
+    build:
+      context: ..
+      dockerfile: apps/report-generator/Dockerfile
     environment:
       <<: *app-env
       ML_GRPC_ADDR: ml-service:50051

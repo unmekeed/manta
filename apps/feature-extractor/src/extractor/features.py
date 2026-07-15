@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FEATURE_VERSION = "1.0.0"
+FEATURE_VERSION = "1.1.0"  # 1.1.0: + position_advance
 
 WINDOW_S = 60  # шаг таймлайна фич
 
@@ -131,12 +131,61 @@ def player_features(economy: list[dict], roster: Roster,
     return out
 
 
+# Полудиагональ карты: координаты героев лежат в ~[-8700, 8900].
+MAP_HALF_DIAG = 8000.0
+
+
+def _normalize_hero(name: str) -> str:
+    """Ключ сопоставления имён героев между источниками: класс сущности
+    (CDOTA_Unit_Hero_DoomBringer) и npc-имя (npc_dota_hero_doom_bringer)
+    совпадают после отбрасывания префикса, подчёркиваний и регистра."""
+    for prefix in ("CDOTA_Unit_Hero_", "npc_dota_hero_"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return name.replace("_", "").lower()
+
+
+def position_advance_by_window(positions: list[dict], max_t: int) -> dict[int, float]:
+    """Территориальное продвижение по минутным окнам.
+
+    positions — снапшоты {"game_time", "x", "y"} (все герои). Проекция
+    на диагональ «фонтан Radiant (−,−) → фонтан Dire (+,+)»:
+    (x + y) / (2·HALF_DIAG), клип в [-1, 1]. Значение окна — среднее по
+    всем снапшотам окна: бой у базы Dire → +, у базы Radiant → −.
+    Прокси Map Control (Гл. 6.1.3); полноценный контроль по обзору
+    требует вардов — позже.
+    """
+    sums: dict[int, float] = {}
+    counts: dict[int, int] = {}
+    for p in positions:
+        t = int(p["game_time"])
+        if t > max_t:
+            continue
+        w = ((t + WINDOW_S - 1) // WINDOW_S) * WINDOW_S  # окно, куда попадает t
+        proj = (float(p["x"]) + float(p["y"])) / (2.0 * MAP_HALF_DIAG)
+        proj = min(max(proj, -1.0), 1.0)
+        sums[w] = sums.get(w, 0.0) + proj
+        counts[w] = counts.get(w, 0) + 1
+    out = {w: sums[w] / counts[w] for w in sums}
+    # Окна без снапшотов наследуют последнее известное значение.
+    last = 0.0
+    for w in range(WINDOW_S, max_t + 1, WINDOW_S):
+        if w in out:
+            last = out[w]
+        else:
+            out[w] = last
+    return out
+
+
 def timeline_features(economy: list[dict], kills: list[dict],
-                      roster: Roster) -> list[dict]:
+                      roster: Roster,
+                      positions: list[dict] | None = None) -> list[dict]:
     """Строки MatchTimelineFeatures: поминутные командные дифференциалы.
 
     kills — события KILL по героям: {"game_time": int, "target": npc_dota_hero_*}.
     kills_radiant — убийства, СОВЕРШЁННЫЕ Radiant (жертва из Dire), накопительно.
+    positions — снапшоты позиций героев (PositionSnapshots) для
+    position_advance; None/пусто → фича 0 (старые данные).
     """
     by_player: dict[int, list[tuple[int, dict]]] = {}
     max_t = 0
@@ -149,6 +198,8 @@ def timeline_features(economy: list[dict], kills: list[dict],
         (int(k["game_time"]), roster.hero_team.get(k["target"], 0))
         for k in kills
     )
+
+    advance = position_advance_by_window(positions or [], max_t)
 
     out = []
     radiant_win = 1 if roster.winner == 2 else 0
@@ -173,6 +224,7 @@ def timeline_features(economy: list[dict], kills: list[dict],
             "xp_diff": xp[2] - xp[3],
             "kills_radiant": kills_r,
             "kills_dire": kills_d,
+            "position_advance": round(advance.get(t, 0.0), 4),
             "radiant_win": radiant_win,
             "feature_version": FEATURE_VERSION,
         })
