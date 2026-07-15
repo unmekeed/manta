@@ -108,6 +108,8 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 		c.toDLQ(ctx, rec, env.TraceID, err.Error())
 		return
 	}
+	parsed.Inc()
+	parseDuration.Observe(float64(res.DurationMS) / 1000.0)
 
 	out, err := c.envelope("replay.parsed", env.TraceID,
 		"match_id:"+fmt.Sprint(res.MatchID), map[string]any{
@@ -143,6 +145,7 @@ func (c *Consumer) toDLQ(ctx context.Context, rec *kgo.Record, traceID, reason s
 		c.log.Error("marshal dlq event", "err", err)
 		return
 	}
+	dlq.Inc()
 	c.produce(ctx, c.topicDLQ, env)
 }
 

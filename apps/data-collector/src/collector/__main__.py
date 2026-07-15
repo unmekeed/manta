@@ -9,7 +9,14 @@ import logging
 import os
 import time
 
+from prometheus_client import Counter, start_http_server
+
 from .runner import Collector, CollectorConfig
+
+MATCHES_COLLECTED = Counter("matches_collected_total",
+                            "Собранные и опубликованные матчи")
+CYCLES_FAILED = Counter("collector_cycles_failed_total",
+                        "Циклы сбора, упавшие по внешним причинам")
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
@@ -58,6 +65,9 @@ def main() -> None:
         s3_bucket=os.getenv("S3_BUCKET", "replays"),
     )
 
+    metrics_port = int(os.getenv("METRICS_PORT", "9105"))
+    if metrics_port and not args.once:
+        start_http_server(metrics_port)
     collector = Collector(cfg, source)
     log = logging.getLogger("collector")
     try:
@@ -66,10 +76,12 @@ def main() -> None:
             # убивать демона — цикл повторится через interval.
             try:
                 n = collector.collect_once()
+                MATCHES_COLLECTED.inc(n)
                 log.info("cycle done, processed=%s", n)
             except Exception:  # noqa: BLE001
                 if args.once:
                     raise
+                CYCLES_FAILED.inc()
                 log.exception("цикл сбора упал; повтор через %ss", args.interval)
             if args.once:
                 break

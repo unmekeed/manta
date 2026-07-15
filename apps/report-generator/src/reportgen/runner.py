@@ -20,11 +20,20 @@ import grpc
 import psycopg
 import requests
 from confluent_kafka import Consumer, Producer
+from prometheus_client import Counter, Histogram, start_http_server
 
 from .builder import build_analysis, build_timeline
 from .gen import services_pb2, services_pb2_grpc
 
 logger = logging.getLogger("reportgen")
+
+REPORTS_GENERATED = Counter(
+    "reports_generated_total", "Сгенерированные отчёты")
+REPORTS_FAILED = Counter(
+    "reports_failed_total", "Сбои генерации отчётов")
+REPORT_DURATION = Histogram(
+    "report_duration_seconds", "Время генерации отчёта",
+    buckets=(0.25, 0.5, 1, 2.5, 5, 10, 20))
 
 PRODUCER_NAME = "report-generator@0.1.0"
 TOPIC_IN = "features.calculated"
@@ -201,8 +210,12 @@ class ReportGenerator:
             "reconnect.backoff.max.ms": 5000,
         })
         consumer.subscribe([TOPIC_IN])
-        logger.info("report-generator started: brokers=%s topic=%s ml=%s",
-                    self.cfg.kafka_brokers, TOPIC_IN, self.cfg.ml_grpc_addr)
+        metrics_port = int(os.getenv("METRICS_PORT", "9103"))
+        if metrics_port:
+            start_http_server(metrics_port)
+        logger.info("report-generator started: brokers=%s topic=%s ml=%s metrics=:%s",
+                    self.cfg.kafka_brokers, TOPIC_IN, self.cfg.ml_grpc_addr,
+                    metrics_port)
         try:
             while True:
                 msg = consumer.poll(1.0)
@@ -228,6 +241,9 @@ class ReportGenerator:
             logger.error("bad features.calculated event, skipping: %s", exc)
             return
         try:
-            self.generate(match_id, feature_version, env.get("trace_id"))
+            with REPORT_DURATION.time():
+                self.generate(match_id, feature_version, env.get("trace_id"))
+            REPORTS_GENERATED.inc()
         except Exception:  # noqa: BLE001 — не блокируем партицию
+            REPORTS_FAILED.inc()
             logger.exception("report generation failed for match %s", match_id)

@@ -201,8 +201,46 @@ services:
       clickhouse: { condition: service_healthy }
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Профиль monitoring: Prometheus + Grafana (Гл. 11).
+  #   docker compose --profile monitoring up -d
+  # Дашборд «Платформа: конвейер и модель» провижнится автоматически;
+  # Grafana: localhost:3001 (admin/admin).
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # dev: скрейп хост-процессов
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   pg_data:
   ch_data:
   kafka_data:
   minio_data:
+  prom_data:
+  grafana_data:

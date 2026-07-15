@@ -12,9 +12,10 @@ import (
 func New(h *handlers.Handlers, logger *slog.Logger, rps, burst int) http.Handler {
 	mux := http.NewServeMux()
 
-	// Служебные пробы (без rate limit)
+	// Служебные пробы и метрики (без rate limit)
 	mux.HandleFunc("GET /healthz", h.Healthz)
 	mux.HandleFunc("GET /readyz", h.Readyz)
+	mux.Handle("GET /metrics", middleware.MetricsHandler())
 
 	// Публичный API v1
 	api := http.NewServeMux()
@@ -31,5 +32,6 @@ func New(h *handlers.Handlers, logger *slog.Logger, rps, burst int) http.Handler
 	return middleware.Chain(mux,
 		middleware.Trace,
 		middleware.Logging(logger),
+		middleware.Metrics,
 	)
 }

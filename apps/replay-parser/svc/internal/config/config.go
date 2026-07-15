@@ -36,6 +36,9 @@ type Config struct {
 	// (инцидент XMinioStorageFull). Выключено по умолчанию — прод может
 	// хотеть архив.
 	PurgeParsedReplays bool
+
+	// Адрес /metrics (Prometheus); пусто — выключено.
+	MetricsAddr string
 }
 
 func getenv(key, def string) string {
@@ -69,5 +72,6 @@ func FromEnv() Config {
 		WorkDir:      getenv("WORK_DIR", os.TempDir()),
 
 		PurgeParsedReplays: getenv("PURGE_PARSED_REPLAYS", "") == "true",
+		MetricsAddr:        getenv("METRICS_ADDR", ":9101"),
 	}
 }

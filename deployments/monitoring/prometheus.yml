@@ -1,0 +1,18 @@
+# Скрейп-конфиг платформы (Гл. 11.2). Цели — сервисы compose-профиля apps;
+# для хост-запуска (dev) используйте host.docker.internal.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: api-gateway
+    static_configs: [{ targets: ["api-gateway:8080"] }]
+  - job_name: parser-svc
+    static_configs: [{ targets: ["parser-svc:9101"] }]
+  - job_name: feature-extractor
+    static_configs: [{ targets: ["feature-extractor:9102"] }]
+  - job_name: report-generator
+    static_configs: [{ targets: ["report-generator:9103"] }]
+  - job_name: ml-service
+    static_configs: [{ targets: ["ml-service:9104"] }]
+  - job_name: data-collector
+    static_configs: [{ targets: ["data-collector:9105"] }]

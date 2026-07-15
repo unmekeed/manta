@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/dota-ai-analyst/api-gateway/internal/middleware"
 )
 
 // JobStatusConsumer переводит AnalysisJobs по событиям конвейера:
@@ -89,6 +91,7 @@ func (c *JobStatusConsumer) handle(ctx context.Context, rec *kgo.Record) {
 			return
 		}
 		if tag.RowsAffected() > 0 {
+			middleware.JobCompleted("done")
 			c.logger.Info("job_done", "job_id", p.JobID, "match_id", p.MatchID)
 		}
 
@@ -114,6 +117,7 @@ func (c *JobStatusConsumer) handle(ctx context.Context, rec *kgo.Record) {
 			return
 		}
 		if tag.RowsAffected() > 0 {
+			middleware.JobCompleted("failed")
 			c.logger.Warn("job_failed", "job_id", op.JobID, "reason", d.Reason)
 		}
 	}

@@ -16,11 +16,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from confluent_kafka import Consumer, Producer
+from prometheus_client import Counter, Histogram, start_http_server
 
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
 
 logger = logging.getLogger("extractor")
+
+# Метрики (Гл. 11.2.2): фичи — этап ETL-конвейера.
+FEATURES_CALCULATED = Counter(
+    "features_calculated_total", "Матчи с посчитанными фичами")
+FEATURES_FAILED = Counter(
+    "features_failed_total", "Сбои расчёта фич")
+FEATURES_DURATION = Histogram(
+    "features_duration_seconds", "Время расчёта фич матча",
+    buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10))
 
 PRODUCER_NAME = "feature-extractor@0.1.0"
 TOPIC_IN = "replay.parsed"
@@ -175,8 +185,11 @@ class Extractor:
             "reconnect.backoff.max.ms": 5000,
         })
         consumer.subscribe([TOPIC_IN])
-        logger.info("feature-extractor started: brokers=%s topic=%s",
-                    self.cfg.kafka_brokers, TOPIC_IN)
+        metrics_port = int(os.getenv("METRICS_PORT", "9102"))
+        if metrics_port:
+            start_http_server(metrics_port)
+        logger.info("feature-extractor started: brokers=%s topic=%s metrics=:%s",
+                    self.cfg.kafka_brokers, TOPIC_IN, metrics_port)
         try:
             while True:
                 msg = consumer.poll(1.0)
@@ -209,7 +222,10 @@ class Extractor:
             logger.warning("match %s: no roster in event, skipping", match_id)
             return
         try:
-            self.process_match(match_id, players, winner, duration_s,
-                               env.get("trace_id"), tier=tier)
+            with FEATURES_DURATION.time():
+                self.process_match(match_id, players, winner, duration_s,
+                                   env.get("trace_id"), tier=tier)
+            FEATURES_CALCULATED.inc()
         except Exception:  # noqa: BLE001 — логируем и не блокируем партицию
+            FEATURES_FAILED.inc()
             logger.exception("feature extraction failed for match %s", match_id)

@@ -46,8 +46,10 @@ func main() {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	consumer.ServeMetrics(cfg.MetricsAddr)
 	log.Info("parser-svc started", "brokers", cfg.Brokers,
-		"topic_in", cfg.TopicIn, "demoinfo", cfg.DemoinfoPath)
+		"topic_in", cfg.TopicIn, "demoinfo", cfg.DemoinfoPath,
+		"metrics", cfg.MetricsAddr)
 	if err := cons.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Error("consumer loop failed", "err", err)
 		os.Exit(1)

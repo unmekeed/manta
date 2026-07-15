@@ -20,11 +20,18 @@ from concurrent import futures
 
 import grpc
 import numpy as np
+from prometheus_client import Counter, Histogram, start_http_server
 
 from gen import services_pb2, services_pb2_grpc
 from predictors.win_probability import DEFAULT_MODEL, WinProbability
 
 logger = logging.getLogger("ml-service")
+
+PREDICT_LATENCY = Histogram(
+    "ml_predict_latency_seconds", "Латентность Predict/PredictStream (на кадр)",
+    buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1))
+PREDICTIONS = Counter("ml_predictions_total", "Выполненные предсказания",
+                      ["rpc"])
 
 
 def _vector_from_features(fv, features: list[str]) -> np.ndarray:
@@ -56,7 +63,9 @@ class MLService(services_pb2_grpc.MLServiceServicer):
         except KeyError as missing:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                           f"missing features: {missing}")
-        wp = float(self.model.predict(X)[0])
+        with PREDICT_LATENCY.time():
+            wp = float(self.model.predict(X)[0])
+        PREDICTIONS.labels("predict").inc()
         return services_pb2.PredictResponse(
             win_probability_radiant=wp,
             model_version=self.model.version,
@@ -70,7 +79,9 @@ class MLService(services_pb2_grpc.MLServiceServicer):
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                               f"frame t={frame.game_time}: missing features: "
                               f"{missing}")
-            wp = float(self.model.predict(X)[0])
+            with PREDICT_LATENCY.time():
+                wp = float(self.model.predict(X)[0])
+            PREDICTIONS.labels("stream").inc()
             yield services_pb2.WinProbability(
                 game_time=frame.game_time,
                 radiant=wp,
@@ -119,6 +130,9 @@ def main() -> None:
     ap.add_argument("--model", default=os.getenv("MODEL_PATH", str(DEFAULT_MODEL)))
     args = ap.parse_args()
 
+    metrics_port = int(os.getenv("METRICS_PORT", "9104"))
+    if metrics_port:
+        start_http_server(metrics_port)
     server, port = build_server(args.model, args.port)
     server.start()
     logger.info("ml-service gRPC listening on :%d (model %s)", port, args.model)
