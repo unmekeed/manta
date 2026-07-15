@@ -30,6 +30,12 @@ type Config struct {
 	// C++ ядро.
 	DemoinfoPath string // путь к бинарю demoinfo
 	WorkDir      string // каталог для временных .dem и .jsonl
+
+	// Удалять реплей из S3 после успешного разбора: сырые события уже
+	// в ClickHouse, а бесконечное накопление .dem заполняет диск
+	// (инцидент XMinioStorageFull). Выключено по умолчанию — прод может
+	// хотеть архив.
+	PurgeParsedReplays bool
 }
 
 func getenv(key, def string) string {
@@ -61,5 +67,7 @@ func FromEnv() Config {
 
 		DemoinfoPath: getenv("DEMOINFO_PATH", "./build/demoinfo"),
 		WorkDir:      getenv("WORK_DIR", os.TempDir()),
+
+		PurgeParsedReplays: getenv("PURGE_PARSED_REPLAYS", "") == "true",
 	}
 }

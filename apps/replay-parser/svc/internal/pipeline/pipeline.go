@@ -54,11 +54,13 @@ type Pipeline struct {
 	ch       *CHClient
 	demoinfo string
 	workDir  string
+	purge    bool
 	log      *slog.Logger
 }
 
 func New(s3Endpoint, s3Access, s3Secret string, s3SSL bool,
-	ch *CHClient, demoinfoPath, workDir string, log *slog.Logger) (*Pipeline, error) {
+	ch *CHClient, demoinfoPath, workDir string, purge bool,
+	log *slog.Logger) (*Pipeline, error) {
 	s3, err := minio.New(s3Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(s3Access, s3Secret, ""),
 		Secure: s3SSL,
@@ -67,7 +69,7 @@ func New(s3Endpoint, s3Access, s3Secret string, s3SSL bool,
 		return nil, fmt.Errorf("minio client: %w", err)
 	}
 	return &Pipeline{s3: s3, ch: ch, demoinfo: demoinfoPath,
-		workDir: workDir, log: log}, nil
+		workDir: workDir, purge: purge, log: log}, nil
 }
 
 // Run скачивает реплей по s3://bucket/key, прогоняет через C++ ядро и
@@ -111,6 +113,19 @@ func (p *Pipeline) Run(ctx context.Context, replayURL string) (Result, error) {
 	ecoRows, err := p.loadEconomy(ctx, sum.MatchID, ecoPath)
 	if err != nil {
 		return Result{}, err
+	}
+
+	// Успешный разбор: события/фичи в ClickHouse, сам .dem больше не
+	// нужен (опционально, PURGE_PARSED_REPLAYS). Ошибка удаления не
+	// фатальна — реплей лишь займёт место до следующей чистки.
+	if p.purge {
+		if err := p.s3.RemoveObject(ctx, bucket, key,
+			minio.RemoveObjectOptions{}); err != nil {
+			p.log.Warn("replay purge failed", "bucket", bucket, "key", key,
+				"err", err)
+		} else {
+			p.log.Info("replay purged", "bucket", bucket, "key", key)
+		}
 	}
 
 	return Result{

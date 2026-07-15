@@ -134,6 +134,7 @@ services:
     environment:
       <<: *app-env
       WORK_DIR: /tmp
+      PURGE_PARSED_REPLAYS: "true"   # события в ClickHouse, .dem не копим
     depends_on:
       kafka: { condition: service_healthy }
       minio: { condition: service_healthy }

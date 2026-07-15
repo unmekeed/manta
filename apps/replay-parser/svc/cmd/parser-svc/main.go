@@ -27,7 +27,8 @@ func main() {
 	ch := pipeline.NewCHClient(cfg.ClickHouseURL, cfg.ClickHouseDB,
 		cfg.ClickHouseUser, cfg.ClickHousePassword)
 	pipe, err := pipeline.New(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey,
-		cfg.S3UseSSL, ch, cfg.DemoinfoPath, cfg.WorkDir, log)
+		cfg.S3UseSSL, ch, cfg.DemoinfoPath, cfg.WorkDir,
+		cfg.PurgeParsedReplays, log)
 	if err != nil {
 		log.Error("pipeline init failed", "err", err)
 		os.Exit(1)

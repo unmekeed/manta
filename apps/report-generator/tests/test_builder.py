@@ -76,3 +76,50 @@ def test_narrative_mentions_winner_turning_and_top_farm():
 def test_narrative_without_turning_point():
     n = build_narrative("Radiant", PLAYERS, None)
     assert "Radiant" in n and "Переломный" not in n
+
+
+def test_detect_errors_attributes_team_drop_to_deaths():
+    from reportgen.builder import detect_errors
+
+    pts = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+           for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                        (300, 0.3)]]
+    hero_player = {"npc_dota_hero_axe": 0, "npc_dota_hero_puck": 2,
+                   "npc_dota_hero_kez": 5}
+    player_team = {0: 2, 2: 2, 5: 3}
+    kills = [
+        {"game_time": 200, "target": "npc_dota_hero_axe"},   # Radiant умер
+        {"game_time": 230, "target": "npc_dota_hero_puck"},  # Radiant умер
+        {"game_time": 235, "target": "npc_dota_hero_kez"},   # Dire (не в счёт)
+        {"game_time": 500, "target": "npc_dota_hero_axe"},   # вне окна падения
+    ]
+    errors = detect_errors(pts, kills, hero_player, player_team)
+    # Падение 0.2 в окне 180-240 делится между двумя смертями Radiant.
+    assert set(errors) == {0, 2}
+    e0 = errors[0][0]
+    assert e0["type"] == "critical_death" and e0["game_time"] == 200
+    assert e0["delta_wp"] == -0.1
+    assert "axe" in e0["explanation"]
+    assert 5 not in errors            # смерть Dire в окне падения Radiant
+    assert len(errors[0]) == 1        # смерть на 500с не в критическом окне
+
+
+def test_detect_errors_quiet_game():
+    from reportgen.builder import detect_errors
+
+    pts = [{"game_time": t, "radiant_wp": 0.5, "net_worth_diff": 0}
+           for t in range(60, 601, 60)]
+    kills = [{"game_time": 300, "target": "npc_dota_hero_axe"}]
+    assert detect_errors(pts, kills, {"npc_dota_hero_axe": 0}, {0: 2}) == {}
+
+
+def test_analysis_includes_errors():
+    t = build_timeline(1, ROWS, WP)  # падение 0.5→0.2 в окне 120-180
+    players = [dict(p, team=(2 if p["player_id"] == 0 else 3))
+               for p in PLAYERS]
+    kills = [{"game_time": 150, "target": "npc_dota_hero_axe"}]
+    a = build_analysis(1, "Dire", players, t, "v", kills=kills)
+    p0 = next(p for p in a["players"] if p["player_id"] == 0)
+    assert len(p0["errors"]) == 1
+    assert p0["errors"][0]["type"] == "critical_death"
+    assert p0["errors"][0]["delta_wp"] < 0
