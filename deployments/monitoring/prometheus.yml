@@ -16,3 +16,5 @@ scrape_configs:
     static_configs: [{ targets: ["ml-service:9104"] }]
   - job_name: data-collector
     static_configs: [{ targets: ["data-collector:9105"] }]
+  - job_name: ml-autotrain
+    static_configs: [{ targets: ["ml-autotrain:9106"] }]

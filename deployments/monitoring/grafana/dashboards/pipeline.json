@@ -175,6 +175,90 @@
      "refId": "A"
     }
    ]
+  },
+  {
+   "id": 7,
+   "title": "Обучение: Brier (эталон pro и валидация)",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 24
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "wp_brier_benchmark_pro or wp_brier_valid",
+     "legendFormat": "{{__name__}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "title": "Обучение: датасет vs production",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 24
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "training_dataset_matches or training_production_matches",
+     "legendFormat": "{{__name__}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "title": "Переобучения: promoted/rejected (всего)",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 32
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "retrains_total",
+     "legendFormat": "{{outcome}}",
+     "refId": "A"
+    }
+   ]
   }
  ],
  "schemaVersion": 39

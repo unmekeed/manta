@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import joblib
+from prometheus_client import Counter, Gauge, start_http_server
 
 from registry import registry_from_env
 
@@ -27,6 +28,18 @@ from .dataset import load_from_clickhouse
 from .train_winprob import MODEL_NAME, push_with_gate, train
 
 logger = logging.getLogger("auto-train")
+
+# Метрики обучения (Гл. 11.2.2: wp_brier_score_rolling и контур CT).
+BRIER_BENCHMARK = Gauge("wp_brier_benchmark_pro",
+                        "Brier последней тренировки на про-эталоне")
+BRIER_VALID = Gauge("wp_brier_valid",
+                    "Brier последней тренировки на валидации")
+DATASET_MATCHES = Gauge("training_dataset_matches",
+                        "Матчей в витрине на момент проверки")
+PROD_MATCHES = Gauge("training_production_matches",
+                     "Матчей в датасете production-версии")
+RETRAINS = Counter("retrains_total", "Итоги переобучений",
+                   ["outcome"])  # promoted | rejected
 
 
 def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
@@ -36,6 +49,7 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
         os.getenv("CLICKHOUSE_DB", "dota_analyst"),
         os.getenv("CLICKHOUSE_USER", "dota"),
         os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
+    DATASET_MATCHES.set(ds.n_matches)
     if ds.n_matches < min_total:
         logger.info("матчей %d < %d — рано обучать", ds.n_matches, min_total)
         return "not-enough-data"
@@ -43,6 +57,7 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     reg = registry_from_env()
     prod = reg.stage_metadata(MODEL_NAME)
     trained_on = (prod or {}).get("dataset", {}).get("matches", 0)
+    PROD_MATCHES.set(trained_on)
     new_matches = ds.n_matches - trained_on
     if prod is not None and new_matches < min_new:
         logger.info("новых матчей %d < %d (в датасете %d, production обучена "
@@ -56,7 +71,16 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(artifact, out_path)
     logger.info("metrics: %s", artifact["metrics"])
+    m = artifact["metrics"]
+    BRIER_VALID.set(m.get("brier_calibrated", 0))
+    if "brier_benchmark_pro" in m:
+        BRIER_BENCHMARK.set(m["brier_benchmark_pro"])
+    before = reg.stage_metadata(MODEL_NAME)
     push_with_gate(artifact, out_path, logger)
+    after = reg.stage_metadata(MODEL_NAME)
+    promoted = (after or {}).get("registry_version") != (
+        (before or {}).get("registry_version"))
+    RETRAINS.labels("promoted" if promoted else "rejected").inc()
     return "trained"
 
 
@@ -77,8 +101,11 @@ def main() -> int:
                          str(Path(__file__).resolve().parents[2]
                              / "models" / "win_probability.pkl")))
 
-    logger.info("auto-train started: interval=%ds min_new=%d min_total=%d",
-                interval, min_new, min_total)
+    metrics_port = int(os.getenv("METRICS_PORT", "9106"))
+    if metrics_port and not args.once:
+        start_http_server(metrics_port)
+    logger.info("auto-train started: interval=%ds min_new=%d min_total=%d "
+                "metrics=:%d", interval, min_new, min_total, metrics_port)
     while True:
         try:
             check_and_train(min_new, min_total, out)
