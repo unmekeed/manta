@@ -104,6 +104,9 @@ export default function MatchPage() {
               <span className="dwp">{(e.delta_wp * 100).toFixed(0)}%</span>
               <span className="who">{e.player}</span>
               {e.explanation}
+              {e.safety_index >= 0.6 && (
+                <span className="si-badge">риск {e.safety_index.toFixed(2)}</span>
+              )}
             </div>
           ))}
         </div>

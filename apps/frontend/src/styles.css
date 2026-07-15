@@ -67,3 +67,8 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
 
 .meta { color: var(--muted); font-size: 12px; margin-top: 18px; }
 .loading, .error-msg { color: var(--muted); padding: 40px 0; text-align: center; }
+
+.si-badge {
+  margin-left: 8px; padding: 1px 8px; border-radius: 5px; font-size: 12px;
+  background: rgba(217, 164, 65, 0.15); color: var(--accent); font-weight: 600;
+}

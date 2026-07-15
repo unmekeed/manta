@@ -89,6 +89,11 @@ class ReportGenerator:
             "   AND target LIKE 'npc_dota_hero_%'"
             " ORDER BY game_time", match_id)
 
+    def _position_rows(self, match_id: int) -> list[dict]:
+        return self._ch_select(
+            "SELECT game_time, hero, x, y FROM PositionSnapshots"
+            " WHERE match_id = {match_id:UInt64} ORDER BY game_time", match_id)
+
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT player_id, team, hero, player_name, won, gpm, xpm,"
@@ -140,8 +145,10 @@ class ReportGenerator:
         wp, model_version = self._wp_curve(match_id, rows)
         timeline = build_timeline(match_id, rows, wp)
         kills = self._kill_rows(match_id)
+        positions = self._position_rows(match_id)
         analysis = build_analysis(match_id, winner, players, timeline,
-                                  model_version, kills=kills)
+                                  model_version, kills=kills,
+                                  positions=positions)
 
         self.db.execute(
             """INSERT INTO MatchReports

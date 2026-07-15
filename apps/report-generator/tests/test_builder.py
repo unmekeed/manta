@@ -164,3 +164,65 @@ def test_impact_in_analysis_orders_players():
     by_pid = {p["player_id"]: p for p in a["players"]}
     assert by_pid[5]["impact_score"] > 0.5 > by_pid[0]["impact_score"]
     assert by_pid[5]["delta_wp_sum"] == -by_pid[0]["delta_wp_sum"]
+
+
+def test_safety_index_geometry():
+    from reportgen.builder import index_positions, safety_index
+
+    def track(hero, x, y):
+        return [{"game_time": t, "hero": hero, "x": x, "y": y}
+                for t in (100, 110, 120)]
+
+    hero_team = {"axe": 2, "kez": 3, "slardar": 3}
+    # Аксе глубоко на половине Dire, два врага вплотную → высокий риск.
+    deep = index_positions(
+        track("CDOTA_Unit_Hero_Axe", 6000, 6000)
+        + track("CDOTA_Unit_Hero_Kez", 6200, 6100)
+        + track("CDOTA_Unit_Hero_Slardar", 5800, 6200))
+    si_deep = safety_index("npc_dota_hero_axe", 2, 120, deep, hero_team)
+    # Аксе у своей базы, враги на другом конце карты → низкий риск.
+    safe = index_positions(
+        track("CDOTA_Unit_Hero_Axe", -7000, -6800)
+        + track("CDOTA_Unit_Hero_Kez", 7000, 6800)
+        + track("CDOTA_Unit_Hero_Slardar", 6500, 7000))
+    si_safe = safety_index("npc_dota_hero_axe", 2, 120, safe, hero_team)
+    assert si_deep > 0.75
+    assert si_safe < 0.05
+    assert si_deep > si_safe
+
+
+def test_safety_index_ignores_stale_and_unknown():
+    from reportgen.builder import index_positions, safety_index
+
+    pts = index_positions(
+        [{"game_time": 10, "hero": "CDOTA_Unit_Hero_Axe", "x": 0, "y": 0}])
+    # Снапшот старше SI_STALE_S → позиции жертвы нет → SI 0.
+    assert safety_index("npc_dota_hero_axe", 2, 500, pts, {"axe": 2}) == 0.0
+    # Нет данных о герое вообще.
+    assert safety_index("npc_dota_hero_kez", 3, 10, pts, {"axe": 2}) == 0.0
+
+
+def test_errors_carry_safety_index():
+    from reportgen.builder import index_positions, wp_attribution
+
+    pts_wp = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+              for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                           (300, 0.3)]]
+    positions = []
+    for t in range(180, 241, 10):
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Axe",
+                          "x": 6000, "y": 6000})
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Kez",
+                          "x": 6100, "y": 6050})
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Slardar",
+                          "x": 5900, "y": 6100})
+    kills = [{"game_time": 200, "target": "npc_dota_hero_axe",
+              "attacker": "npc_dota_hero_kez"}]
+    errors, _ = wp_attribution(
+        pts_wp, kills,
+        {"npc_dota_hero_axe": 0, "npc_dota_hero_kez": 5,
+         "npc_dota_hero_slardar": 6},
+        {0: 2, 5: 3, 6: 3}, positions_by_hero=index_positions(positions))
+    e = errors[0][0]
+    assert e["safety_index"] >= 0.6  # два врага вплотную, глубокий заход
+    assert "риск" in e["explanation"].lower()
