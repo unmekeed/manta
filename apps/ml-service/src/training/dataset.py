@@ -25,8 +25,27 @@ FEATURES = [
     "position_advance",   # территориальное продвижение [-1,1] (миграция 005)
 ]
 
+# Фичи, меняющие знак при зеркалировании сторон Radiant↔Dire (все
+# разностные и территориальные). game_time и kills_total симметричны.
+MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance"}
+
 
 PRO_TIER = "Professional"
+
+
+def mirror_xy(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Зеркальная аугментация (Гл. 6.2.2): к каждому снапшоту добавляется
+    его отражение Radiant↔Dire — разностные фичи меняют знак, метка
+    инвертируется. Win Probability обязана быть симметрична по сторонам:
+    WP(state) = 1 - WP(mirror(state)). Аугментация обнуляет приор стороны
+    (в высокоранговых пабликах Radiant выигрывает ~58% — сдвиг относительно
+    про-матчей ~45%, из-за которого модель на пабликах смещена).
+    """
+    Xm = X.copy()
+    for i, f in enumerate(FEATURES):
+        if f in MIRROR_NEGATE:
+            Xm[:, i] = -Xm[:, i]
+    return np.vstack([X, Xm]), np.concatenate([y, 1 - y])
 
 
 @dataclass

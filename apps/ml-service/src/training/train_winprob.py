@@ -27,11 +27,11 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss, log_loss
 
 from .dataset import (FEATURES, Dataset, dataset_hash, load_from_clickhouse,
-                      merge, synth_matches)
+                      merge, mirror_xy, synth_matches)
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.2.0"  # 0.2.0: + position_advance
+MODEL_VERSION = "0.3.0"  # 0.3.0: зеркальная аугментация (side-agnostic)
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -58,9 +58,17 @@ LGB_PARAMS = {
 }
 
 
-def train(ds: Dataset, num_rounds: int = 300) -> dict:
-    """Обучить модель + калибратор; вернуть артефакт со всеми метаданными."""
+def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
+    """Обучить модель + калибратор; вернуть артефакт со всеми метаданными.
+
+    mirror=True (по умолчанию): train-часть зеркалируется по сторонам
+    (dataset.mirror_xy) — модель становится side-agnostic, приор стороны
+    обнуляется. Валидация и эталон НЕ зеркалируются (оценка в исходной
+    ориентации).
+    """
     (X_tr, y_tr), (X_va, y_va) = ds.split_by_match()
+    if mirror:
+        X_tr, y_tr = mirror_xy(X_tr, y_tr)
     booster = lgb.train(
         LGB_PARAMS,
         lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURES),
@@ -95,7 +103,7 @@ def train(ds: Dataset, num_rounds: int = 300) -> dict:
         metrics["benchmark_rows"] = int(len(y_bm))
     return {
         "model_version": MODEL_VERSION,
-        "algo": "lightgbm+isotonic",
+        "algo": "lightgbm+isotonic+mirror",
         "features": FEATURES,
         "booster": booster.model_to_string(),
         "calibrator": calibrator,

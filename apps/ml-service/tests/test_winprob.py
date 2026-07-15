@@ -114,3 +114,31 @@ def test_autotrain_thresholds(monkeypatch, tmp_path):
     # Production нет вообще — обучаем при достаточном датасете.
     monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(None))
     assert auto.check_and_train(20, 50, out) == "trained"
+
+
+def test_mirror_xy_symmetry():
+    from training.dataset import FEATURES, mirror_xy
+    import numpy as np
+
+    # одна строка: Radiant ведёт (+nw, +xp, +kills_diff, +pos), метка 1
+    X = np.array([[1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5]])
+    y = np.array([1])
+    Xm, ym = mirror_xy(X, y)
+    assert len(ym) == 2
+    # зеркало: разностные фичи меняют знак, kills_total и time — нет, метка 0
+    neg = {"networth_diff", "xp_diff", "kills_diff", "position_advance"}
+    for i, f in enumerate(FEATURES):
+        if f in neg:
+            assert Xm[1, i] == -X[0, i]
+        else:
+            assert Xm[1, i] == X[0, i]
+    assert ym[1] == 0
+    # приор становится ровно сбалансированным
+    assert ym.mean() == 0.5
+
+
+def test_train_mirror_flag():
+    ds = synth_matches(80)
+    art = train(ds, num_rounds=60, mirror=True)
+    assert "mirror" in art["algo"]
+    assert art["metrics"]["brier_calibrated"] < 0.25

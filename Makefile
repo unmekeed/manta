@@ -95,6 +95,9 @@ ml-auto-train: ## Автономное переобучение (порог но
 ml-status:     ## Статус обучения: production-версия, разрыв датасета, кандидаты
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.status
 
+ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.audit
+
 stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
 	$(COMPOSE) --profile apps up -d --build
 
