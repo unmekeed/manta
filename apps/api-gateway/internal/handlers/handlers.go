@@ -195,3 +195,42 @@ func (h *Handlers) GetMatchTimeline(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) GetMatchAnalysis(w http.ResponseWriter, r *http.Request) {
 	h.reportColumn(w, r, "analysis")
 }
+
+// ListMatches — GET /api/v1/matches: последние матчи с готовыми отчётами
+// (для главной страницы фронтенда). Лёгкая проекция MatchReports.
+func (h *Handlers) ListMatches(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	rows, err := h.DB.Query(ctx, `
+		SELECT match_id,
+		       analysis->'win_probability'->>'final_radiant',
+		       analysis->>'narrative',
+		       COALESCE(analysis->>'report_version', ''),
+		       generated_at
+		  FROM MatchReports ORDER BY generated_at DESC LIMIT 50`)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to list matches", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type item struct {
+		MatchID       int64     `json:"match_id"`
+		FinalRadiant  string    `json:"final_radiant_wp"`
+		Narrative     string    `json:"narrative"`
+		ReportVersion string    `json:"report_version"`
+		GeneratedAt   time.Time `json:"generated_at"`
+	}
+	items := []item{}
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.MatchID, &it.FinalRadiant, &it.Narrative,
+			&it.ReportVersion, &it.GeneratedAt); err != nil {
+			continue
+		}
+		items = append(items, it)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"matches": items})
+}

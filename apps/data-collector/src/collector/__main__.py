@@ -59,10 +59,18 @@ def main() -> None:
     )
 
     collector = Collector(cfg, source)
+    log = logging.getLogger("collector")
     try:
         while True:
-            n = collector.collect_once()
-            logging.getLogger("collector").info("cycle done, processed=%s", n)
+            # Временный сбой внешнего API (5xx OpenDota, сеть) не должен
+            # убивать демона — цикл повторится через interval.
+            try:
+                n = collector.collect_once()
+                log.info("cycle done, processed=%s", n)
+            except Exception:  # noqa: BLE001
+                if args.once:
+                    raise
+                log.exception("цикл сбора упал; повтор через %ss", args.interval)
             if args.once:
                 break
             time.sleep(args.interval)

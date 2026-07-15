@@ -178,6 +178,15 @@ services:
       minio: { condition: service_healthy }
     restart: unless-stopped
 
+  frontend:
+    profiles: ["apps"]
+    build: ../apps/frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+
   report-generator:
     profiles: ["apps"]
     build:

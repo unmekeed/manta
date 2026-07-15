@@ -20,6 +20,7 @@ func New(h *handlers.Handlers, logger *slog.Logger, rps, burst int) http.Handler
 	api := http.NewServeMux()
 	api.HandleFunc("POST /api/v1/matches/upload", h.UploadReplay)
 	api.HandleFunc("GET /api/v1/jobs/{jobId}", h.GetJob)
+	api.HandleFunc("GET /api/v1/matches", h.ListMatches)
 	api.HandleFunc("GET /api/v1/matches/{matchId}/timeline", h.GetMatchTimeline)
 	api.HandleFunc("GET /api/v1/matches/{matchId}/analysis", h.GetMatchAnalysis)
 

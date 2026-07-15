@@ -1,0 +1,69 @@
+/* Тёмная тема в духе клиента Dota; без UI-кита — компоненты простые. */
+:root {
+  --bg: #0e1114;
+  --panel: #171c21;
+  --panel2: #1e252c;
+  --text: #d8dee5;
+  --muted: #8a97a3;
+  --radiant: #6bd06b;
+  --dire: #e05a5a;
+  --accent: #d9a441;
+  --border: #2a333c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+.layout { max-width: 1080px; margin: 0 auto; padding: 0 20px 60px; }
+
+.topbar {
+  display: flex; align-items: baseline; gap: 16px;
+  padding: 18px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px;
+}
+.brand { font-size: 22px; font-weight: 700; color: var(--text); text-decoration: none; }
+.brand span { color: var(--accent); }
+.tagline { color: var(--muted); font-size: 13px; }
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 24px 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+
+.match-list { display: flex; flex-direction: column; gap: 10px; }
+.match-card {
+  display: block; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 18px; color: var(--text); text-decoration: none;
+  transition: border-color 0.15s;
+}
+.match-card:hover { border-color: var(--accent); }
+.match-card .mid { font-weight: 700; }
+.match-card .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+.wp-badge { font-weight: 700; padding: 2px 10px; border-radius: 6px; font-size: 13px; }
+.wp-badge.radiant { background: rgba(107, 208, 107, 0.15); color: var(--radiant); }
+.wp-badge.dire { background: rgba(224, 90, 90, 0.15); color: var(--dire); }
+
+.narrative { border-left: 3px solid var(--accent); padding: 10px 14px; background: var(--panel2); border-radius: 0 8px 8px 0; margin: 14px 0; }
+
+table.players { width: 100%; border-collapse: collapse; }
+table.players th, table.players td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+table.players th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+tr.team-radiant td:first-child { border-left: 3px solid var(--radiant); }
+tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
+.hero-name { text-transform: capitalize; }
+.score-bar { background: var(--panel2); border-radius: 4px; height: 8px; width: 90px; display: inline-block; vertical-align: middle; }
+.score-bar > i { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+
+.errors { display: flex; flex-direction: column; gap: 8px; }
+.error-item { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 14px; }
+.error-item .dwp { color: var(--dire); font-weight: 700; margin-right: 8px; }
+.error-item .who { color: var(--accent); margin-right: 8px; }
+
+.meta { color: var(--muted); font-size: 12px; margin-top: 18px; }
+.loading, .error-msg { color: var(--muted); padding: 40px 0; text-align: center; }
