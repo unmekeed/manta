@@ -27,9 +27,13 @@ features.calculated
 
 ## Бейзлайны в отчёте (honesty box)
 
-- `laning_score` — прокси из LH/DN@10 (честный Laning Evaluator —
-  Гл. 6.2.1, позже); `impact_score` — прокси из доли net worth
-  (честный Impact = Σ ΔWP игрока — после Error Detection Engine);
+- `laning_score` — исход дуэли на линии: sigmoid от lane_nw_diff_at_10
+  (разница net worth @10 против прямых оппонентов, линия определяется
+  из позиций); fallback на LH-прокси только для roam;
+- `impact_score` — Impact Score Гл. 6.1.3: Σ ΔWP игрока за матч
+  (кредиты за убийства в окнах роста WP команды, дебеты за смерти в
+  окнах падения; равные доли внутри окна — веса по урону придут с
+  моделью), сигмоида с масштабом 0.2; сырая сумма — в delta_wp_sum;
 - `narrative` — шаблон (победитель, переломный момент по максимуму
   |ΔWP| на median-3-сглаженной кривой, лучший фарм), не LLM;
 - `errors` — rule-based бейзлайн Error Detection Engine (Гл. 6.2.1):

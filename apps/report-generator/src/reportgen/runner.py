@@ -84,7 +84,7 @@ class ReportGenerator:
 
     def _kill_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
-            "SELECT game_time, target FROM ReplayEvents"
+            "SELECT game_time, target, attacker FROM ReplayEvents"
             " WHERE match_id = {match_id:UInt64} AND event_type = 'KILL'"
             "   AND target LIKE 'npc_dota_hero_%'"
             " ORDER BY game_time", match_id)

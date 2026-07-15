@@ -73,12 +73,11 @@ def _laning_score(p: dict) -> float:
     return round(min(max(raw, 0.0), 1.0), 3)
 
 
-def _impact_score(p: dict) -> float:
-    """Бейзлайн импакта: доля в net worth команды, отмасштабированная так,
-    что равная доля (0.2) даёт 0.5. Честный Impact Score = сумма ΔWP
-    игрока (Гл. 6.1.3) — после Error Detection Engine."""
-    share = float(p.get("gold_share", 0.0))
-    return round(min(max(share / 0.4, 0.0), 1.0), 3)
+def _impact_score(delta_wp_sum: float) -> float:
+    """Impact Score (Гл. 6.1.3): Σ ΔWP игрока за матч, сжатая в 0..1
+    сигмоидой (масштаб 0.2: суммарные ±20% WP → 0.73/0.27). Игрок без
+    атрибутированных событий — нейтральные 0.5."""
+    return round(1.0 / (1.0 + math.exp(-delta_wp_sum / 0.2)), 3)
 
 
 def _median3(values: list[float]) -> list[float]:
@@ -98,53 +97,74 @@ def _median3(values: list[float]) -> list[float]:
 CRITICAL_DEATH_TAU = 0.06
 
 
-def detect_errors(points: list[dict], kills: list[dict],
-                  hero_player: dict[str, int],
-                  player_team: dict[int, int]) -> dict[int, list[dict]]:
-    """Rule-based бейзлайн Error Detection Engine (Гл. 6.2.1).
+def wp_attribution(points: list[dict], kills: list[dict],
+                   hero_player: dict[str, int],
+                   player_team: dict[int, int],
+                   ) -> tuple[dict[int, list[dict]], dict[int, float]]:
+    """Оконная атрибуция ΔWP (Гл. 6.1.1) — общая для ошибок и импакта.
 
-    Атрибуция ΔWP (Гл. 6.1.1): для каждого минутного окна, где WP команды
-    упала сильнее τ по СГЛАЖЕННОЙ кривой, падение распределяется поровну
-    между смертями героев этой команды в окне (вклад c_p бейзлайна —
-    равные доли; веса по урону/участию придут с моделью). Окно без
-    смертей пострадавшей команды ошибок не порождает: падение вызвано
-    не гибелью (потеря объектива и т.п.) — такие классы добавятся позже.
+    Для каждого минутного окна со сдвигом |ΔWP| >= τ по СГЛАЖЕННОЙ кривой:
+    - падение WP команды делится поровну между СМЕРТЯМИ её героев в окне
+      (класс critical_death в errors, дебет в импакт жертв);
+    - рост WP команды делится поровну между её героями-УБИЙЦАМИ в окне
+      (кредит в импакт; вклад c_p бейзлайна — равные доли, веса по
+      урону/участию придут с моделью).
+    Окно без смертей/убийств соответствующей команды не атрибутируется
+    (объективы, фарм — классы вне бейзлайна).
 
-    Возвращает: player_id → [{type, game_time, delta_wp, safety_index,
-    explanation}] (схема GameError, Гл. 7).
+    Возвращает: (errors: pid → [GameError], impact: pid → Σ ΔWP).
     """
-    if len(points) < 2:
-        return {}
-    smooth = _median3([p["radiant_wp"] for p in points])
     errors: dict[int, list[dict]] = {}
+    impact: dict[int, float] = {}
+    if len(points) < 2:
+        return errors, impact
+    smooth = _median3([p["radiant_wp"] for p in points])
     for i in range(1, len(points)):
         t_lo, t_hi = points[i - 1]["game_time"], points[i]["game_time"]
         delta_radiant = smooth[i] - smooth[i - 1]
         if abs(delta_radiant) < CRITICAL_DEATH_TAU:
             continue
         losing_team = 2 if delta_radiant < 0 else 3
-        window_deaths = [
-            k for k in kills
-            if t_lo < int(k["game_time"]) <= t_hi
-            and player_team.get(
-                hero_player.get(str(k["target"]), -1)) == losing_team
-        ]
-        if not window_deaths:
-            continue
-        share = -abs(delta_radiant) / len(window_deaths)
-        for k in window_deaths:
-            pid = hero_player[str(k["target"])]
-            hero = str(k["target"]).replace("npc_dota_hero_", "")
-            errors.setdefault(pid, []).append({
-                "type": "critical_death",
-                "game_time": int(k["game_time"]),
-                "delta_wp": round(share, 4),
-                "safety_index": 0.0,  # позиционный риск — после Гл. 6.1.2
-                "explanation": (
-                    f"Смерть {hero} на {_fmt_min(int(k['game_time']))} — "
-                    f"вероятность победы команды упала на "
-                    f"{abs(share) * 100:.0f}% (окно {t_lo // 60}–{t_hi // 60} мин)."),
-            })
+        rising_team = 3 if losing_team == 2 else 2
+
+        window = [k for k in kills if t_lo < int(k["game_time"]) <= t_hi]
+
+        deaths = [k for k in window
+                  if player_team.get(
+                      hero_player.get(str(k["target"]), -1)) == losing_team]
+        if deaths:
+            share = -abs(delta_radiant) / len(deaths)
+            for k in deaths:
+                pid = hero_player[str(k["target"])]
+                hero = str(k["target"]).replace("npc_dota_hero_", "")
+                impact[pid] = impact.get(pid, 0.0) + share
+                errors.setdefault(pid, []).append({
+                    "type": "critical_death",
+                    "game_time": int(k["game_time"]),
+                    "delta_wp": round(share, 4),
+                    "safety_index": 0.0,  # позиционный риск — Гл. 6.1.2, позже
+                    "explanation": (
+                        f"Смерть {hero} на {_fmt_min(int(k['game_time']))} — "
+                        f"вероятность победы команды упала на "
+                        f"{abs(share) * 100:.0f}% (окно {t_lo // 60}–{t_hi // 60} мин)."),
+                })
+
+        killers = {hero_player[str(k["attacker"])]
+                   for k in window
+                   if player_team.get(
+                       hero_player.get(str(k.get("attacker", "")), -1)) == rising_team}
+        if killers:
+            credit = abs(delta_radiant) / len(killers)
+            for pid in killers:
+                impact[pid] = impact.get(pid, 0.0) + credit
+    return errors, impact
+
+
+def detect_errors(points: list[dict], kills: list[dict],
+                  hero_player: dict[str, int],
+                  player_team: dict[int, int]) -> dict[int, list[dict]]:
+    """Ошибки игроков (обёртка над wp_attribution, см. её докстринг)."""
+    errors, _ = wp_attribution(points, kills, hero_player, player_team)
     return errors
 
 
@@ -202,7 +222,8 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
                    for p in players if p.get("hero")}
     player_team = {int(p["player_id"]): int(p.get("team", 0))
                    for p in players}
-    errors = detect_errors(points, kills or [], hero_player, player_team)
+    errors, impact = wp_attribution(points, kills or [], hero_player,
+                                    player_team)
 
     return {
         "match_id": match_id,
@@ -216,7 +237,8 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
                 "hero": p.get("hero", ""),
                 "player_name": p.get("player_name", ""),
                 "laning_score": _laning_score(p),
-                "impact_score": _impact_score(p),
+                "impact_score": _impact_score(impact.get(int(p["player_id"]), 0.0)),
+                "delta_wp_sum": round(impact.get(int(p["player_id"]), 0.0), 4),
                 "errors": errors.get(int(p["player_id"]), []),
             }
             for p in sorted(players, key=lambda x: int(x["player_id"]))

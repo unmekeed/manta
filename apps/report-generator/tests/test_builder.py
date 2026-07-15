@@ -2,6 +2,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reportgen.builder import (build_analysis, build_narrative,
@@ -60,7 +62,8 @@ def test_analysis_schema_and_scores():
     assert p0["player_id"] == 0
     assert 0.0 <= p0["laning_score"] <= 1.0
     assert p0["laning_score"] > a["players"][1]["laning_score"]
-    assert p0["impact_score"] > a["players"][1]["impact_score"]
+    # Без событий атрибуции импакт нейтрален (0.5) у обоих.
+    assert p0["impact_score"] == a["players"][1]["impact_score"] == 0.5
     assert p0["errors"] == []
 
 
@@ -123,3 +126,41 @@ def test_analysis_includes_errors():
     assert len(p0["errors"]) == 1
     assert p0["errors"][0]["type"] == "critical_death"
     assert p0["errors"][0]["delta_wp"] < 0
+
+
+
+def test_wp_attribution_credits_and_debits():
+    from reportgen.builder import wp_attribution
+
+    pts = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+           for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                        (300, 0.3)]]
+    hero_player = {"npc_dota_hero_axe": 0, "npc_dota_hero_kez": 5,
+                   "npc_dota_hero_slardar": 6}
+    player_team = {0: 2, 5: 3, 6: 3}
+    kills = [
+        # Окно 180-240 (WP Radiant -0.2): kez убил axe.
+        {"game_time": 200, "target": "npc_dota_hero_axe",
+         "attacker": "npc_dota_hero_kez"},
+        {"game_time": 210, "target": "npc_dota_hero_axe",
+         "attacker": "npc_dota_hero_slardar"},
+    ]
+    errors, impact = wp_attribution(pts, kills, hero_player, player_team)
+    # Дебет: обе смерти axe в окне делят -0.2.
+    assert impact[0] == pytest.approx(-0.2)
+    assert len(errors[0]) == 2
+    # Кредит: kez и slardar делят +0.2 поровну.
+    assert impact[5] == pytest.approx(0.1)
+    assert impact[6] == pytest.approx(0.1)
+
+
+def test_impact_in_analysis_orders_players():
+    t = build_timeline(1, ROWS, WP)  # падение Radiant в окне 120-180
+    players = [dict(p, team=(2 if p["player_id"] == 0 else 3))
+               for p in PLAYERS]
+    kills = [{"game_time": 150, "target": "npc_dota_hero_axe",
+              "attacker": "npc_dota_hero_kez"}]
+    a = build_analysis(1, "Dire", players, t, "v", kills=kills)
+    by_pid = {p["player_id"]: p for p in a["players"]}
+    assert by_pid[5]["impact_score"] > 0.5 > by_pid[0]["impact_score"]
+    assert by_pid[5]["delta_wp_sum"] == -by_pid[0]["delta_wp_sum"]
