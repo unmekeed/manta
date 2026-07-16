@@ -83,3 +83,11 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
 .heatmap-controls button.active { border-color: var(--accent); color: var(--accent); }
 .heatmap-controls button.radiant.active { border-color: var(--radiant); color: var(--radiant); }
 .heatmap-controls button.dire.active { border-color: var(--dire); color: var(--dire); }
+
+.profile-grid { display: flex; gap: 32px; flex-wrap: wrap; }
+.stat-num { font-size: 26px; font-weight: 700; }
+.stat-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+.hero-list { margin: 0; padding-left: 18px; }
+.hero-list li { margin: 4px 0; }
+table.players a { color: var(--accent); text-decoration: none; }
+table.players a:hover { text-decoration: underline; }

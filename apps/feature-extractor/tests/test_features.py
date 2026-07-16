@@ -149,3 +149,15 @@ def test_player_features_lane_and_duel():
     rows0 = player_features(economy_rows(), r, duration_s=1200)
     assert all(row["lane"] == "" and row["lane_nw_diff_at_10"] == 0
                for row in rows0)
+
+
+def test_roster_carries_steam_ids():
+    from extractor.features import Roster
+
+    players = [
+        {"team": 2, "name": "A", "hero": "npc_dota_hero_axe",
+         "steam_id": 76561198000000001},
+        {"team": 3, "name": "B", "hero": "npc_dota_hero_kez"},  # аноним
+    ]
+    r = Roster.from_players(players, "Radiant")
+    assert r.accounts == {0: 76561198000000001, 5: 0}

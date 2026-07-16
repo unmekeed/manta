@@ -145,7 +145,8 @@ class Extractor:
             # на подготовительных запросах) не прерывает весь бэкфилл.
             try:
                 prows = self.ch.select(
-                    "SELECT player_id, team, hero, player_name, won, duration_s"
+                    "SELECT player_id, account_id, team, hero, player_name,"
+                    "       won, duration_s"
                     "  FROM PlayerMatchFeatures FINAL"
                     " WHERE match_id = {match_id:UInt64} ORDER BY player_id",
                     {"match_id": mid})
@@ -154,7 +155,9 @@ class Extractor:
                                    mid)
                     continue
                 players = [{"team": int(r["team"]), "name": r["player_name"],
-                            "hero": r["hero"]} for r in prows]
+                            "hero": r["hero"],
+                            "steam_id": int(r.get("account_id", 0))}
+                           for r in prows]
                 won_teams = {int(r["team"]) for r in prows if int(r["won"]) == 1}
                 winner = "Radiant" if won_teams == {2} else "Dire"
                 duration = float(prows[0].get("duration_s", 0))

@@ -6,6 +6,7 @@ import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import App from "./App";
 import MatchList from "./pages/MatchList";
 import MatchPage from "./pages/MatchPage";
+import PlayerPage from "./pages/PlayerPage";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -19,6 +20,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <MatchList /> },
       { path: "matches/:matchId", element: <MatchPage /> },
+      { path: "players/:playerId", element: <PlayerPage /> },
     ],
   },
 ]);

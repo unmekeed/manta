@@ -377,6 +377,8 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
     player_entries = [
         {
             "player_id": int(p["player_id"]),
+            # steam64 как строка: > 2^53, теряет точность в JSON-числах JS.
+            "account_id": str(int(p.get("account_id", 0))),
             "hero_id": hero_id(str(p.get("hero", ""))),
             "lane": p.get("lane", ""),
             "hero": p.get("hero", ""),

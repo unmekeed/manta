@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FEATURE_VERSION = "1.2.0"  # 1.2.0: + lane, lane_nw_diff_at_10
+FEATURE_VERSION = "1.3.0"  # 1.3.0: + account_id (steam64) в PlayerMatchFeatures
 
 WINDOW_S = 60  # шаг таймлайна фич
 
@@ -30,6 +30,7 @@ class Roster:
     names: dict[int, str]        # player_id -> ник
     hero_team: dict[str, int]    # npc_dota_hero_* -> 2|3
     winner: int                  # 2|3
+    accounts: dict[int, int] | None = None  # player_id -> steam64 (0 — нет)
 
     @staticmethod
     def from_players(players: list[dict], winner: str) -> "Roster":
@@ -37,6 +38,7 @@ class Roster:
         teams: dict[int, int] = {}
         heroes: dict[int, str] = {}
         names: dict[int, str] = {}
+        accounts: dict[int, int] = {}
         hero_team: dict[str, int] = {}
         radiant_i = 0
         dire_i = 0
@@ -53,11 +55,13 @@ class Roster:
             teams[pid] = team
             heroes[pid] = p.get("hero", "")
             names[pid] = p.get("name", "")
+            accounts[pid] = int(p.get("steam_id", 0) or 0)
             if p.get("hero"):
                 hero_team[p["hero"]] = team
         return Roster(teams=teams, heroes=heroes, names=names,
                       hero_team=hero_team,
-                      winner=2 if winner == "Radiant" else 3)
+                      winner=2 if winner == "Radiant" else 3,
+                      accounts=accounts)
 
 
 def _game_start(economy: list[dict]) -> int:
@@ -145,6 +149,7 @@ def player_features(economy: list[dict], roster: Roster,
         tn = team_networth.get(team, 0)
         out.append({
             "player_id": pid,
+            "account_id": (roster.accounts or {}).get(pid, 0),
             "team": team,
             "hero": roster.heroes.get(pid, ""),
             "player_name": roster.names.get(pid, ""),

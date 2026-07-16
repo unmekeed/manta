@@ -210,6 +210,51 @@ func (h *Handlers) GetMatchHeatmap(w http.ResponseWriter, r *http.Request) {
 	h.reportColumn(w, r, "heatmap")
 }
 
+// GetPlayerProfile — GET /api/v1/players/{playerId}/profile (Гл. 7):
+// материализованные агрегаты игрока (PlayerProfiles, миграция 005).
+// playerId — steam64 (account_id из реплеев).
+func (h *Handlers) GetPlayerProfile(w http.ResponseWriter, r *http.Request) {
+	playerID := r.PathValue("playerId")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var (
+		nickname, mainLane string
+		matches, wins      int
+		avgGPM, avgXPM     float64
+		topHeroes          []byte
+		updatedAt          time.Time
+	)
+	err := h.DB.QueryRow(ctx,
+		`SELECT nickname, matches, wins, avg_gpm, avg_xpm, main_lane,
+		        top_heroes, updated_at
+		   FROM PlayerProfiles WHERE account_id = $1`, playerID,
+	).Scan(&nickname, &matches, &wins, &avgGPM, &avgXPM, &mainLane,
+		&topHeroes, &updatedAt)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "not-found",
+			"Player profile not found",
+			fmt.Sprintf("player %s: профиль появится после первого проанализированного матча", playerID))
+		return
+	}
+	winrate := 0.0
+	if matches > 0 {
+		winrate = float64(wins) / float64(matches)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"player_id":  playerID,
+		"nickname":   nickname,
+		"matches":    matches,
+		"wins":       wins,
+		"winrate":    winrate,
+		"avg_gpm":    avgGPM,
+		"avg_xpm":    avgXPM,
+		"main_lane":  mainLane,
+		"top_heroes": json.RawMessage(topHeroes),
+		"updated_at": updatedAt,
+	})
+}
+
 // ListMatches — GET /api/v1/matches: последние матчи с готовыми отчётами
 // (для главной страницы фронтенда). Лёгкая проекция MatchReports.
 func (h *Handlers) ListMatches(w http.ResponseWriter, r *http.Request) {

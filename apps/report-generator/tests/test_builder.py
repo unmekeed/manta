@@ -259,3 +259,17 @@ def test_heatmap_grid_and_teams():
 
     kez = hm["players"][1]
     assert kez["cells"] == [[HEATMAP_GRID - 1, HEATMAP_GRID - 1, 1]]
+
+
+def test_analysis_account_id_is_string():
+    """steam64 > 2^53 — в JSON уходит строкой, иначе JS теряет точность."""
+    t = build_timeline(1, ROWS, WP)
+    a = build_analysis(1, "Dire", [
+        {"player_id": 0, "hero": "npc_dota_hero_axe", "player_name": "A",
+         "account_id": 76561198000000001, "gpm": 500.0,
+         "lh_at_10": 60, "dn_at_10": 10, "gold_share": 0.3},
+        {"player_id": 5, "hero": "npc_dota_hero_kez", "player_name": "B",
+         "gpm": 300.0, "lh_at_10": 8, "dn_at_10": 0, "gold_share": 0.15},
+    ], t, "0.1.0-x")
+    assert a["players"][0]["account_id"] == "76561198000000001"
+    assert a["players"][1]["account_id"] == "0"

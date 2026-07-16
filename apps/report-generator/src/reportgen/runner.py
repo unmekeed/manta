@@ -79,12 +79,17 @@ class ReportGenerator:
 
     # -- источники данных -------------------------------------------------------
 
-    def _ch_select(self, query: str, match_id: int) -> list[dict]:
+    def _ch_select(self, query: str, match_id: int | None = None,
+                   params: dict | None = None) -> list[dict]:
+        req_params = {"database": self.cfg.clickhouse_db,
+                      "default_format": "JSONEachRow"}
+        if match_id is not None:
+            req_params["param_match_id"] = str(match_id)
+        for k, v in (params or {}).items():
+            req_params[f"param_{k}"] = str(v)
         resp = requests.post(
             self.cfg.clickhouse_url,
-            params={"database": self.cfg.clickhouse_db,
-                    "default_format": "JSONEachRow",
-                    "param_match_id": str(match_id)},
+            params=req_params,
             data=query,
             headers={"X-ClickHouse-User": self.cfg.clickhouse_user,
                      "X-ClickHouse-Key": self.cfg.clickhouse_password},
@@ -113,10 +118,61 @@ class ReportGenerator:
 
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
-            "SELECT player_id, team, hero, player_name, won, gpm, xpm,"
+            "SELECT player_id, account_id, team, hero, player_name, won,"
+            "       gpm, xpm,"
             "       lh_at_10, dn_at_10, lane, lane_nw_diff_at_10, gold_share"
             "  FROM PlayerMatchFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY player_id", match_id)
+
+    # -- профиль игрока (Гл. 7, миграция PG 005) --------------------------------
+
+    def _update_profiles(self, players: list[dict]) -> None:
+        """Пересчитать и UPSERT'нуть профили игроков матча.
+
+        Агрегаты считаются заново по всей истории PlayerMatchFeatures —
+        идемпотентно к перегенерации отчёта. Анонимы (account_id=0)
+        пропускаются. Сбой профиля не роняет отчёт.
+        """
+        ids = sorted({int(p.get("account_id", 0)) for p in players
+                      if int(p.get("account_id", 0)) > 0})
+        for aid in ids:
+            agg = self._ch_select(
+                "SELECT count() AS matches, sum(won) AS wins,"
+                "       round(avg(gpm), 1) AS avg_gpm,"
+                "       round(avg(xpm), 1) AS avg_xpm,"
+                "       anyLast(player_name) AS nickname,"
+                "       topK(1)(lane)[1] AS main_lane"
+                "  FROM PlayerMatchFeatures FINAL"
+                " WHERE account_id = {account_id:UInt64}",
+                params={"account_id": aid})
+            if not agg or int(agg[0].get("matches", 0)) == 0:
+                continue
+            heroes = self._ch_select(
+                "SELECT hero, count() AS matches"
+                "  FROM PlayerMatchFeatures FINAL"
+                " WHERE account_id = {account_id:UInt64} AND hero != ''"
+                " GROUP BY hero ORDER BY matches DESC, hero LIMIT 3",
+                params={"account_id": aid})
+            r = agg[0]
+            self.db.execute(
+                """INSERT INTO PlayerProfiles
+                       (account_id, nickname, matches, wins, avg_gpm,
+                        avg_xpm, main_lane, top_heroes, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (account_id) DO UPDATE SET
+                       nickname = EXCLUDED.nickname,
+                       matches = EXCLUDED.matches,
+                       wins = EXCLUDED.wins,
+                       avg_gpm = EXCLUDED.avg_gpm,
+                       avg_xpm = EXCLUDED.avg_xpm,
+                       main_lane = EXCLUDED.main_lane,
+                       top_heroes = EXCLUDED.top_heroes,
+                       updated_at = NOW()""",
+                (aid, r.get("nickname", ""),
+                 int(r["matches"]), int(r["wins"]),
+                 float(r["avg_gpm"]), float(r["avg_xpm"]),
+                 r.get("main_lane", "") or "",
+                 json.dumps(heroes, ensure_ascii=False)))
 
     def _wp_curve(self, match_id: int, rows: list[dict]) -> tuple[list[float], str]:
         def frames():
@@ -205,6 +261,11 @@ class ReportGenerator:
         self.producer.produce(TOPIC_OUT, key=env["partition_key"],
                               value=json.dumps(env, ensure_ascii=False).encode())
         self.producer.flush(10)
+        try:
+            self._update_profiles(players)
+        except Exception:  # noqa: BLE001 — профиль вторичен к отчёту
+            logger.exception("player profiles update failed for match %s",
+                             match_id)
         logger.info("report generated: match=%s model=%s points=%d",
                     match_id, model_version, len(timeline["points"]))
         return payload

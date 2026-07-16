@@ -22,9 +22,10 @@ import (
 
 // Player — строка ростера из сводки ядра (порядок: Radiant 0-4, Dire 5-9).
 type Player struct {
-	Team int    `json:"team"` // 2 = Radiant, 3 = Dire
-	Name string `json:"name"`
-	Hero string `json:"hero"` // npc_dota_hero_*
+	Team    int    `json:"team"` // 2 = Radiant, 3 = Dire
+	Name    string `json:"name"`
+	Hero    string `json:"hero"`     // npc_dota_hero_*
+	SteamID uint64 `json:"steam_id"` // steam64; 0 — бот/аноним/старое ядро
 }
 
 // Summary — машиночитаемая сводка demoinfo --summary.

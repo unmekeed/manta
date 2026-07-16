@@ -462,10 +462,13 @@ int main(int argc, char** argv) {
                 (long long)header.build_num);
             for (size_t i = 0; i < info.players.size(); i++) {
                 const auto& p = info.players[i];
-                std::fprintf(sf, "%s{\"team\":%lld,\"name\":\"%s\",\"hero\":\"%s\"}",
+                std::fprintf(sf,
+                             "%s{\"team\":%lld,\"name\":\"%s\",\"hero\":\"%s\","
+                             "\"steam_id\":%llu}",
                              i ? "," : "", (long long)p.game_team,
                              json_escape(p.player_name).c_str(),
-                             json_escape(p.hero_name).c_str());
+                             json_escape(p.hero_name).c_str(),
+                             (unsigned long long)p.steam_id);
             }
             std::fprintf(sf, "]}\n");
             std::fclose(sf);

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 import HeatmapCanvas from "../components/HeatmapCanvas";
 import WpChart from "../components/WpChart";
@@ -32,7 +32,15 @@ function PlayersTable({ players }: { players: PlayerAnalysis[] }) {
       <tbody>
         {players.map((p) => (
           <tr key={p.player_id} className={p.player_id < 5 ? "team-radiant" : "team-dire"}>
-            <td>{p.player_name || `Игрок ${p.player_id}`}</td>
+            <td>
+              {p.account_id && p.account_id !== "0" ? (
+                <Link to={`/players/${p.account_id}`}>
+                  {p.player_name || `Игрок ${p.player_id}`}
+                </Link>
+              ) : (
+                p.player_name || `Игрок ${p.player_id}`
+              )}
+            </td>
             <td className="hero-name">{heroLabel(p.hero)}</td>
             <td>{p.lane || "—"}</td>
             <td>

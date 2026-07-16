@@ -348,12 +348,28 @@ components:
         explanation: { type: string }
     PlayerProfile:
       type: object
+      description: >
+        Материализованные агрегаты по проанализированным матчам игрока
+        (PlayerProfiles). player_id — steam64 строкой (значение превышает
+        точность JSON-чисел JavaScript). mmr/main_role из ранней версии
+        схемы недоступны в реплеях и заменены честными полями.
       properties:
-        player_id: { type: integer, format: int64 }
+        player_id: { type: string, description: steam64 }
         nickname: { type: string }
-        mmr: { type: integer }
-        main_role: { type: string }
-        historical_winrate: { type: number, format: float }
+        matches: { type: integer }
+        wins: { type: integer }
+        winrate: { type: number, format: float }
+        avg_gpm: { type: number, format: float }
+        avg_xpm: { type: number, format: float }
+        main_lane: { type: string }
+        top_heroes:
+          type: array
+          items:
+            type: object
+            properties:
+              hero: { type: string }
+              matches: { type: integer }
+        updated_at: { type: string, format: date-time }
     TrainingPlan:
       type: object
       properties:

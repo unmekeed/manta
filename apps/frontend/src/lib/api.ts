@@ -21,6 +21,7 @@ export interface GameError {
 
 export interface PlayerAnalysis {
   player_id: number;
+  account_id?: string; // steam64 строкой (> 2^53); "0"/нет — аноним/старый отчёт
   hero_id: number;
   hero: string;
   lane: string;
@@ -54,6 +55,19 @@ export interface Heatmap {
   players: HeatmapPlayer[];
 }
 
+export interface PlayerProfile {
+  player_id: string; // steam64 (в строке — не влезает в double)
+  nickname: string;
+  matches: number;
+  wins: number;
+  winrate: number;
+  avg_gpm: number;
+  avg_xpm: number;
+  main_lane: string;
+  top_heroes: { hero: string; matches: string | number }[];
+  updated_at: string;
+}
+
 export interface MatchListItem {
   match_id: number;
   final_radiant_wp: string;
@@ -79,6 +93,8 @@ export const api = {
     get<Timeline>(`/api/v1/matches/${matchId}/timeline`),
   heatmap: (matchId: string) =>
     get<Heatmap>(`/api/v1/matches/${matchId}/heatmap`),
+  playerProfile: (playerId: string) =>
+    get<PlayerProfile>(`/api/v1/players/${playerId}/profile`),
 };
 
 export const heroLabel = (npc: string) =>
