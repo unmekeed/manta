@@ -69,8 +69,10 @@ class Dataset:
         m = self._tier_mask(PRO_TIER)
         return self.X[m], self.y[m]
 
-    def split_by_match(self, valid_frac: float = 0.2, seed: int = 42):
-        """Group split по НЕэталонным матчам: матч целиком в train или valid."""
+    def _valid_mask(self, valid_frac: float = 0.2, seed: int = 42):
+        """Маска валидационных строк (group split по НЕэталонным матчам)
+        и маска эталона. Детерминирована по seed — один и тот же holdout
+        воспроизводится и в train, и в гейте."""
         pro = self._tier_mask(PRO_TIER)
         rng = random.Random(seed)
         matches = sorted(set(self.groups[~pro].tolist()))
@@ -78,9 +80,34 @@ class Dataset:
         n_valid = max(1, int(len(matches) * valid_frac))
         valid_set = set(matches[:n_valid])
         in_valid = np.array([g in valid_set for g in self.groups])
+        return in_valid, pro
+
+    def split_by_match(self, valid_frac: float = 0.2, seed: int = 42):
+        """Group split по НЕэталонным матчам: матч целиком в train или valid."""
+        in_valid, pro = self._valid_mask(valid_frac, seed)
         tr = ~in_valid & ~pro
         va = in_valid & ~pro
         return (self.X[tr], self.y[tr]), (self.X[va], self.y[va])
+
+    def eval_holdout(self, min_bench_matches: int = 15,
+                     valid_frac: float = 0.2, seed: int = 42):
+        """Сопоставимый holdout для честного сравнения версий гейтом.
+
+        На нём оцениваются ОБЕ модели (кандидат и production) — так метрика
+        считается на одной популяции, а не на разных сплитах разных версий.
+        Приоритет — про-эталон (фиксированная выборка tier-1). Если про-матчей
+        мало, берётся валидационный сплит с тем же seed, что использует train,
+        поэтому кандидат его не видел при обучении.
+
+        Возвращает (X, y, groups, kind), kind ∈ {"benchmark_pro", "valid"}.
+        """
+        pro = self._tier_mask(PRO_TIER)
+        pro_matches = sorted(set(self.groups[pro].tolist()))
+        if len(pro_matches) >= min_bench_matches:
+            return self.X[pro], self.y[pro], self.groups[pro], "benchmark_pro"
+        in_valid, _ = self._valid_mask(valid_frac, seed)
+        va = in_valid & ~pro
+        return self.X[va], self.y[va], self.groups[va], "valid"
 
 
 def row_to_features(row: dict) -> list[float]:

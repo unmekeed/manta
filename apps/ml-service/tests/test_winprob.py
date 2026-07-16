@@ -77,6 +77,54 @@ def test_should_promote_gate():
     assert ok
 
 
+def test_eval_holdout_prefers_pro_then_valid():
+    from training.dataset import PRO_TIER
+    import numpy as np
+
+    # без про-матчей → берётся валидационный сплит
+    ds = synth_matches(40)
+    X, y, groups, kind = ds.eval_holdout()
+    assert kind == "valid" and len(y) > 0
+    # holdout не пересекается с train по матчам (тот же seed)
+    (X_tr, _), _ = ds.split_by_match()
+    assert len(X_tr) + len(y) == len(ds.y)
+
+    # если помечаем достаточно матчей как Professional → берётся эталон
+    ds2 = synth_matches(40)
+    ds2.tiers = np.array([PRO_TIER if g % 2 == 0 else "" for g in ds2.groups])
+    X2, y2, g2, kind2 = ds2.eval_holdout(min_bench_matches=5)
+    assert kind2 == "benchmark_pro"
+    assert set(np.unique(g2).tolist()) == {g for g in set(ds2.groups.tolist()) if g % 2 == 0}
+
+
+def test_evaluate_gate_fair_head_to_head():
+    """Гейт сравнивает обе модели на ОДНОМ holdout: слабая prod-модель,
+    обученная на крошечной выборке, не должна блокировать хорошего кандидата."""
+    from training.train_winprob import train, evaluate_gate
+
+    big = synth_matches(120, seed=3)
+    weak = train(synth_matches(30, seed=99), num_rounds=5, mirror=False)
+    strong = train(big, num_rounds=150)
+    # оба честно считаются на holdout текущих (больших) данных
+    ok, reason = evaluate_gate(strong, weak, big)
+    assert ok, reason
+    assert "одни данные" in reason
+    # обратное: сильную prod не вытесняет заведомо слабый кандидат
+    ok2, _ = evaluate_gate(weak, strong, big)
+    assert not ok2
+
+
+def test_evaluate_gate_tie_promotes_newer():
+    """В пределах шума (та же модель) кандидат продвигается — предпочитаем
+    свежую версию на бОльших данных."""
+    from training.train_winprob import train, evaluate_gate
+
+    ds = synth_matches(90, seed=11)
+    art = train(ds, num_rounds=100)
+    ok, reason = evaluate_gate(art, art, ds)  # идентичные модели → Δ=0
+    assert ok and "не хуже" in reason
+
+
 def test_autotrain_thresholds(monkeypatch, tmp_path):
     """check_and_train: пороги «мало данных» / «мало новых» / «обучаем»
     считаются по дельте датасета относительно ПОСЛЕДНЕГО обучения в процессе
@@ -93,10 +141,14 @@ def test_autotrain_thresholds(monkeypatch, tmp_path):
             return {"dataset": {"matches": 40}}  # влияет только на метрику
 
     pushed = []
+
+    def fake_push(art, path, log, ds=None):
+        pushed.append(art)
+        return "v-test", True, "test-promote"
+
     monkeypatch.setattr(auto, "load_from_clickhouse",
                         lambda *a, **k: synth_matches(holder["n"]))
-    monkeypatch.setattr(auto, "push_with_gate",
-                        lambda art, path, log: pushed.append(art))
+    monkeypatch.setattr(auto, "push_with_gate", fake_push)
     monkeypatch.setattr(auto, "train",
                         lambda d: {"metrics": {"brier_calibrated": 0.1}})
     monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg())

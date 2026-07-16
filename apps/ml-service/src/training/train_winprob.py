@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -122,13 +123,13 @@ MODEL_NAME = "win_probability"
 
 
 def should_promote(new_metrics: dict, prod_metrics: dict | None) -> tuple[bool, str]:
-    """Решение промоушен-гейта (Гл. 10).
+    """Гейт по СОХРАНЁННЫМ метрикам (легаси-путь / нет доступа к данным).
 
-    Сравнение ТОЛЬКО по сопоставимым выборкам: приоритет — Brier на
-    про-эталоне (фиксированная популяция tier-1 матчей); валидационный
-    Brier версий с разными датасетами несопоставим (маленькая валидация
-    льстит метрике). Если у production-версии эталонной метрики нет —
-    её оценка не сопоставима с новой, продвигаем новую.
+    Используется как fallback, когда честное пересравнение на одних данных
+    невозможно (нет датасета под рукой). Приоритет — Brier на про-эталоне;
+    иначе валидационный Brier. ВНИМАНИЕ: валидации разных версий считаются на
+    разных сплитах и строго несопоставимы — поэтому основной путь гейта теперь
+    evaluate_gate() (пересчёт обеих моделей на общем holdout).
     """
     if prod_metrics is None:
         return True, "первая версия"
@@ -149,9 +150,74 @@ def should_promote(new_metrics: dict, prod_metrics: dict | None) -> tuple[bool, 
     return False, f"valid {new_v:.4f} > prod {prod_v:.4f}"
 
 
-def push_with_gate(artifact: dict, out_path: Path, logger_) -> None:
-    """Загрузить версию в реестр; продвинуть через гейт should_promote.
-    Непродвинутая версия сохраняется и может быть продвинута вручную."""
+def _brier(y: np.ndarray, p: np.ndarray) -> float:
+    return float(np.mean((p - y) ** 2))
+
+
+def predict_calibrated(model: dict, X: np.ndarray) -> np.ndarray:
+    """Калиброванная WP по артефакту (booster-строка + изотоника)."""
+    booster = lgb.Booster(model_str=model["booster"])
+    return model["calibrator"].predict(booster.predict(X))
+
+
+def _paired_bootstrap_delta(y, p_new, p_prod, groups, n_boot: int = 200,
+                            seed: int = 42) -> tuple[float, float]:
+    """Bootstrap ПО МАТЧАМ разницы Brier(new) − Brier(prod).
+
+    Ресэмплим матчи целиком (снапшоты одного матча скоррелированы), считаем
+    Δ на каждой выборке — получаем точечную оценку и разброс (шум метрики на
+    этом holdout). Возвращает (delta_point, delta_std).
+    """
+    delta_point = _brier(y, p_new) - _brier(y, p_prod)
+    uniq = np.array(sorted(set(groups.tolist())))
+    if len(uniq) < 3:
+        return delta_point, 0.0
+    idx_by_g = {int(g): np.where(groups == g)[0] for g in uniq}
+    rng = np.random.default_rng(seed)
+    deltas = []
+    for _ in range(n_boot):
+        sample = rng.choice(uniq, size=len(uniq), replace=True)
+        rows = np.concatenate([idx_by_g[int(g)] for g in sample])
+        deltas.append(_brier(y[rows], p_new[rows]) - _brier(y[rows], p_prod[rows]))
+    return delta_point, float(np.std(deltas))
+
+
+def evaluate_gate(new_art: dict, prod_art: dict, ds,
+                  tol_floor: float = 0.0005) -> tuple[bool, str]:
+    """Честный гейт: обе модели считаются на ОДНОМ holdout текущих данных.
+
+    Убирает залипание на «удачном» маленьком prod-датасете — production
+    пересчитывается на актуальной выборке, а не сравнивается по своей старой
+    сохранённой метрике. Продвигаем, если кандидат НЕ ЗНАЧИМО хуже: Δ Brier в
+    пределах шума (± bootstrap-σ по матчам). При равенстве в пределах шума
+    предпочитаем новую версию — она обучена на бОльших данных и устойчивее.
+    """
+    X, y, groups, kind = ds.eval_holdout()
+    if len(y) == 0:
+        return True, "нет общего holdout — продвигаем"
+    p_new = predict_calibrated(new_art, X)
+    p_prod = predict_calibrated(prod_art, X)
+    b_new, b_prod = _brier(y, p_new), _brier(y, p_prod)
+    delta, std = _paired_bootstrap_delta(y, p_new, p_prod, groups)
+    tol = max(tol_floor, std)
+    ok = delta <= tol
+    label = "про-эталон" if kind == "benchmark_pro" else "валидация"
+    n_m = len(set(groups.tolist()))
+    verdict = "не хуже prod" if ok else "значимо хуже prod"
+    reason = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
+              f"prod {b_prod:.4f} (Δ{delta:+.4f}, σ{std:.4f}) — {verdict}")
+    return ok, reason
+
+
+def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
+                   ) -> tuple[str, bool, str]:
+    """Загрузить версию в реестр; продвинуть через гейт.
+
+    Если передан ds — гейт честный (evaluate_gate: обе модели на общем
+    holdout текущих данных). Без ds — легаси-fallback по сохранённым метрикам
+    (should_promote). Непродвинутая версия сохраняется в реестре.
+    Возвращает (version, promoted, reason).
+    """
     from registry import registry_from_env
 
     reg = registry_from_env()
@@ -163,15 +229,27 @@ def push_with_gate(artifact: dict, out_path: Path, logger_) -> None:
         "dataset": artifact["dataset"],
         "trained_at": artifact["trained_at"],
     })
-    prod = reg.stage_metadata(MODEL_NAME)
-    ok, reason = should_promote(artifact["metrics"],
-                                prod.get("metrics") if prod else None)
+    try:
+        prod_bytes, _ = reg.resolve(MODEL_NAME, "production")
+    except KeyError:
+        prod_bytes = None
+
+    if prod_bytes is None:
+        ok, reason = True, "первая версия"
+    elif ds is not None:
+        prod_art = joblib.load(io.BytesIO(prod_bytes))
+        ok, reason = evaluate_gate(artifact, prod_art, ds)
+    else:
+        prod = reg.stage_metadata(MODEL_NAME)
+        ok, reason = should_promote(artifact["metrics"],
+                                    prod.get("metrics") if prod else None)
     if ok:
         reg.promote(MODEL_NAME, version)
         logger_.info("registry: %s promoted (%s)", version, reason)
     else:
         logger_.warning("registry: %s NOT promoted (%s), версия сохранена",
                         version, reason)
+    return version, ok, reason
 
 
 def main() -> int:
@@ -210,7 +288,7 @@ def main() -> int:
     logger.info("metrics: %s", json.dumps(artifact["metrics"]))
     logger.info("artifact saved: %s (%.1f KiB)", out, out.stat().st_size / 1024)
     if args.push:
-        push_with_gate(artifact, out, logger)
+        push_with_gate(artifact, out, logger, ds=ds)
     return 0
 
 

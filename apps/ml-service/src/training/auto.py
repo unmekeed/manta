@@ -93,14 +93,10 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     BRIER_VALID.set(m.get("brier_calibrated", 0))
     if "brier_benchmark_pro" in m:
         BRIER_BENCHMARK.set(m["brier_benchmark_pro"])
-    before = reg.stage_metadata(MODEL_NAME)
-    push_with_gate(artifact, out_path, logger)
-    after = reg.stage_metadata(MODEL_NAME)
-    promoted = (after or {}).get("registry_version") != (
-        (before or {}).get("registry_version"))
+    # Честный гейт: обе модели пересчитываются на общем holdout текущих данных
+    # (evaluate_gate внутри push_with_gate) — устойчиво к «удачному» prod.
+    _, promoted, reason = push_with_gate(artifact, out_path, logger, ds=ds)
     RETRAINS.labels("promoted" if promoted else "rejected").inc()
-    from .train_winprob import should_promote
-    _, reason = should_promote(m, (prod or {}).get("metrics"))
     if _notifier.enabled:
         _notifier.on_retrain(m, promoted, reason, ds.n_matches)
     return "trained"
