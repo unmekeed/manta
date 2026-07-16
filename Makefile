@@ -98,6 +98,9 @@ ml-status:     ## Статус обучения: production-версия, раз
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.audit
 
+recover:       ## Восстановить dev-стек после перезапуска среды (идемпотентно)
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/dev-recover.sh
+
 stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
 	$(COMPOSE) --profile apps up -d --build
 

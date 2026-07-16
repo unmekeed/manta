@@ -41,6 +41,18 @@ curl localhost:8080/healthz
 curl -X POST localhost:8080/api/v1/matches/upload -F "file=@replay.dem"
 ```
 
+Если среда разработки перезапустилась (эфемерный контейнер: dockerd и все
+фоновые процессы погибли, данные в volumes целы) — весь стек поднимается
+одной командой:
+
+```bash
+MANTA_TRAIN_ENV=~/manta-train.env make recover   # идемпотентно
+```
+
+`scripts/dev-recover.sh` запускает dockerd, инфраструктуру, парсер,
+экстрактор, коллектор и auto-train (env-файл с Telegram-секретами — вне
+репозитория); живые компоненты не трогает.
+
 ## Структура
 
 Соответствует Гл. 13 спецификации: `apps/` (12 сервисов), `libs/` (общие схемы и библиотеки),
