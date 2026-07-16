@@ -22,9 +22,12 @@ topics:        ## Создать Kafka-топики по реестру Гл. 2.
 
 migrate: migrate-pg migrate-ch  ## Применить все миграции
 
-migrate-pg:    ## Миграции PostgreSQL
-	PGPASSWORD=dota_dev_password psql -h localhost -U dota -d manta \
-		-v ON_ERROR_STOP=1 -f infra/migrations/postgres/001_init.sql
+migrate-pg:    ## Миграции PostgreSQL (все файлы по порядку)
+	@for f in infra/migrations/postgres/*.sql; do \
+		echo ">> $$f"; \
+		PGPASSWORD=dota_dev_password psql -h localhost -U dota -d manta \
+			-v ON_ERROR_STOP=1 -f $$f || exit 1; \
+	done
 
 migrate-ch:    ## Миграции ClickHouse (все файлы по порядку)
 	@for f in infra/migrations/clickhouse/*.sql; do \
