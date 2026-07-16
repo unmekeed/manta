@@ -208,8 +208,11 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/HeroMeta' }
+                type: object
+                properties:
+                  heroes:
+                    type: array
+                    items: { $ref: '#/components/schemas/HeroMeta' }
 components:
   securitySchemes:
     bearerAuth:
@@ -423,9 +426,18 @@ components:
               score: { type: number, format: float }
     HeroMeta:
       type: object
+      description: >
+        Агрегаты героя по проанализированным матчам (MetaHeroes).
+        shrunk_winrate — байесовское сглаживание к 0.5 (мало матчей →
+        оценка прижата к 50%). ban_rate из ранней версии схемы
+        недоступен: драфт-события не извлекаются из реплеев.
       properties:
+        hero: { type: string, description: npc_dota_hero_* }
         hero_id: { type: integer }
-        patch: { type: string }
+        matches: { type: integer }
+        wins: { type: integer }
         winrate: { type: number, format: float }
+        shrunk_winrate: { type: number, format: float }
         pick_rate: { type: number, format: float }
-        ban_rate: { type: number, format: float }
+        avg_gpm: { type: number, format: float }
+        updated_at: { type: string, format: date-time }

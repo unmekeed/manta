@@ -68,6 +68,18 @@ export interface PlayerProfile {
   updated_at: string;
 }
 
+export interface MetaHero {
+  hero: string;
+  hero_id: number;
+  matches: number;
+  wins: number;
+  winrate: number;
+  shrunk_winrate: number; // байесовское сглаживание к 0.5
+  pick_rate: number;
+  avg_gpm: number;
+  updated_at: string;
+}
+
 export interface MatchListItem {
   match_id: number;
   final_radiant_wp: string;
@@ -95,6 +107,8 @@ export const api = {
     get<Heatmap>(`/api/v1/matches/${matchId}/heatmap`),
   playerProfile: (playerId: string) =>
     get<PlayerProfile>(`/api/v1/players/${playerId}/profile`),
+  metaHeroes: () =>
+    get<{ heroes: MetaHero[] }>("/api/v1/meta/heroes").then((r) => r.heroes),
 };
 
 export const heroLabel = (npc: string) =>

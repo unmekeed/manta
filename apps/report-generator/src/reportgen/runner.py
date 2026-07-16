@@ -22,8 +22,9 @@ import requests
 from confluent_kafka import Consumer, Producer
 from prometheus_client import Counter, Histogram, start_http_server
 
-from .builder import build_analysis, build_heatmap, build_timeline
+from .builder import build_analysis, build_heatmap, build_timeline, hero_id
 from .gen import services_pb2, services_pb2_grpc
+from .meta import build_meta_rows
 from .narrative import LLMNarrator
 
 logger = logging.getLogger("reportgen")
@@ -266,9 +267,49 @@ class ReportGenerator:
         except Exception:  # noqa: BLE001 — профиль вторичен к отчёту
             logger.exception("player profiles update failed for match %s",
                              match_id)
+        try:
+            self._update_meta()
+        except Exception:  # noqa: BLE001 — мета вторична к отчёту
+            logger.exception("meta update failed for match %s", match_id)
         logger.info("report generated: match=%s model=%s points=%d",
                     match_id, model_version, len(timeline["points"]))
         return payload
+
+    # -- мета героев (Гл. 3: Meta Engine бейзлайн, миграция PG 006) -------------
+
+    def _update_meta(self) -> None:
+        """Пересчитать агрегаты героев и UPSERT'нуть MetaHeroes.
+
+        Один GROUP BY по витрине (на текущем масштабе — миллисекунды);
+        при росте до Гл. 3 SLO «обновление ≤ 24 ч» переедет в
+        отдельный воркер по расписанию.
+        """
+        totals = self._ch_select(
+            "SELECT countDistinct(match_id) AS n FROM PlayerMatchFeatures")
+        total_matches = int(totals[0]["n"]) if totals else 0
+        hero_rows = self._ch_select(
+            "SELECT hero, count() AS matches, sum(won) AS wins,"
+            "       round(avg(gpm), 1) AS avg_gpm"
+            "  FROM PlayerMatchFeatures FINAL"
+            " WHERE hero != '' GROUP BY hero")
+        for m in build_meta_rows(hero_rows, total_matches):
+            self.db.execute(
+                """INSERT INTO MetaHeroes
+                       (hero, hero_id, matches, wins, winrate,
+                        shrunk_winrate, pick_rate, avg_gpm, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (hero) DO UPDATE SET
+                       hero_id = EXCLUDED.hero_id,
+                       matches = EXCLUDED.matches,
+                       wins = EXCLUDED.wins,
+                       winrate = EXCLUDED.winrate,
+                       shrunk_winrate = EXCLUDED.shrunk_winrate,
+                       pick_rate = EXCLUDED.pick_rate,
+                       avg_gpm = EXCLUDED.avg_gpm,
+                       updated_at = NOW()""",
+                (m["hero"], hero_id(m["hero"]), m["matches"], m["wins"],
+                 m["winrate"], m["shrunk_winrate"], m["pick_rate"],
+                 m["avg_gpm"]))
 
     # -- Kafka-петля ---------------------------------------------------------------
 

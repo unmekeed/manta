@@ -255,6 +255,48 @@ func (h *Handlers) GetPlayerProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetMetaHeroes — GET /api/v1/meta/heroes (Гл. 7): мета героев из
+// материализованной MetaHeroes (миграция 006). ban_rate из контракта
+// недоступен (драфт-события не извлекаются) и не возвращается.
+func (h *Handlers) GetMetaHeroes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	rows, err := h.DB.Query(ctx, `
+		SELECT hero, hero_id, matches, wins, winrate, shrunk_winrate,
+		       pick_rate, avg_gpm, updated_at
+		  FROM MetaHeroes ORDER BY matches DESC, hero`)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to list meta", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type item struct {
+		Hero          string    `json:"hero"`
+		HeroID        int       `json:"hero_id"`
+		Matches       int       `json:"matches"`
+		Wins          int       `json:"wins"`
+		Winrate       float64   `json:"winrate"`
+		ShrunkWinrate float64   `json:"shrunk_winrate"`
+		PickRate      float64   `json:"pick_rate"`
+		AvgGPM        float64   `json:"avg_gpm"`
+		UpdatedAt     time.Time `json:"updated_at"`
+	}
+	items := []item{}
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.Hero, &it.HeroID, &it.Matches, &it.Wins,
+			&it.Winrate, &it.ShrunkWinrate, &it.PickRate, &it.AvgGPM,
+			&it.UpdatedAt); err != nil {
+			continue
+		}
+		items = append(items, it)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"heroes": items})
+}
+
 // ListMatches — GET /api/v1/matches: последние матчи с готовыми отчётами
 // (для главной страницы фронтенда). Лёгкая проекция MatchReports.
 func (h *Handlers) ListMatches(w http.ResponseWriter, r *http.Request) {

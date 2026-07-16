@@ -6,6 +6,7 @@ import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import App from "./App";
 import MatchList from "./pages/MatchList";
 import MatchPage from "./pages/MatchPage";
+import MetaPage from "./pages/MetaPage";
 import PlayerPage from "./pages/PlayerPage";
 import "./styles.css";
 
@@ -21,6 +22,7 @@ const router = createBrowserRouter([
       { index: true, element: <MatchList /> },
       { path: "matches/:matchId", element: <MatchPage /> },
       { path: "players/:playerId", element: <PlayerPage /> },
+      { path: "meta", element: <MetaPage /> },
     ],
   },
 ]);

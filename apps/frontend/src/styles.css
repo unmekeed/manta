@@ -91,3 +91,11 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
 .hero-list li { margin: 4px 0; }
 table.players a { color: var(--accent); text-decoration: none; }
 table.players a:hover { text-decoration: underline; }
+
+.nav { display: flex; gap: 16px; margin-left: 24px; margin-right: auto; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+.nav a:hover { color: var(--text); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+.wr-positive { color: var(--radiant); font-weight: 600; }
+.wr-negative { color: var(--dire); font-weight: 600; }
