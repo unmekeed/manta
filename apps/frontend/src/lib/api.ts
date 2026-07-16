@@ -109,7 +109,34 @@ export const api = {
     get<PlayerProfile>(`/api/v1/players/${playerId}/profile`),
   metaHeroes: () =>
     get<{ heroes: MetaHero[] }>("/api/v1/meta/heroes").then((r) => r.heroes),
+  simulateDraft: async (state: DraftState): Promise<DraftRecommendation> => {
+    const resp = await fetch("/api/v1/draft/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state),
+    });
+    if (!resp.ok) throw new Error(`draft/simulate: HTTP ${resp.status}`);
+    return resp.json();
+  },
 };
+
+export interface DraftState {
+  radiant_picks: number[];
+  dire_picks: number[];
+  bans: number[];
+  next_action: "radiant_pick" | "dire_pick" | "radiant_ban" | "dire_ban";
+}
+
+export interface DraftRecommendation {
+  predicted_winrate_radiant: number;
+  model: string;
+  recommendations: {
+    hero_id: number;
+    hero: string;
+    expected_winrate: number;
+    reason: string;
+  }[];
+}
 
 export const heroLabel = (npc: string) =>
   npc.replace("npc_dota_hero_", "").replace(/_/g, " ");

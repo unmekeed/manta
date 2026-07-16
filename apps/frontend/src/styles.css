@@ -99,3 +99,20 @@ th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--text); }
 .wr-positive { color: var(--radiant); font-weight: 600; }
 .wr-negative { color: var(--dire); font-weight: 600; }
+
+.draft-slot { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.draft-slot select {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; font-size: 13px;
+}
+.chip {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 14px; padding: 4px 12px; font-size: 13px; cursor: pointer;
+  text-transform: capitalize;
+}
+.chip:hover { border-color: var(--dire); }
+.chip.primary { border-color: var(--accent); color: var(--accent); text-transform: none; }
+.chip.primary:hover { background: rgba(217, 164, 65, 0.12); }
+.wp-line { display: flex; align-items: center; gap: 12px; }
+.score-bar.draft-bar { flex: 1; width: auto; height: 10px; }
+.score-bar.draft-bar > i { background: var(--radiant); }

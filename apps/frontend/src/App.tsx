@@ -10,6 +10,7 @@ export default function App() {
         <nav className="nav">
           <Link to="/">Матчи</Link>
           <Link to="/meta">Мета</Link>
+          <Link to="/draft">Драфт</Link>
         </nav>
         <span className="tagline">аналитика Dota 2 · Win Probability · разбор ошибок</span>
       </header>

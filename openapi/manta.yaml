@@ -398,14 +398,21 @@ components:
           enum: [radiant_pick, dire_pick, radiant_ban, dire_ban]
     DraftRecommendation:
       type: object
+      description: >
+        Бейзлайн Draft Engine: оценка — разница средних сглаженных
+        винрейтов пиков по мете, рекомендации — сильнейшие доступные
+        герои. model = meta-baseline (GNN Гл. 6.2.3 придёт со своей
+        меткой, контракт не изменится).
       properties:
         predicted_winrate_radiant: { type: number, format: float }
+        model: { type: string, example: meta-baseline }
         recommendations:
           type: array
           items:
             type: object
             properties:
               hero_id: { type: integer }
+              hero: { type: string, description: npc_dota_hero_* }
               expected_winrate: { type: number, format: float }
               reason: { type: string }
     SimilarityQuery:

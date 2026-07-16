@@ -27,6 +27,7 @@ func New(h *handlers.Handlers, logger *slog.Logger, rps, burst int) http.Handler
 	api.HandleFunc("GET /api/v1/matches/{matchId}/heatmap", h.GetMatchHeatmap)
 	api.HandleFunc("GET /api/v1/players/{playerId}/profile", h.GetPlayerProfile)
 	api.HandleFunc("GET /api/v1/meta/heroes", h.GetMetaHeroes)
+	api.HandleFunc("POST /api/v1/draft/simulate", h.SimulateDraft)
 
 	mux.Handle("/api/v1/", middleware.Chain(api,
 		middleware.RateLimit(rps, burst),

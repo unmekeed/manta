@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/unmekeed/manta/api-gateway/internal/draft"
 	"github.com/unmekeed/manta/api-gateway/internal/events"
 	"github.com/unmekeed/manta/api-gateway/internal/middleware"
 	"github.com/unmekeed/manta/api-gateway/internal/storage"
@@ -295,6 +296,57 @@ func (h *Handlers) GetMetaHeroes(w http.ResponseWriter, r *http.Request) {
 		items = append(items, it)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"heroes": items})
+}
+
+// SimulateDraft — POST /api/v1/draft/simulate (Гл. 7): бейзлайн Draft
+// Engine на сглаженных винрейтах меты (internal/draft). Оценка драфта и
+// топ доступных героев для следующего действия; синергии/контрпики —
+// GNN-модель следующих фаз (Гл. 6.2.3), контракт не изменится.
+func (h *Handlers) SimulateDraft(w http.ResponseWriter, r *http.Request) {
+	var st draft.State
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).
+		Decode(&st); err != nil {
+		writeProblem(w, http.StatusBadRequest,
+			"invalid-draft", "Invalid draft state", err.Error())
+		return
+	}
+	if !draft.ValidActions[st.NextAction] {
+		writeProblem(w, http.StatusBadRequest, "invalid-draft",
+			"Invalid next_action",
+			"ожидается radiant_pick|dire_pick|radiant_ban|dire_ban")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	rows, err := h.DB.Query(ctx, `
+		SELECT hero, hero_id, matches, shrunk_winrate
+		  FROM MetaHeroes WHERE hero_id > 0`)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to load meta", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	heroes := []draft.Hero{}
+	byID := map[int]draft.Hero{}
+	for rows.Next() {
+		var hr draft.Hero
+		if err := rows.Scan(&hr.Name, &hr.HeroID, &hr.Matches,
+			&hr.ShrunkWinrate); err != nil {
+			continue
+		}
+		heroes = append(heroes, hr)
+		byID[hr.HeroID] = hr
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"predicted_winrate_radiant": draft.PredictedWinrate(
+			byID, st.RadiantPicks, st.DirePicks),
+		"recommendations": draft.Recommend(heroes, st),
+		"model":           "meta-baseline", // GNN придёт со своей меткой
+	})
 }
 
 // ListMatches — GET /api/v1/matches: последние матчи с готовыми отчётами
