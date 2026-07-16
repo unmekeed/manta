@@ -11,9 +11,15 @@
 Уведомления о старте и каждом переобучении шлёт TelegramNotifier (см.
 training.notify) — включается переменными TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
 
+Дрейф (Гл. 10.4, R-02): каждую итерацию считается PSI фич витрины против
+эталона production-модели (метрики feature_psi/feature_psi_max); при
+PSI >= RETRAIN_PSI_THRESHOLD переобучение запускается даже без прироста
+матчей — «мета уехала», гейт решает судьбу кандидата как обычно.
+
 Запуск: python -m training.auto [--once]
 Env: RETRAIN_INTERVAL_S (21600), RETRAIN_MIN_NEW_MATCHES (20),
-     RETRAIN_MIN_TOTAL_MATCHES (50), CLICKHOUSE_*, S3_* (реестр),
+     RETRAIN_MIN_TOTAL_MATCHES (50), RETRAIN_PSI_THRESHOLD (0.25, 0=выкл),
+     CLICKHOUSE_*, S3_* (реестр),
      TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (опционально).
 """
 from __future__ import annotations
@@ -30,6 +36,7 @@ from prometheus_client import Counter, Gauge, start_http_server
 from registry import registry_from_env
 
 from .dataset import load_from_clickhouse
+from .drift import feature_psi
 from .notify import TelegramNotifier
 from .train_winprob import MODEL_NAME, push_with_gate, train
 
@@ -46,6 +53,11 @@ PROD_MATCHES = Gauge("training_production_matches",
                      "Матчей в датасете production-версии")
 RETRAINS = Counter("retrains_total", "Итоги переобучений",
                    ["outcome"])  # promoted | rejected
+FEATURE_PSI = Gauge("feature_psi",
+                    "PSI фичи: витрина против эталона production-модели",
+                    ["feature"])
+PSI_MAX = Gauge("feature_psi_max",
+                "Максимальный PSI по фичам (>0.25 — дрейф, RB-ML-01)")
 
 _notifier = TelegramNotifier()
 
@@ -58,7 +70,33 @@ _notifier = TelegramNotifier()
 _last_trained_n: int | None = None
 
 
-def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
+def _measure_drift(reg, ds) -> float | None:
+    """PSI витрины против эталона production-артефакта; None — эталона нет
+    (prod обучена до появления feature_reference или отсутствует)."""
+    try:
+        raw, _ = reg.resolve(MODEL_NAME, "production")
+    except Exception:  # noqa: BLE001 — нет prod/реестра ⇒ дрейф не считаем
+        return None
+    import io
+
+    art = joblib.load(io.BytesIO(raw))
+    ref = art.get("feature_reference")
+    if not ref:
+        logger.info("production без feature_reference — PSI появится после "
+                    "следующего продвижения")
+        return None
+    scores = feature_psi(ref, ds.X)
+    for f, v in scores.items():
+        FEATURE_PSI.labels(f).set(v)
+    worst = max(scores.values(), default=0.0)
+    PSI_MAX.set(worst)
+    logger.info("PSI: %s (max %.3f)",
+                {f: round(v, 3) for f, v in scores.items()}, worst)
+    return worst
+
+
+def check_and_train(min_new: int, min_total: int, out_path: Path,
+                    psi_threshold: float = 0.25) -> str:
     """Одна итерация; возвращает статус для лога/теста."""
     global _last_trained_n
     ds = load_from_clickhouse(
@@ -74,12 +112,28 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     reg = registry_from_env()
     prod = reg.stage_metadata(MODEL_NAME)
     PROD_MATCHES.set((prod or {}).get("dataset", {}).get("matches", 0))
-    if _last_trained_n is not None and abs(ds.n_matches - _last_trained_n) < min_new:
-        logger.info("изменение датасета %+d < %d (сейчас %d, в прошлый раз "
-                    "обучались на %d) — пропуск",
-                    ds.n_matches - _last_trained_n, min_new,
-                    ds.n_matches, _last_trained_n)
-        return "not-enough-new"
+
+    # Дрейф считается каждую итерацию (метрики нужны и без переобучения).
+    worst_psi = _measure_drift(reg, ds)
+    drifted = (psi_threshold > 0 and worst_psi is not None
+               and worst_psi >= psi_threshold)
+
+    if (_last_trained_n is not None
+            and abs(ds.n_matches - _last_trained_n) < min_new):
+        if not drifted:
+            logger.info("изменение датасета %+d < %d (сейчас %d, в прошлый "
+                        "раз обучались на %d) — пропуск",
+                        ds.n_matches - _last_trained_n, min_new,
+                        ds.n_matches, _last_trained_n)
+            return "not-enough-new"
+        # R-02: мета уехала (патч) — переобучаемся, не дожидаясь новых
+        # матчей; гейт всё равно решает, попадёт ли версия в production.
+        logger.warning("PSI %.3f >= %.2f — переобучение по дрейфу, хотя "
+                       "новых матчей мало", worst_psi, psi_threshold)
+        if _notifier.enabled:
+            _notifier.send(f"📈 <b>Manta</b>: дрейф фич (PSI "
+                           f"{worst_psi:.3f} ≥ {psi_threshold}) — "
+                           f"внеплановое переобучение")
 
     delta = 0 if _last_trained_n is None else ds.n_matches - _last_trained_n
     logger.info("переобучение: %d матчей (изменение %+d с прошлого раза)",
@@ -115,6 +169,7 @@ def main() -> int:
     interval = int(os.getenv("RETRAIN_INTERVAL_S", "21600"))
     min_new = int(os.getenv("RETRAIN_MIN_NEW_MATCHES", "20"))
     min_total = int(os.getenv("RETRAIN_MIN_TOTAL_MATCHES", "50"))
+    psi_threshold = float(os.getenv("RETRAIN_PSI_THRESHOLD", "0.25"))
     out = Path(os.getenv("MODEL_OUT",
                          str(Path(__file__).resolve().parents[2]
                              / "models" / "win_probability.pkl")))
@@ -128,7 +183,7 @@ def main() -> int:
         _notifier.send("🚀 <b>Manta</b>: авто-обучение запущено\n" + _notifier.summary())
     while True:
         try:
-            check_and_train(min_new, min_total, out)
+            check_and_train(min_new, min_total, out, psi_threshold)
         except Exception:  # noqa: BLE001 — цикл живёт при сбоях зависимостей
             logger.exception("итерация auto-train упала; повтор через интервал")
         if args.once:

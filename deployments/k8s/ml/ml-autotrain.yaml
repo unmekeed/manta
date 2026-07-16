@@ -30,6 +30,7 @@ spec:
             - { name: RETRAIN_INTERVAL_S, value: "21600" }
             - { name: RETRAIN_MIN_NEW_MATCHES, value: "20" }
             - { name: RETRAIN_MIN_TOTAL_MATCHES, value: "50" }
+            - { name: RETRAIN_PSI_THRESHOLD, value: "0.25" }
             - { name: MODEL_OUT, value: /tmp/win_probability.pkl }
           ports: [{ containerPort: 9106, name: metrics }]
           livenessProbe:

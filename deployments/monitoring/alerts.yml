@@ -98,6 +98,18 @@ groups:
           summary: "Win Probability: Brier на про-эталоне выше цели 0.18"
           description: "wp_brier_benchmark_pro = {{ $value }}."
 
+      - alert: ModelDrift
+        # Гл. 11.6.2: PSI > 0.25 — распределение фич витрины разошлось с
+        # тем, что видела production-модель при обучении (патч/смена меты).
+        # Автотрейн сам инициирует внеплановое переобучение; алерт — чтобы
+        # человек знал причину скачка активности и проверил итог гейта.
+        expr: feature_psi_max > 0.25
+        for: 1h
+        labels: { severity: warning, runbook: RB-ML-01 }
+        annotations:
+          summary: "Win Probability: дрейф фич (PSI {{ $value }})"
+          description: "Максимальный PSI по фичам {{ $value }} > 0.25 — мета сместилась относительно production-модели."
+
       - alert: TrainingStalled
         # Разрыв витрины и production растёт, а автотрейн не продвигает
         # модель — залипший гейт (боль спринта 27) или лежащий автотрейн.

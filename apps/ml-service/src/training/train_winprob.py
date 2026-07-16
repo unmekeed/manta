@@ -32,7 +32,7 @@ from .dataset import (FEATURES, Dataset, dataset_hash, load_from_clickhouse,
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.3.0"  # 0.3.0: зеркальная аугментация (side-agnostic)
+MODEL_VERSION = "0.4.0"  # 0.4.0: feature_reference для PSI-дрейфа
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -102,6 +102,8 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         metrics["brier_benchmark_pro"] = round(
             float(brier_score_loss(y_bm, cal_bm)), 4)
         metrics["benchmark_rows"] = int(len(y_bm))
+    from .drift import reference_hist
+
     return {
         "model_version": MODEL_VERSION,
         "algo": "lightgbm+isotonic+mirror",
@@ -109,6 +111,10 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         "booster": booster.model_to_string(),
         "calibrator": calibrator,
         "metrics": metrics,
+        # Эталон распределений фич для PSI-дрейфа (training.drift):
+        # по нему auto-train сравнивает будущую витрину с тем, что видела
+        # эта модель при обучении. Сырые данные, без зеркалирования.
+        "feature_reference": reference_hist(ds.X),
         "dataset": {
             "matches": ds.n_matches,
             "synthetic_matches": ds.n_synthetic,

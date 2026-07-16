@@ -172,6 +172,7 @@ services:
       RETRAIN_INTERVAL_S: "21600"       # проверка раз в 6 часов
       RETRAIN_MIN_NEW_MATCHES: "20"     # переобучать при +20 матчах
       RETRAIN_MIN_TOTAL_MATCHES: "50"
+      RETRAIN_PSI_THRESHOLD: "0.25"    # дрейф фич: внеплановое переобучение
       MODEL_OUT: /tmp/win_probability.pkl
       # Telegram-уведомления (опционально): значения берутся из окружения/.env
       # хоста, пусто по умолчанию — тогда уведомления выключены. НЕ коммитить.
