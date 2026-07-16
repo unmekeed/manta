@@ -91,6 +91,23 @@ else
     skip "data-collector"
 fi
 
+if ! pgrep -f "python3 -u -m app" >/dev/null; then
+    say "запускаю ml-service (gRPC, лог: $LOG_DIR/ml-serve.log)"
+    (cd apps/ml-service && PYTHONPATH=src \
+        MODEL_PATH="${MODEL_PATH:-registry://win_probability/production}" \
+        nohup python3 -u -m app >"$LOG_DIR/ml-serve.log" 2>&1 &)
+else
+    skip "ml-service"
+fi
+
+if ! pgrep -f "python3 -u -m reportgen" >/dev/null; then
+    say "запускаю report-generator (лог: $LOG_DIR/report-gen.log)"
+    (cd apps/report-generator && PYTHONPATH=src \
+        nohup python3 -u -m reportgen >"$LOG_DIR/report-gen.log" 2>&1 &)
+else
+    skip "report-generator"
+fi
+
 # 5. Авто-обучение (+ Telegram-уведомления из env-файла) -----------------------
 if ! pgrep -f "python3 -u -m training.auto" >/dev/null; then
     say "запускаю auto-train (лог: $LOG_DIR/wp-auto.log)"
@@ -116,6 +133,8 @@ check() { printf '   %-18s %s\n' "$1" "$(pgrep -f "$2" >/dev/null && echo OK || 
 check parser-svc "^/tmp/parser-svc"
 check feature-extractor "python3 -u -m extractor"
 check data-collector "python3 -u -m collector"
+check ml-service "python3 -u -m app"
+check report-generator "python3 -u -m reportgen"
 check auto-train "python3 -u -m training.auto"
 matches=$(echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL" |
     curl -s "http://localhost:8123/?database=manta" \
