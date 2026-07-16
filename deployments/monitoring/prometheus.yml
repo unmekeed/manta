@@ -3,6 +3,14 @@
 global:
   scrape_interval: 15s
 
+# SLO-правила (Гл. 11.5–11.6) и доставка в Alertmanager.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs: [{ targets: ["alertmanager:9093"] }]
+
 scrape_configs:
   - job_name: api-gateway
     static_configs: [{ targets: ["api-gateway:8080"] }]

@@ -226,3 +226,36 @@ def test_errors_carry_safety_index():
     e = errors[0][0]
     assert e["safety_index"] >= 0.6  # два врага вплотную, глубокий заход
     assert "риск" in e["explanation"].lower()
+
+
+def test_heatmap_grid_and_teams():
+    from reportgen.builder import HEATMAP_GRID, MAP_BOUND, build_heatmap
+
+    players = [
+        {"player_id": 0, "hero": "npc_dota_hero_axe", "player_name": "A",
+         "team": 2},
+        {"player_id": 5, "hero": "npc_dota_hero_kez", "player_name": "B",
+         "team": 3},
+    ]
+    positions = [
+        # Axe у базы Radiant (юго-запад) — дважды в одной ячейке.
+        {"game_time": 10, "hero": "CDOTA_Unit_Hero_Axe",
+         "x": -MAP_BOUND, "y": -MAP_BOUND},
+        {"game_time": 11, "hero": "CDOTA_Unit_Hero_Axe",
+         "x": -MAP_BOUND, "y": -MAP_BOUND},
+        # Kez у базы Dire (северо-восток), координата за границей — клип.
+        {"game_time": 10, "hero": "CDOTA_Unit_Hero_Kez",
+         "x": MAP_BOUND + 999, "y": MAP_BOUND},
+        # Неизвестный герой игнорируется.
+        {"game_time": 10, "hero": "CDOTA_Unit_Hero_Lina", "x": 0, "y": 0},
+    ]
+    hm = build_heatmap(positions, players)
+    assert hm["grid"] == HEATMAP_GRID
+    assert len(hm["players"]) == 2
+
+    axe = hm["players"][0]
+    assert axe["player_id"] == 0 and axe["team"] == 2
+    assert axe["cells"] == [[0, 0, 2]]
+
+    kez = hm["players"][1]
+    assert kez["cells"] == [[HEATMAP_GRID - 1, HEATMAP_GRID - 1, 1]]

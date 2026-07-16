@@ -1,0 +1,41 @@
+# ML Autotrain (спринты 24–27, ns ml): фоновое переобучение с
+# промоушен-гейтом и Telegram-уведомлениями. Singleton — параллельные
+# тренировки бессмысленны и дерутся за реестр.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-autotrain
+  namespace: ml
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: ml-autotrain }
+  template:
+    metadata:
+      labels: { app: ml-autotrain }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9106"
+    spec:
+      containers:
+        - name: ml-autotrain
+          image: registry.local/manta/ml-service:latest  # тот же образ
+          args: ["-m", "training.auto"]
+          envFrom:
+            - configMapRef: { name: manta-env }
+            - secretRef: { name: manta-secrets }
+            - secretRef: { name: manta-integrations }  # TELEGRAM_*
+          env:
+            - { name: RETRAIN_INTERVAL_S, value: "21600" }
+            - { name: RETRAIN_MIN_NEW_MATCHES, value: "20" }
+            - { name: RETRAIN_MIN_TOTAL_MATCHES, value: "50" }
+            - { name: MODEL_OUT, value: /tmp/win_probability.pkl }
+          ports: [{ containerPort: 9106, name: metrics }]
+          livenessProbe:
+            tcpSocket: { port: 9106 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "2", memory: 2Gi }

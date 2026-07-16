@@ -1,0 +1,153 @@
+# SLO-правила алертинга (Гл. 11.5–11.6): алерты на симптомы (нарушение SLO),
+# а не на каждый скачок метрики. Каталог — Гл. 11.6.2, адаптирован к реальным
+# метрикам стека. Severity: warning → Telegram, critical → Telegram (в
+# production — PagerDuty). Каждый алерт несёт runbook-код (Гл. 11.8).
+
+groups:
+  # ---------------------------------------------------------------- edge ----
+  - name: api-gateway-slo
+    rules:
+      - alert: APIGatewayErrorBudgetBurn
+        # SLO доступности 99.95% (Гл. 11.5.1): 5xx-доля > 2% за 5 минут —
+        # быстрый расход бюджета ошибок (~40× допустимого).
+        expr: |
+          sum(rate(api_request_duration_seconds_count{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(api_request_duration_seconds_count[5m])), 1e-9)
+          > 0.02
+        for: 5m
+        labels: { severity: critical, runbook: RB-API-01 }
+        annotations:
+          summary: "API Gateway: быстрый расход бюджета ошибок"
+          description: "Доля 5xx {{ $value | humanizePercentage }} за 5 минут (SLO 99.95%)."
+
+      - alert: APIGatewayLatencyHigh
+        # SLO латентности: p95 ≤ 300 мс (Гл. 11.5.1).
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(api_request_duration_seconds_bucket[5m]))) > 0.3
+        for: 10m
+        labels: { severity: warning, runbook: RB-API-02 }
+        annotations:
+          summary: "API Gateway: p95 латентности выше SLO"
+          description: "p95 = {{ $value | humanizeDuration }} (SLO ≤ 300 мс)."
+
+  # -------------------------------------------------------------- ingest ----
+  - name: parser-slo
+    rules:
+      - alert: ParserSLOBreach
+        # SLO: время парсинга p95 ≤ 10 с (Гл. 11.5.1 / 11.6.2).
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(replay_parse_duration_seconds_bucket[10m]))) > 10
+        for: 10m
+        labels: { severity: critical, runbook: RB-PARSE-01 }
+        annotations:
+          summary: "Replay Parser: p95 парсинга выше 10 с"
+          description: "p95 = {{ $value | humanizeDuration }} (SLO ≤ 10 с)."
+
+      - alert: ParserDLQGrowth
+        expr: increase(replays_dlq_total[15m]) > 0
+        labels: { severity: warning, runbook: RB-PARSE-02 }
+        annotations:
+          summary: "Replay Parser: реплеи уходят в DLQ"
+          description: "{{ $value }} реплеев в DLQ за 15 минут — смотрите логи парсера."
+
+      - alert: FeatureExtractionFailures
+        expr: increase(features_failed_total[15m]) > 0
+        labels: { severity: warning, runbook: RB-ETL-01 }
+        annotations:
+          summary: "Feature Extractor: сбои расчёта фич"
+          description: "{{ $value }} сбоев за 15 минут."
+
+      - alert: CollectorCyclesFailing
+        expr: increase(collector_cycles_failed_total[30m]) > 3
+        labels: { severity: warning, runbook: RB-COLLECT-01 }
+        annotations:
+          summary: "Data Collector: циклы сбора падают"
+          description: "{{ $value }} неудачных циклов за 30 минут (OpenDota/сеть?)."
+
+  # ------------------------------------------------------------------ ml ----
+  - name: ml-slo
+    rules:
+      - alert: MLPredictLatencyHigh
+        # SLO: Predict p95 ≤ 400 мс (Гл. 11.5.1, Гл. 3.7).
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(ml_predict_latency_seconds_bucket[5m]))) > 0.4
+        for: 10m
+        labels: { severity: warning, runbook: RB-ML-03 }
+        annotations:
+          summary: "ML Service: p95 Predict выше SLO"
+          description: "p95 = {{ $value | humanizeDuration }} (SLO ≤ 400 мс)."
+
+      - alert: WPCalibrationDegraded
+        # Гл. 11.6.2: Brier > 0.20 — деградация калибровки Win Probability.
+        expr: wp_brier_valid > 0.20
+        for: 30m
+        labels: { severity: warning, runbook: RB-ML-02 }
+        annotations:
+          summary: "Win Probability: Brier валидации выше 0.20"
+          description: "wp_brier_valid = {{ $value }} — модель теряет калибровку."
+
+      - alert: WPBenchmarkDegraded
+        # Цель проекта: Brier на про-эталоне ≤ 0.18 (Гл. 6.1).
+        expr: wp_brier_benchmark_pro > 0.18
+        for: 30m
+        labels: { severity: warning, runbook: RB-ML-02 }
+        annotations:
+          summary: "Win Probability: Brier на про-эталоне выше цели 0.18"
+          description: "wp_brier_benchmark_pro = {{ $value }}."
+
+      - alert: TrainingStalled
+        # Разрыв витрины и production растёт, а автотрейн не продвигает
+        # модель — залипший гейт (боль спринта 27) или лежащий автотрейн.
+        expr: (training_dataset_matches - training_production_matches) > 100
+        for: 12h
+        labels: { severity: warning, runbook: RB-ML-04 }
+        annotations:
+          summary: "Автотрейн: production отстаёт от витрины на {{ $value }} матчей"
+          description: "12 часов разрыв > 100 матчей без промоушена — проверьте make ml-status и гейт."
+
+      - alert: RetrainsAlwaysRejected
+        # Кандидаты стабильно отклоняются гейтом при отсутствии промоушенов.
+        expr: |
+          increase(retrains_total{outcome="rejected"}[24h]) >= 3
+            and increase(retrains_total{outcome="promoted"}[24h]) == 0
+        labels: { severity: warning, runbook: RB-ML-04 }
+        annotations:
+          summary: "Автотрейн: все переобучения за сутки отклонены гейтом"
+          description: "≥3 rejected и 0 promoted за 24 часа — симптом залипшего гейта."
+
+  # -------------------------------------------------------------- report ----
+  - name: report-slo
+    rules:
+      - alert: ReportGenerationFailures
+        expr: increase(reports_failed_total[15m]) > 0
+        labels: { severity: warning, runbook: RB-REPORT-01 }
+        annotations:
+          summary: "Report Generator: сбои генерации отчётов"
+          description: "{{ $value }} сбоев за 15 минут."
+
+      - alert: ReportGenerationSlow
+        # SLO LLM Service: отчёт ≤ 8 с p95 (Гл. 3.8).
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(report_duration_seconds_bucket[10m]))) > 8
+        for: 10m
+        labels: { severity: warning, runbook: RB-REPORT-02 }
+        annotations:
+          summary: "Report Generator: p95 генерации выше 8 с"
+          description: "p95 = {{ $value | humanizeDuration }} (SLO ≤ 8 с)."
+
+  # ------------------------------------------------------------ platform ----
+  - name: platform
+    rules:
+      - alert: TargetDown
+        # Аналог Pod crashloop (Гл. 11.6.2) для compose-стека: цель скрейпа
+        # недоступна 5 минут.
+        expr: up == 0
+        for: 5m
+        labels: { severity: critical, runbook: RB-K8S-01 }
+        annotations:
+          summary: "Сервис {{ $labels.job }} недоступен"
+          description: "Prometheus не может скрейпить {{ $labels.instance }} 5 минут."

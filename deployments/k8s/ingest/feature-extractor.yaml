@@ -1,0 +1,31 @@
+# Feature Extractor / ETL (Гл. 3.4, ns ingest).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feature-extractor
+  namespace: ingest
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: feature-extractor }
+  template:
+    metadata:
+      labels: { app: feature-extractor }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+    spec:
+      containers:
+        - name: feature-extractor
+          image: registry.local/manta/feature-extractor:latest  # kustomize images
+          envFrom:
+            - configMapRef: { name: manta-env }
+            - secretRef: { name: manta-secrets }
+          ports: [{ containerPort: 9102, name: metrics }]
+          livenessProbe:
+            tcpSocket: { port: 9102 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }

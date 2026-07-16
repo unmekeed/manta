@@ -1,0 +1,35 @@
+# Report Generator (Гл. 3, ns ml): материализация отчётов + LLM-нарратив.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-generator
+  namespace: ml
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: report-generator }
+  template:
+    metadata:
+      labels: { app: report-generator }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9103"
+    spec:
+      containers:
+        - name: report-generator
+          image: registry.local/manta/report-generator:latest  # kustomize images
+          envFrom:
+            - configMapRef: { name: manta-env }
+            - secretRef: { name: manta-secrets }
+            - secretRef: { name: manta-integrations }  # ANTHROPIC_API_KEY
+          env:
+            - { name: ML_GRPC_ADDR, value: ml-service.ml.svc:50051 }
+            - { name: NARRATIVE_MODEL, value: claude-opus-4-8 }
+          ports: [{ containerPort: 9103, name: metrics }]
+          livenessProbe:
+            tcpSocket: { port: 9103 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }

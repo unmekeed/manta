@@ -199,6 +199,9 @@ services:
     environment:
       <<: *app-env
       ML_GRPC_ADDR: ml-service:50051
+      # LLM-нарратив (опционально): без ключа — шаблонный бейзлайн.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      NARRATIVE_MODEL: "${NARRATIVE_MODEL:-claude-opus-4-8}"
     depends_on:
       kafka: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -219,9 +222,25 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prom_data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"   # dev: скрейп хост-процессов
+    restart: unless-stopped
+
+  alertmanager:
+    profiles: ["monitoring"]
+    image: prom/alertmanager:v0.27.0
+    ports:
+      - "9093:9093"
+    environment:
+      # Тот же Telegram-бот, что у ml-autotrain; пусто ⇒ алерты без доставки.
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+    volumes:
+      - ./monitoring/alertmanager/entrypoint.sh:/entrypoint.sh:ro
+      - alertmanager_data:/alertmanager
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     restart: unless-stopped
 
   grafana:
@@ -248,3 +267,4 @@ volumes:
   minio_data:
   prom_data:
   grafana_data:
+  alertmanager_data:

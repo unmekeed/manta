@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
+import HeatmapCanvas from "../components/HeatmapCanvas";
 import WpChart from "../components/WpChart";
 import { api, heroLabel, type PlayerAnalysis } from "../lib/api";
 
@@ -58,6 +59,12 @@ export default function MatchPage() {
     queryKey: ["timeline", matchId],
     queryFn: () => api.timeline(matchId),
   });
+  // 404 для отчётов старой версии — секция просто скрывается.
+  const heatmap = useQuery({
+    queryKey: ["heatmap", matchId],
+    queryFn: () => api.heatmap(matchId),
+    retry: false,
+  });
 
   if (analysis.isLoading || timeline.isLoading)
     return <div className="loading">Загрузка разбора…</div>;
@@ -93,6 +100,15 @@ export default function MatchPage() {
       <div className="panel">
         <PlayersTable players={a.players} />
       </div>
+
+      {heatmap.data && heatmap.data.players.length > 0 && (
+        <>
+          <h2>Тепловая карта позиций</h2>
+          <div className="panel">
+            <HeatmapCanvas heatmap={heatmap.data} />
+          </div>
+        </>
+      )}
 
       <h2>Ключевые ошибки (ΔWP)</h2>
       {errors.length === 0 ? (

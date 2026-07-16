@@ -4,3 +4,4 @@ psycopg[binary]>=3.2
 grpcio>=1.60
 protobuf>=4.25
 prometheus-client>=0.20
+anthropic>=0.60

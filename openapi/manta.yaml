@@ -109,6 +109,23 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Timeline' }
+  /api/v1/matches/{matchId}/heatmap:
+    get:
+      tags: [Matches]
+      summary: Тепловая карта позиций
+      operationId: getMatchHeatmap
+      parameters:
+        - name: matchId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Разреженные сетки плотности позиций по игрокам
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Heatmap' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/players/{playerId}/profile:
     get:
       tags: [Players]
@@ -271,6 +288,30 @@ components:
               game_time: { type: integer }
               radiant_wp: { type: number, format: float }
               net_worth_diff: { type: integer }
+    Heatmap:
+      type: object
+      description: >
+        Плотность позиций по игрокам: сетка grid x grid поверх мировых
+        координат, ячейка (0,0) — юго-запад (база Radiant), ось y вверх.
+        cells — разреженный список [gx, gy, count].
+      properties:
+        grid: { type: integer, example: 64 }
+        players:
+          type: array
+          items:
+            type: object
+            properties:
+              player_id: { type: integer }
+              hero: { type: string }
+              player_name: { type: string }
+              team: { type: integer, description: '2 — Radiant, 3 — Dire' }
+              cells:
+                type: array
+                items:
+                  type: array
+                  items: { type: integer }
+                  minItems: 3
+                  maxItems: 3
     MatchAnalysis:
       type: object
       properties:

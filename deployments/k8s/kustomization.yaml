@@ -1,0 +1,43 @@
+# Kustomize-база платформы Manta (Гл. 12).
+#   kubectl apply -k deployments/k8s
+# Образы подменяются трансформером images (тег = git SHA в CI).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespaces.yaml
+  - config/env.yaml
+  - data/postgres.yaml
+  - data/clickhouse.yaml
+  - data/kafka.yaml
+  - data/minio.yaml
+  - edge/api-gateway.yaml
+  - edge/frontend.yaml
+  - edge/ingress.yaml
+  - ingest/data-collector.yaml
+  - ingest/replay-parser.yaml
+  - ingest/feature-extractor.yaml
+  - ml/ml-service.yaml
+  - ml/ml-autotrain.yaml
+  - ml/report-generator.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: manta
+    includeSelectors: false
+
+images:
+  - name: registry.local/manta/api-gateway
+    newTag: latest
+  - name: registry.local/manta/frontend
+    newTag: latest
+  - name: registry.local/manta/data-collector
+    newTag: latest
+  - name: registry.local/manta/replay-parser
+    newTag: latest
+  - name: registry.local/manta/feature-extractor
+    newTag: latest
+  - name: registry.local/manta/ml-service
+    newTag: latest
+  - name: registry.local/manta/report-generator
+    newTag: latest

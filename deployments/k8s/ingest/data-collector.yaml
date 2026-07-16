@@ -1,0 +1,36 @@
+# Data Collector (Гл. 3.2, ns ingest): опрос OpenDota, singleton.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-collector
+  namespace: ingest
+spec:
+  replicas: 1
+  strategy: { type: Recreate }  # один опросчик, без гонок за курсор
+  selector:
+    matchLabels: { app: data-collector }
+  template:
+    metadata:
+      labels: { app: data-collector }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9105"
+    spec:
+      containers:
+        - name: data-collector
+          image: registry.local/manta/data-collector:latest  # kustomize images
+          envFrom:
+            - configMapRef: { name: manta-env }
+            - secretRef: { name: manta-secrets }
+          env:
+            - { name: COLLECTOR_SOURCE, value: opendota-public }
+            - { name: COLLECTOR_INTERVAL_SECONDS, value: "60" }
+            - { name: OPENDOTA_LIMIT, value: "3" }
+          ports: [{ containerPort: 9105, name: metrics }]
+          livenessProbe:
+            tcpSocket: { port: 9105 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 250m, memory: 256Mi }

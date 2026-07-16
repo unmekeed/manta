@@ -5,14 +5,15 @@ MatchAnalysis).
 готовые JSON-объекты для MatchReports. Поля laning_score/impact_score —
 детерминированные бейзлайн-прокси (честные модели Laning Evaluator и
 Impact придут в следующих спринтах, Гл. 6.2.1); отчёт помечен
-partial=true, пока список ошибок пуст и нарратив шаблонный (не LLM).
+partial=true, пока оценки — прокси. Нарратив: LLM (narrative.py) с
+деградацией на шаблон build_narrative().
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-REPORT_VERSION = "0.2.0"  # 0.2.0: hero_id из словаря, errors (ΔWP)
+REPORT_VERSION = "0.3.0"  # 0.3.0: LLM-нарратив + narrative_source/gpm
 
 # Словарь героев (libs/data/heroes.json, снапшот OpenDota constants):
 # npc_dota_hero_* → числовой id и локализованное имя. Путь зависит от
@@ -128,6 +129,49 @@ def index_positions(positions: list[dict]) -> dict[str, list[tuple[int, float, f
     for pts in by_hero.values():
         pts.sort()
     return by_hero
+
+
+# -- Heatmap позиций (Гл. 7, спринт 28) --------------------------------------
+# Сетка GRID x GRID поверх мировых координат [-MAP_BOUND, MAP_BOUND];
+# ячейка (0,0) — юго-западный угол (база Radiant), ось y вверх. Фронтенд
+# рисует плотность на канве миникарты; разреженное представление
+# [[gx, gy, count], ...] держит JSON компактным (снапшоты ~1 Гц).
+
+HEATMAP_GRID = 64
+MAP_BOUND = 8500.0
+
+
+def build_heatmap(positions: list[dict], players: list[dict]) -> dict:
+    """PositionSnapshots + PlayerMatchFeatures → сетки плотности по игрокам."""
+    hero_player = {_normalize_hero(str(p.get("hero", ""))): int(p["player_id"])
+                   for p in players if p.get("hero")}
+    meta = {int(p["player_id"]): p for p in players}
+    cells: dict[int, dict[tuple[int, int], int]] = {}
+    scale = HEATMAP_GRID / (2.0 * MAP_BOUND)
+    for pos in positions:
+        pid = hero_player.get(_normalize_hero(str(pos.get("hero", ""))))
+        if pid is None:
+            continue
+        gx = int((float(pos["x"]) + MAP_BOUND) * scale)
+        gy = int((float(pos["y"]) + MAP_BOUND) * scale)
+        gx = min(max(gx, 0), HEATMAP_GRID - 1)
+        gy = min(max(gy, 0), HEATMAP_GRID - 1)
+        grid = cells.setdefault(pid, {})
+        grid[(gx, gy)] = grid.get((gx, gy), 0) + 1
+    return {
+        "grid": HEATMAP_GRID,
+        "players": [
+            {
+                "player_id": pid,
+                "hero": str(meta.get(pid, {}).get("hero", "")),
+                "player_name": str(meta.get(pid, {}).get("player_name", "")),
+                "team": int(meta.get(pid, {}).get("team", 0)),
+                "cells": [[gx, gy, n]
+                          for (gx, gy), n in sorted(cells[pid].items())],
+            }
+            for pid in sorted(cells)
+        ],
+    }
 
 
 def _pos_at(pts: list[tuple[int, float, float]], t: int,
@@ -311,8 +355,13 @@ def build_narrative(winner: str, players: list[dict],
 def build_analysis(match_id: int, winner: str, players: list[dict],
                    timeline: dict, model_version: str,
                    kills: list[dict] | None = None,
-                   positions: list[dict] | None = None) -> dict:
-    """Схема MatchAnalysis (+ hero/player_name — аддитивные поля)."""
+                   positions: list[dict] | None = None,
+                   narrator=None) -> dict:
+    """Схема MatchAnalysis (+ hero/player_name — аддитивные поля).
+
+    narrator — опциональный LLMNarrator (narrative.py); None или сбой
+    генерации ⇒ шаблонный бейзлайн (Гл. 3.9, деградация).
+    """
     points = timeline["points"]
     final_wp = points[-1]["radiant_wp"] if points else 0.5
     turning = _turning_point(points)
@@ -325,28 +374,39 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
         points, kills or [], hero_player, player_team,
         positions_by_hero=index_positions(positions) if positions else None)
 
+    player_entries = [
+        {
+            "player_id": int(p["player_id"]),
+            "hero_id": hero_id(str(p.get("hero", ""))),
+            "lane": p.get("lane", ""),
+            "hero": p.get("hero", ""),
+            "player_name": p.get("player_name", ""),
+            "gpm": float(p.get("gpm", 0)),
+            "laning_score": _laning_score(p),
+            "impact_score": _impact_score(impact.get(int(p["player_id"]), 0.0)),
+            "delta_wp_sum": round(impact.get(int(p["player_id"]), 0.0), 4),
+            "errors": errors.get(int(p["player_id"]), []),
+        }
+        for p in sorted(players, key=lambda x: int(x["player_id"]))
+    ]
+
+    narrative = None
+    if narrator is not None:
+        narrative = narrator.generate(winner, final_wp, turning, player_entries)
+    narrative_source = "llm" if narrative else "template"
+    if narrative is None:
+        narrative = build_narrative(winner, players, turning)
+
     return {
         "match_id": match_id,
         "status": "completed",
         "win_probability": {"final_radiant": final_wp},
-        "players": [
-            {
-                "player_id": int(p["player_id"]),
-                "hero_id": hero_id(str(p.get("hero", ""))),
-                "lane": p.get("lane", ""),
-                "hero": p.get("hero", ""),
-                "player_name": p.get("player_name", ""),
-                "laning_score": _laning_score(p),
-                "impact_score": _impact_score(impact.get(int(p["player_id"]), 0.0)),
-                "delta_wp_sum": round(impact.get(int(p["player_id"]), 0.0), 4),
-                "errors": errors.get(int(p["player_id"]), []),
-            }
-            for p in sorted(players, key=lambda x: int(x["player_id"]))
-        ],
-        "narrative": build_narrative(winner, players, turning),
-        # partial: нарратив шаблонный, laning/impact — прокси, ошибки —
-        # rule-based ΔWP-бейзлайн (без Safety Index и классов, кроме
-        # critical_death).
+        "players": player_entries,
+        "narrative": narrative,
+        "narrative_source": narrative_source,
+        # partial: laning/impact — прокси, ошибки — rule-based
+        # ΔWP-бейзлайн (без Safety Index и классов, кроме critical_death) —
+        # независимо от того, LLM нарратив или шаблон.
         "partial": True,
         "report_version": REPORT_VERSION,
         "model_version": model_version,

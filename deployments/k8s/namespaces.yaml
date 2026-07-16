@@ -1,0 +1,20 @@
+# Неймспейсы (Гл. 12.1): изоляция слоёв платформы.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data

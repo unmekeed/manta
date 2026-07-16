@@ -1,0 +1,57 @@
+# Replay Parser (Гл. 3.3, ns ingest) + HPA (Гл. 12.2.2).
+# Спека масштабирует по kafka_consumergroup_lag (External metric — нужен
+# prometheus-adapter/KEDA); до его установки HPA работает по CPU: парсинг
+# CPU-bound, лаг очереди коррелирует с загрузкой ЦП реплик.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: replay-parser
+  namespace: ingest
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: replay-parser }
+  template:
+    metadata:
+      labels: { app: replay-parser }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+    spec:
+      containers:
+        - name: replay-parser
+          image: registry.local/manta/replay-parser:latest  # kustomize images
+          envFrom:
+            - configMapRef: { name: manta-env }
+            - secretRef: { name: manta-secrets }
+          env:
+            - { name: WORK_DIR, value: /tmp }
+            - { name: PURGE_PARSED_REPLAYS, value: "true" }
+          ports: [{ containerPort: 9101, name: metrics }]
+          livenessProbe:
+            tcpSocket: { port: 9101 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: replay-parser-hpa
+  namespace: ingest
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: replay-parser
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

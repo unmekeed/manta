@@ -22,13 +22,16 @@ import requests
 from confluent_kafka import Consumer, Producer
 from prometheus_client import Counter, Histogram, start_http_server
 
-from .builder import build_analysis, build_timeline
+from .builder import build_analysis, build_heatmap, build_timeline
 from .gen import services_pb2, services_pb2_grpc
+from .narrative import LLMNarrator
 
 logger = logging.getLogger("reportgen")
 
 REPORTS_GENERATED = Counter(
     "reports_generated_total", "Сгенерированные отчёты")
+NARRATIVES = Counter(
+    "report_narratives_total", "Нарративы по источнику", ["source"])
 REPORTS_FAILED = Counter(
     "reports_failed_total", "Сбои генерации отчётов")
 REPORT_DURATION = Histogram(
@@ -68,6 +71,11 @@ class ReportGenerator:
         self.producer = Producer({"bootstrap.servers": cfg.kafka_brokers})
         self.ml = services_pb2_grpc.MLServiceStub(
             grpc.insecure_channel(cfg.ml_grpc_addr))
+        self.narrator = LLMNarrator()
+        logger.info("LLM narrative: %s (model=%s)",
+                    "enabled" if self.narrator.enabled else
+                    "disabled (no ANTHROPIC_API_KEY) — template fallback",
+                    self.narrator.model)
 
     # -- источники данных -------------------------------------------------------
 
@@ -157,21 +165,25 @@ class ReportGenerator:
         positions = self._position_rows(match_id)
         analysis = build_analysis(match_id, winner, players, timeline,
                                   model_version, kills=kills,
-                                  positions=positions)
+                                  positions=positions, narrator=self.narrator)
+        NARRATIVES.labels(analysis["narrative_source"]).inc()
+        heatmap = build_heatmap(positions, players)
 
         self.db.execute(
             """INSERT INTO MatchReports
-                   (match_id, analysis, timeline, model_version,
+                   (match_id, analysis, timeline, heatmap, model_version,
                     feature_version, generated_at)
-               VALUES (%s, %s, %s, %s, %s, NOW())
+               VALUES (%s, %s, %s, %s, %s, %s, NOW())
                ON CONFLICT (match_id) DO UPDATE SET
                    analysis = EXCLUDED.analysis,
                    timeline = EXCLUDED.timeline,
+                   heatmap = EXCLUDED.heatmap,
                    model_version = EXCLUDED.model_version,
                    feature_version = EXCLUDED.feature_version,
                    generated_at = NOW()""",
             (match_id, json.dumps(analysis, ensure_ascii=False),
-             json.dumps(timeline), model_version, feature_version))
+             json.dumps(timeline), json.dumps(heatmap, ensure_ascii=False),
+             model_version, feature_version))
 
         payload = {
             "match_id": match_id,

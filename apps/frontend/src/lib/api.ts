@@ -41,6 +41,19 @@ export interface MatchAnalysis {
   model_version: string;
 }
 
+export interface HeatmapPlayer {
+  player_id: number;
+  hero: string;
+  player_name: string;
+  team: number; // 2 = Radiant, 3 = Dire
+  cells: [number, number, number][]; // [gx, gy, count], (0,0) — юго-запад
+}
+
+export interface Heatmap {
+  grid: number;
+  players: HeatmapPlayer[];
+}
+
 export interface MatchListItem {
   match_id: number;
   final_radiant_wp: string;
@@ -64,6 +77,8 @@ export const api = {
     get<MatchAnalysis>(`/api/v1/matches/${matchId}/analysis`),
   timeline: (matchId: string) =>
     get<Timeline>(`/api/v1/matches/${matchId}/timeline`),
+  heatmap: (matchId: string) =>
+    get<Heatmap>(`/api/v1/matches/${matchId}/heatmap`),
 };
 
 export const heroLabel = (npc: string) =>

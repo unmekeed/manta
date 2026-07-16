@@ -1,0 +1,52 @@
+# ClickHouse (Гл. 12.1, ns data). Dev-grade single-node; production —
+# шардированный кластер через clickhouse-operator (Гл. 4).
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: data
+spec:
+  clusterIP: None
+  selector: { app: clickhouse }
+  ports:
+    - { name: http, port: 8123 }
+    - { name: native, port: 9000 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: data
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels: { app: clickhouse }
+  template:
+    metadata:
+      labels: { app: clickhouse }
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.8
+          env:
+            - { name: CLICKHOUSE_USER, value: dota }
+            - { name: CLICKHOUSE_PASSWORD, value: dota_dev_password }
+            - { name: CLICKHOUSE_DB, value: manta }
+          ports:
+            - { containerPort: 8123 }
+            - { containerPort: 9000 }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse }
+          readinessProbe:
+            httpGet: { path: /ping, port: 8123 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "2", memory: 4Gi }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 20Gi } }

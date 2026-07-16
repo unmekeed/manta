@@ -179,6 +179,14 @@ func (h *Handlers) reportColumn(w http.ResponseWriter, r *http.Request,
 			fmt.Sprintf("match %s: no report; загрузите реплей или дождитесь обработки", matchID))
 		return
 	}
+	// NULL-колонка (отчёт сгенерирован до появления поля, напр. heatmap
+	// из миграции 004): 404 до перегенерации отчёта.
+	if len(body) == 0 {
+		writeProblem(w, http.StatusNotFound, "report-not-found",
+			"Report section is not generated yet",
+			fmt.Sprintf("match %s: отчёт старой версии, поле %s появится после перегенерации", matchID, column))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -194,6 +202,12 @@ func (h *Handlers) GetMatchTimeline(w http.ResponseWriter, r *http.Request) {
 // MatchAnalysis): итоговая WP, оценки игроков, нарратив.
 func (h *Handlers) GetMatchAnalysis(w http.ResponseWriter, r *http.Request) {
 	h.reportColumn(w, r, "analysis")
+}
+
+// GetMatchHeatmap — GET /api/v1/matches/{matchId}/heatmap (Гл. 7):
+// разреженные сетки плотности позиций по игрокам (grid 64x64).
+func (h *Handlers) GetMatchHeatmap(w http.ResponseWriter, r *http.Request) {
+	h.reportColumn(w, r, "heatmap")
 }
 
 // ListMatches — GET /api/v1/matches: последние матчи с готовыми отчётами

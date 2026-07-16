@@ -1,0 +1,52 @@
+# ML Service (Гл. 3.7 / 12.2.1, ns ml): gRPC-инференс Win Probability.
+# GPU-лимит из спеки не задан: LightGBM-инференс CPU-bound; вернётся с NN.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-service
+  namespace: ml
+spec:
+  selector: { app: ml-service }
+  ports:
+    - { name: grpc, port: 50051 }
+    - { name: metrics, port: 9104 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-service
+  namespace: ml
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ml-service }
+  template:
+    metadata:
+      labels: { app: ml-service }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+    spec:
+      containers:
+        - name: ml-service
+          image: registry.local/manta/ml-service:latest  # kustomize images
+          args: ["-m", "app"]
+          envFrom:
+            - configMapRef: { name: manta-env }
+            - secretRef: { name: manta-secrets }
+          env:
+            - { name: MODEL_PATH, value: registry://win_probability/production }
+          ports:
+            - { containerPort: 50051, name: grpc }
+            - { containerPort: 9104, name: metrics }
+          readinessProbe:
+            grpc: { port: 50051 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 50051 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }

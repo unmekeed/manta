@@ -72,3 +72,14 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
   margin-left: 8px; padding: 1px 8px; border-radius: 5px; font-size: 12px;
   background: rgba(217, 164, 65, 0.15); color: var(--accent); font-weight: 600;
 }
+
+.heatmap { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.heatmap-canvas { border-radius: 8px; max-width: 100%; }
+.heatmap-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.heatmap-controls button, .heatmap-controls select {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 12px; font-size: 13px; cursor: pointer;
+}
+.heatmap-controls button.active { border-color: var(--accent); color: var(--accent); }
+.heatmap-controls button.radiant.active { border-color: var(--radiant); color: var(--radiant); }
+.heatmap-controls button.dire.active { border-color: var(--dire); color: var(--dire); }

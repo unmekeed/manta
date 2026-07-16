@@ -1,0 +1,27 @@
+# Ingress (Гл. 12.1): / — SPA, /api — шлюз. TLS терминируется на
+# ингресс-контроллере (cert-manager в production).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: manta
+  namespace: edge
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 128m  # загрузка .dem
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: manta.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port: { number: 8080 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port: { number: 80 }
