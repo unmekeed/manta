@@ -104,6 +104,9 @@ ml-audit:      ## Аудит датасета: сдвиг приора, длит
 recover:       ## Восстановить dev-стек после перезапуска среды (идемпотентно)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/dev-recover.sh
 
+dashboard:     ## Живой дашборд наблюдаемости без Docker/Grafana (:9107)
+	python3 scripts/dashboard.py
+
 stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
 	$(COMPOSE) --profile apps up -d --build
 
