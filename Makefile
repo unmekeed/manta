@@ -3,7 +3,7 @@
 GO_SERVICES := apps/api-gateway apps/replay-parser/svc
 COMPOSE     := docker compose -f deployments/docker-compose.yml
 
-.PHONY: up down ps topics migrate migrate-pg migrate-ch lint test build clean
+.PHONY: up down ps topics migrate migrate-pg migrate-ch lint test build clean ml-insights
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -94,6 +94,9 @@ ml-auto-train: ## Автономное переобучение (порог но
 
 ml-status:     ## Статус обучения: production-версия, разрыв датасета, кандидаты
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.status
+
+ml-insights:   ## Разбор production-модели: важности фич, направления, ΔWP-пробы
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.insights
 
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.audit

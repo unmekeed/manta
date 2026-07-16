@@ -201,3 +201,17 @@ def test_train_mirror_flag():
     art = train(ds, num_rounds=60, mirror=True)
     assert "mirror" in art["algo"]
     assert art["metrics"]["brier_calibrated"] < 0.25
+
+
+def test_insights_render_on_trained_model():
+    """Разбор модели: важности, направления, чувствительность по золоту."""
+    from training.insights import render, sensitivity
+
+    art = train(synth_matches(120), num_rounds=120)
+    out = render(art, {"metrics": art["metrics"], "dataset": art["dataset"]},
+                 "v-test")
+    assert "что модель поняла про Dota" in out
+    for f in FEATURES:
+        assert f in out
+    # Преимущество в золоте должно двигать WP Radiant вверх.
+    assert sensitivity(art, "networth_diff") > 0

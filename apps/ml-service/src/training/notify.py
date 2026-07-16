@@ -45,16 +45,44 @@ class TelegramNotifier:
 
     def resolve_chat_id(self) -> str | None:
         """Если chat_id не задан — взять последний чат из getUpdates
-        (пользователь должен был написать боту /start)."""
+        (пользователь должен был написать боту /start).
+
+        ХРУПКО по построению: после рестарта берётся ПОСЛЕДНИЙ написавший
+        боту чат — если бота добавили в группу или написали из другого
+        чата, уведомления «переезжают» туда; а через 24 часа getUpdates
+        пустеет и уведомления молча пропадают. Для стабильной доставки
+        закрепите TELEGRAM_CHAT_ID в окружении (deployments/.env)."""
         if self.chat_id:
             return self.chat_id
         try:
             upd = self._call("getUpdates")
-            chats = [u["message"]["chat"]["id"] for u in upd.get("result", [])
-                     if "message" in u]
-            if chats:
-                self.chat_id = str(chats[-1])
-                logger.info("chat_id определён из getUpdates: %s", self.chat_id)
+            # (id, человекочитаемое имя чата) в порядке апдейтов, без дублей.
+            seen: dict[str, str] = {}
+            for u in upd.get("result", []):
+                chat = u.get("message", {}).get("chat")
+                if not chat:
+                    continue
+                label = (chat.get("title") or chat.get("username")
+                         or chat.get("first_name") or "?")
+                cid = str(chat["id"])
+                seen.pop(cid, None)       # переставить в конец (последний)
+                seen[cid] = f"{label} ({chat.get('type', '?')})"
+            if not seen:
+                logger.warning(
+                    "getUpdates пуст (апдейты живут 24 часа) — уведомления "
+                    "не будут доставлены; напишите боту /start или закрепите "
+                    "TELEGRAM_CHAT_ID")
+                return None
+            if len(seen) > 1:
+                logger.warning(
+                    "боту писали из %d чатов: %s — выбран последний; "
+                    "закрепите TELEGRAM_CHAT_ID, чтобы уведомления не "
+                    "«переезжали» между чатами",
+                    len(seen),
+                    "; ".join(f"{cid}={name}" for cid, name in seen.items()))
+            self.chat_id = next(reversed(seen))
+            logger.info("chat_id определён из getUpdates: %s (%s)",
+                        self.chat_id, seen[self.chat_id])
         except Exception:  # noqa: BLE001
             logger.exception("не удалось получить chat_id из getUpdates")
         return self.chat_id or None
