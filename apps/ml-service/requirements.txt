@@ -4,5 +4,9 @@ numpy>=1.26
 joblib>=1.3
 requests>=2.32
 grpcio>=1.60
-protobuf>=4.25
 prometheus-client>=0.20
+# Клиент MLflow Model Registry (REGISTRY_BACKEND=mlflow, Гл. 10.6).
+mlflow-skinny>=3
+# После mlflow: его пин protobuf<7 консервативен, а gRPC-стабы собраны
+# gencode 7.x — ставим protobuf последним, чтобы он выиграл.
+protobuf>=7.35

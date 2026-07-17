@@ -69,3 +69,60 @@ def test_list_versions():
     reg.push("wp", b"x", META, run_id="r1")
     reg.push("wp", b"y", META, run_id="r2")
     assert reg.list_versions("wp") == ["0.1.0-r1", "0.1.0-r2"]
+
+
+# -- MLflow-бэкенд (Гл. 10.6, Фаза 4) -----------------------------------------
+# Тесты идут по локальному file-store MLflow (без сервера): семантика
+# push/promote/resolve та же, что у live-сервера из compose.
+
+def _mlflow_reg(tmp_path):
+    import os
+    os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"  # тесты; live идёт в сервер
+    from registry.mlflow_store import MlflowRegistry
+    return MlflowRegistry(f"file://{tmp_path}/mlruns")
+
+
+def test_mlflow_push_resolve_roundtrip(tmp_path):
+    reg = _mlflow_reg(tmp_path)
+    v1 = reg.push("wp", b"artifact-1", {"model_version": "0.4.0",
+                                        "metrics": {"brier_calibrated": 0.15}})
+    assert v1 == "1"
+    # стейджа ещё нет
+    assert reg.stage_metadata("wp") is None
+    reg.promote("wp", v1)
+    art, meta = reg.resolve("wp", "production")
+    assert art == b"artifact-1"
+    assert meta["registry_version"].startswith("0.4.0-")
+    assert meta["metrics"]["brier_calibrated"] == 0.15
+
+
+def test_mlflow_promote_switches_and_rollback(tmp_path):
+    reg = _mlflow_reg(tmp_path)
+    v1 = reg.push("wp", b"old", {"model_version": "0.4.0"})
+    v2 = reg.push("wp", b"new", {"model_version": "0.4.1"})
+    assert reg.list_versions("wp") == ["1", "2"]
+    reg.promote("wp", v2)
+    assert reg.resolve("wp")[0] == b"new"
+    # точная версия резолвится напрямую, откат = promote старой
+    assert reg.resolve("wp", v1)[0] == b"old"
+    reg.promote("wp", v1)
+    assert reg.resolve("wp")[0] == b"old"
+
+
+def test_mlflow_missing_raises_keyerror(tmp_path):
+    import pytest
+    reg = _mlflow_reg(tmp_path)
+    with pytest.raises(KeyError):
+        reg.resolve("nope", "production")
+    assert reg.list_versions("nope") == []
+
+
+def test_registry_backend_switch(tmp_path, monkeypatch):
+    """registry_from_env выбирает бэкенд по REGISTRY_BACKEND."""
+    from registry import registry_from_env
+    from registry.mlflow_store import MlflowRegistry
+
+    monkeypatch.setenv("REGISTRY_BACKEND", "mlflow")
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"file://{tmp_path}/mlruns")
+    assert isinstance(registry_from_env(), MlflowRegistry)

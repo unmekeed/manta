@@ -136,8 +136,29 @@ train + 58 pro benchmark, синтетики нет):
 - `.github/workflows/ml-retrain.yml` — еженедельная проверка конвейера
   обучения на синтетике + ручной запуск переобучения.
 
-Интерфейс push/promote/resolve повторяет семантику MLflow Registry —
-замена на MLflow при развёртывании Фазы 4 не тронет вызывающий код.
+### MLflow-бэкенд (Фаза 4)
+
+Интерфейс push/promote/resolve с самого начала повторял семантику MLflow
+Registry — и теперь MLflow доступен как второй бэкенд без единой правки
+вызывающего кода:
+
+```bash
+docker compose -f deployments/docker-compose.yml up -d mlflow   # UI: :9600
+REGISTRY_BACKEND=mlflow MLFLOW_TRACKING_URI=http://localhost:9600 \
+    make ml-auto-train     # или ml-serve — любой потребитель реестра
+```
+
+`registry.mlflow_store.MlflowRegistry` (клиент — mlflow-skinny): push =
+run в эксперименте `manta-models` (метрики Brier видны в UI) + артефакты
++ ModelVersion; наш semver-run идентификатор — тег `manta_version`;
+стейдж = alias реестра (актуальный API, стейджи MLflow deprecated);
+resolve — по alias или номеру версии. Артефакты проксируются через
+tracking-сервер (`--serve-artifacts`) — S3-креды клиентам не нужны.
+Dev-хранилище — sqlite на volume; прод — тот же сервис с postgres-URI.
+Проверено вживую: production-артефакт из S3-реестра прошёл цикл
+push → promote → resolve в MLflow байт-в-байт, gRPC-сервер поднялся с
+`REGISTRY_BACKEND=mlflow`. По умолчанию остаётся S3-бэкенд — миграция
+включается одной переменной, откат — её удалением.
 
 ## Автономное переобучение (Гл. 10.4)
 
