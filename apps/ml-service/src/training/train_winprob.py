@@ -27,12 +27,13 @@ import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss, log_loss
 
-from .dataset import (FEATURES, Dataset, dataset_hash, load_from_clickhouse,
-                      merge, mirror_xy, synth_matches)
+from .dataset import (FEATURES, PRO_TIER, Dataset, dataset_hash,
+                      load_from_clickhouse, merge, mirror_xy, synth_matches)
+from .drift import compute_reference
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.3.0"  # 0.3.0: зеркальная аугментация (side-agnostic)
+MODEL_VERSION = "0.4.0"  # 0.4.0: референс распределения фич для PSI-дрейфа
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -102,6 +103,14 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         metrics["brier_benchmark_pro"] = round(
             float(brier_score_loss(y_bm, cal_bm)), 4)
         metrics["benchmark_rows"] = int(len(y_bm))
+    # Референс распределения фич для PSI-дрейфа (Гл. 10.4): все строки,
+    # которые модель видела (train+valid, исходная ориентация, без эталона).
+    # auto.py сравнивает с ним текущую витрину и триггерит переобучение
+    # при значимом дрейфе (типично — после баланс-патча).
+    non_pro = (ds.tiers != PRO_TIER) if ds.tiers is not None \
+        else np.ones(len(ds.y), dtype=bool)
+    drift_reference = compute_reference(ds.X[non_pro], FEATURES)
+
     return {
         "model_version": MODEL_VERSION,
         "algo": "lightgbm+isotonic+mirror",
@@ -109,6 +118,7 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         "booster": booster.model_to_string(),
         "calibrator": calibrator,
         "metrics": metrics,
+        "drift_reference": drift_reference,
         "dataset": {
             "matches": ds.n_matches,
             "synthetic_matches": ds.n_synthetic,
@@ -228,6 +238,9 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
         "metrics": artifact["metrics"],
         "dataset": artifact["dataset"],
         "trained_at": artifact["trained_at"],
+        # компактный (≈1 КиБ) референс для PSI: auto.py читает его из
+        # stage_metadata, не скачивая артефакт целиком
+        "drift_reference": artifact.get("drift_reference", {}),
     })
     try:
         prod_bytes, _ = reg.resolve(MODEL_NAME, "production")

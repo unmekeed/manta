@@ -1,20 +1,27 @@
 """Автономное переобучение Win Probability (Гл. 10.4: continuous training).
 
-Цикл: раз в RETRAIN_INTERVAL_S проверить размер витрины. Если он изменился
-на >= RETRAIN_MIN_NEW_MATCHES с момента последнего переобучения в этом
-процессе (по модулю — устойчиво к сбросу/перестройке витрины) — переобучить
-и загрузить в реестр; продвижение решает гейт по метрике на про-эталоне
-(should_promote), поэтому деградация в сервинг не попадает даже при
-полностью автономной работе. Первый прогон при наличии >= RETRAIN_MIN_TOTAL
-матчей обучает сразу.
+Цикл: раз в RETRAIN_INTERVAL_S проверить размер витрины. Переобучение
+запускается, если сработал ЛЮБОЙ из триггеров:
+
+- объём: размер витрины изменился на >= RETRAIN_MIN_NEW_MATCHES с момента
+  последнего переобучения в этом процессе (по модулю — устойчиво к
+  сбросу/перестройке витрины);
+- дрейф (Гл. 10.4, риск R-02): PSI распределения фич текущей витрины
+  против референса production-модели превысил RETRAIN_PSI_THRESHOLD —
+  типично после баланс-патча Dota: матчей может быть мало, но игра уже
+  другая, и ждать полного порога объёма опасно.
+
+Продвижение решает честный гейт (evaluate_gate), поэтому деградация в
+сервинг не попадает даже при полностью автономной работе. Первый прогон при
+наличии >= RETRAIN_MIN_TOTAL матчей обучает сразу.
 
 Уведомления о старте и каждом переобучении шлёт TelegramNotifier (см.
 training.notify) — включается переменными TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
 
 Запуск: python -m training.auto [--once]
 Env: RETRAIN_INTERVAL_S (21600), RETRAIN_MIN_NEW_MATCHES (20),
-     RETRAIN_MIN_TOTAL_MATCHES (50), CLICKHOUSE_*, S3_* (реестр),
-     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (опционально).
+     RETRAIN_MIN_TOTAL_MATCHES (50), RETRAIN_PSI_THRESHOLD (0.2),
+     CLICKHOUSE_*, S3_* (реестр), TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 """
 from __future__ import annotations
 
@@ -29,7 +36,8 @@ from prometheus_client import Counter, Gauge, start_http_server
 
 from registry import registry_from_env
 
-from .dataset import load_from_clickhouse
+from .dataset import FEATURES, load_from_clickhouse
+from .drift import PSI_SIGNIFICANT, max_psi, psi_report
 from .notify import TelegramNotifier
 from .train_winprob import MODEL_NAME, push_with_gate, train
 
@@ -46,6 +54,10 @@ PROD_MATCHES = Gauge("training_production_matches",
                      "Матчей в датасете production-версии")
 RETRAINS = Counter("retrains_total", "Итоги переобучений",
                    ["outcome"])  # promoted | rejected
+FEATURE_PSI = Gauge("wp_feature_psi",
+                    "PSI фичи: текущая витрина против референса production",
+                    ["feature"])
+PSI_MAX = Gauge("wp_psi_max", "Максимальный PSI по фичам")
 
 _notifier = TelegramNotifier()
 
@@ -74,16 +86,40 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     reg = registry_from_env()
     prod = reg.stage_metadata(MODEL_NAME)
     PROD_MATCHES.set((prod or {}).get("dataset", {}).get("matches", 0))
-    if _last_trained_n is not None and abs(ds.n_matches - _last_trained_n) < min_new:
+
+    # Дрейф фич: PSI текущей витрины против референса production-модели
+    # (компактные децильные гистограммы в метаданных версии). Старые версии
+    # без референса дрейф-триггер не активируют — только метрика объёма.
+    drift_max = 0.0
+    reference = (prod or {}).get("drift_reference") or {}
+    if reference and len(ds.y) > 0:
+        report = psi_report(reference, ds.X, FEATURES)
+        for name, val in report.items():
+            FEATURE_PSI.labels(name).set(val)
+        drift_max = max_psi(report)
+        PSI_MAX.set(drift_max)
+        logger.info("PSI против production: max %.3f %s", drift_max, report)
+
+    psi_threshold = float(os.getenv("RETRAIN_PSI_THRESHOLD",
+                                    str(PSI_SIGNIFICANT)))
+    enough_new = (_last_trained_n is None
+                  or abs(ds.n_matches - _last_trained_n) >= min_new)
+    # Дрейф триггерит, только если витрина изменилась с последнего обучения
+    # В ЭТОМ ПРОЦЕССЕ: иначе (гейт отклонил кандидата, дрейф остался)
+    # переобучение на тех же данных дало бы ту же модель каждый цикл.
+    drifted = (drift_max >= psi_threshold
+               and ds.n_matches != _last_trained_n)
+    if not enough_new and not drifted:
         logger.info("изменение датасета %+d < %d (сейчас %d, в прошлый раз "
-                    "обучались на %d) — пропуск",
+                    "обучались на %d), PSI %.3f < %.2f — пропуск",
                     ds.n_matches - _last_trained_n, min_new,
-                    ds.n_matches, _last_trained_n)
+                    ds.n_matches, _last_trained_n, drift_max, psi_threshold)
         return "not-enough-new"
 
     delta = 0 if _last_trained_n is None else ds.n_matches - _last_trained_n
-    logger.info("переобучение: %d матчей (изменение %+d с прошлого раза)",
-                ds.n_matches, delta)
+    trigger = "drift" if (drifted and not enough_new) else "volume"
+    logger.info("переобучение [%s]: %d матчей (изменение %+d, PSI %.3f)",
+                trigger, ds.n_matches, delta, drift_max)
     artifact = train(ds)
     _last_trained_n = ds.n_matches
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +133,8 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     # (evaluate_gate внутри push_with_gate) — устойчиво к «удачному» prod.
     _, promoted, reason = push_with_gate(artifact, out_path, logger, ds=ds)
     RETRAINS.labels("promoted" if promoted else "rejected").inc()
+    if trigger == "drift":
+        reason = f"⚠️ дрейф фич (PSI {drift_max:.2f}) → {reason}"
     if _notifier.enabled:
         _notifier.on_retrain(m, promoted, reason, ds.n_matches)
     return "trained"

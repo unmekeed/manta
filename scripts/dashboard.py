@@ -136,6 +136,7 @@ def collect() -> dict:
         "brier_valid": _pick(auto, "wp_brier_valid"),
         "promoted":    _pick(auto, "retrains_total", outcome="promoted"),
         "rejected":    _pick(auto, "retrains_total", outcome="rejected"),
+        "psi_max":     _pick(auto, "wp_psi_max"),
         "collected":   _sum(m("data-collector"), "matches_collected_total"),
         "parsed":      _sum(par, "replays_parsed_total"),
         "dlq":         _sum(par, "replays_dlq_total"),
@@ -349,6 +350,10 @@ async function refresh() {
     tile({label:"Продвинуто версий", value:nfmt(T.promoted), hist:H.promoted,
           sparkOpts:{floorZero:true},
           foot: T.rejected ? `отклонено гейтом: ${nfmt(T.rejected)}` : ""}),
+    tile({label:"PSI (дрейф фич)", value:T.psi_max!=null?nfmt(T.psi_max,3):null,
+          hist:H.psi_max, sparkOpts:{floorZero:true}, alert:T.psi_max>=0.2,
+          foot: T.psi_max!=null ? (T.psi_max>=0.2 ? "значимый дрейф — переобучение"
+                : "порог 0.2") : "нужна production с референсом"}),
   ].join("");
 
   // Плитки потока данных

@@ -175,6 +175,103 @@ def test_autotrain_thresholds(monkeypatch, tmp_path):
     assert len(pushed) == 3
 
 
+def test_psi_zero_on_same_distribution():
+    from training.dataset import FEATURES
+    from training.drift import compute_reference, max_psi, psi_report
+
+    ds = synth_matches(60, seed=5)
+    ref = compute_reference(ds.X, FEATURES)
+    report = psi_report(ref, ds.X, FEATURES)
+    # те же данные → PSI ≈ 0 по каждой фиче
+    assert report and max_psi(report) < 0.01
+    # другой seed того же генератора — та же популяция, дрейфа нет
+    other = synth_matches(60, seed=6)
+    assert max_psi(psi_report(ref, other.X, FEATURES)) < 0.1
+
+
+def test_psi_detects_shift():
+    import numpy as np
+    from training.dataset import FEATURES
+    from training.drift import compute_reference, psi_report
+
+    ds = synth_matches(60, seed=5)
+    ref = compute_reference(ds.X, FEATURES)
+    # имитация баланс-патча: экономика раздулась в полтора раза
+    shifted = ds.X.copy()
+    nw = FEATURES.index("networth_diff")
+    shifted[:, nw] = shifted[:, nw] * 1.5 + 4000
+    report = psi_report(ref, shifted, FEATURES)
+    assert report["networth_diff"] > 0.2          # значимый дрейф пойман
+    assert report["game_time"] < 0.05             # нетронутая фича спокойна
+
+
+def test_psi_constant_feature_no_crash():
+    import numpy as np
+    from training.drift import compute_reference, max_psi, psi_report
+
+    X = np.column_stack([np.full(100, 7.0), np.random.default_rng(0).normal(size=100)])
+    ref = compute_reference(X, ["const", "noise"])
+    # константная фича схлопнулась в один бин и в отчёт не попадает
+    report = psi_report(ref, X, ["const", "noise"])
+    assert "const" not in report and "noise" in report
+    assert max_psi(report) < 0.01
+
+
+def test_autotrain_drift_trigger(monkeypatch, tmp_path):
+    """Значимый PSI против production запускает переобучение, даже когда
+    новых матчей меньше порога объёма; без изменения витрины дрейф-триггер
+    молчит (переобучение на тех же данных дало бы ту же модель)."""
+    import numpy as np
+    from training import auto
+    from training.dataset import FEATURES
+    from training.drift import compute_reference
+
+    monkeypatch.setattr(auto, "_last_trained_n", None)
+    base = synth_matches(60, seed=5)
+    holder = {"ds": base}
+
+    # production обучена на данных ДО «патча»: референс от base
+    prod_meta = {"dataset": {"matches": 60},
+                 "drift_reference": compute_reference(base.X, FEATURES)}
+
+    class FakeReg:
+        def stage_metadata(self, name):
+            return prod_meta
+
+    pushed = []
+    monkeypatch.setattr(auto, "load_from_clickhouse", lambda *a, **k: holder["ds"])
+    monkeypatch.setattr(auto, "push_with_gate",
+                        lambda art, path, log, ds=None:
+                        (pushed.append(art) or ("v", True, "ok")))
+    monkeypatch.setattr(auto, "train",
+                        lambda d: {"metrics": {"brier_calibrated": 0.1}})
+    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg())
+
+    out = tmp_path / "m.pkl"
+    assert auto.check_and_train(20, 50, out) == "trained"   # первый прогон
+    assert len(pushed) == 1
+
+    # +5 матчей (< 20) без дрейфа — пропуск
+    grown = synth_matches(65, seed=5)
+    holder["ds"] = grown
+    assert auto.check_and_train(20, 50, out) == "not-enough-new"
+    assert len(pushed) == 1
+
+    # те же +5 матчей, но экономика уехала (патч) → дрейф-триггер обучает
+    drifted = synth_matches(65, seed=5)
+    drifted.X = drifted.X.copy()
+    nw = FEATURES.index("networth_diff")
+    drifted.X[:, nw] = drifted.X[:, nw] * 1.5 + 4000
+    holder["ds"] = drifted
+    assert auto.check_and_train(20, 50, out) == "trained"
+    assert len(pushed) == 2
+
+    # дрейф остался, но витрина не изменилась (65 == последнее обучение) —
+    # повторного переобучения на тех же данных нет
+    assert auto.check_and_train(20, 50, out) == "not-enough-new"
+    assert len(pushed) == 2
+
+
 def test_mirror_xy_symmetry():
     from training.dataset import FEATURES, mirror_xy
     import numpy as np
