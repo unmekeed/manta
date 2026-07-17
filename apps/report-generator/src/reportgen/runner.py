@@ -110,7 +110,8 @@ class ReportGenerator:
             "  FROM PlayerMatchFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY player_id", match_id)
 
-    def _wp_curve(self, match_id: int, rows: list[dict]) -> tuple[list[float], str]:
+    def _wp_curve(self, match_id: int, rows: list[dict]
+                  ) -> tuple[list[float], list[list[dict]], str]:
         def frames():
             for r in rows:
                 kills_r = float(r["kills_radiant"])
@@ -126,7 +127,12 @@ class ReportGenerator:
                         "position_advance": float(r.get("position_advance", 0)),
                     }))
 
-        wp = [p.radiant for p in self.ml.PredictStream(frames())]
+        wp, drivers = [], []
+        for p in self.ml.PredictStream(frames()):
+            wp.append(p.radiant)
+            drivers.append([{"feature": c.feature_name,
+                             "value": round(c.contribution, 4)}
+                            for c in p.top_contributions])
         # Версию модели узнаём отдельным Predict по последней точке.
         last = rows[-1]
         resp = self.ml.Predict(services_pb2.PredictRequest(
@@ -139,7 +145,7 @@ class ReportGenerator:
                 "kills_total": float(last["kills_radiant"]) + float(last["kills_dire"]),
                 "position_advance": float(last.get("position_advance", 0)),
             })))
-        return wp, resp.model_version
+        return wp, drivers, resp.model_version
 
     # -- генерация ---------------------------------------------------------------
 
@@ -151,8 +157,8 @@ class ReportGenerator:
         players = self._player_rows(match_id)
         winner = "Radiant" if int(rows[-1]["radiant_win"]) == 1 else "Dire"
 
-        wp, model_version = self._wp_curve(match_id, rows)
-        timeline = build_timeline(match_id, rows, wp)
+        wp, drivers, model_version = self._wp_curve(match_id, rows)
+        timeline = build_timeline(match_id, rows, wp, drivers)
         kills = self._kill_rows(match_id)
         positions = self._position_rows(match_id)
         analysis = build_analysis(match_id, winner, players, timeline,

@@ -89,3 +89,30 @@ def test_predict_stream_curve(channel):
     # и к концу уверенно выше 0.5.
     assert curve[-1].radiant >= curve[0].radiant
     assert curve[-1].radiant > 0.6
+
+
+def test_predict_stream_shap_contributions(channel):
+    """PredictStream отдаёт SHAP-вклады кадра: топ-3 по |значению|,
+    осмысленный знак у решающей фичи при большом преимуществе."""
+    stub = services_pb2_grpc.MLServiceStub(channel)
+    frames = iter([
+        services_pb2.FeatureFrame(
+            match_id=1, game_time=1800,
+            features=fv(game_time=1800.0, networth_diff=20000.0,
+                        xp_diff=24000.0, kills_diff=15.0, kills_total=30.0,
+                        position_advance=0.8)),
+        services_pb2.FeatureFrame(
+            match_id=1, game_time=1860,
+            features=fv(game_time=1860.0, networth_diff=-20000.0,
+                        xp_diff=-24000.0, kills_diff=-15.0, kills_total=30.0,
+                        position_advance=-0.8)),
+    ])
+    ahead, behind = list(stub.PredictStream(frames))
+    for p in (ahead, behind):
+        assert 1 <= len(p.top_contributions) <= 3
+        names = {c.feature_name for c in p.top_contributions}
+        assert names  # имена фич из артефакта
+    # Уверенное преимущество Radiant → главный вклад положительный;
+    # зеркальная позиция → отрицательный.
+    assert ahead.top_contributions[0].contribution > 0
+    assert behind.top_contributions[0].contribution < 0

@@ -60,6 +60,9 @@ message WinProbability {
   int32 game_time = 1;
   double radiant = 2;
   double confidence = 3;
+  // SHAP-вклады фич кадра (топ по |значению|, лог-оддсы). Заполняется
+  // PredictStream'ом; потребители прикладывают их к DetectedError.
+  repeated FeatureContribution top_contributions = 4;
 }
 
 // ---------------------------------------------------------------------------

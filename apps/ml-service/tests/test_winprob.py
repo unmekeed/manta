@@ -298,3 +298,26 @@ def test_train_mirror_flag():
     art = train(ds, num_rounds=60, mirror=True)
     assert "mirror" in art["algo"]
     assert art["metrics"]["brier_calibrated"] < 0.25
+
+
+def test_shap_contributions_sum_to_raw_score():
+    """Сумма SHAP-вкладов + bias == сырой скор модели (лог-оддсы):
+    sigmoid(суммы) совпадает с некалиброванным предсказанием бустера."""
+    import lightgbm as lgb
+    import numpy as np
+    from explain.winprob_shap import contributions, top_drivers
+
+    ds = synth_matches(80, seed=21)
+    art = train(ds, num_rounds=80)
+    booster = lgb.Booster(model_str=art["booster"])
+    X = ds.X[:50]
+    contribs, bias = contributions(booster, X)
+    margin = contribs.sum(axis=1) + bias
+    proba = 1.0 / (1.0 + np.exp(-margin))
+    assert np.allclose(proba, booster.predict(X), atol=1e-6)
+
+    drivers = top_drivers(contribs, FEATURES, k=3)
+    assert len(drivers) == len(X) and all(len(d) <= 3 for d in drivers)
+    # топ-1 действительно максимален по модулю (вклады округлены до 4 знаков)
+    for row, drv in zip(contribs, drivers):
+        assert abs(drv[0][1]) >= abs(row).max() - 1e-3

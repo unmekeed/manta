@@ -226,3 +226,35 @@ def test_errors_carry_safety_index():
     e = errors[0][0]
     assert e["safety_index"] >= 0.6  # два врага вплотную, глубокий заход
     assert "риск" in e["explanation"].lower()
+
+
+def test_error_carries_shap_drivers():
+    """SHAP-вклады кадра из timeline-точки прикладываются к ошибке."""
+    from reportgen.builder import detect_errors
+
+    drv = [{"feature": "networth_diff", "value": -0.8},
+           {"feature": "kills_diff", "value": -0.3}]
+    pts = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+           for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                        (300, 0.3)]]
+    pts[3]["drivers"] = drv  # снапшот конца окна падения
+    errors = detect_errors(
+        pts, [{"game_time": 200, "target": "npc_dota_hero_axe"}],
+        {"npc_dota_hero_axe": 0}, {0: 2})
+    err = errors[0][0]
+    assert err["top_contributions"] == drv
+
+
+def test_timeline_points_carry_drivers():
+    from reportgen.builder import build_timeline
+
+    rows = [{"game_time": 60, "networth_diff": 100},
+            {"game_time": 120, "networth_diff": 300}]
+    drivers = [[{"feature": "game_time", "value": 0.1}],
+               [{"feature": "networth_diff", "value": 0.2}]]
+    tl = build_timeline(1, rows, [0.5, 0.6], drivers)
+    assert tl["points"][0]["drivers"] == drivers[0]
+    assert tl["points"][1]["drivers"] == drivers[1]
+    # без drivers ключ отсутствует (обратная совместимость отчёта)
+    tl2 = build_timeline(1, rows, [0.5, 0.6])
+    assert "drivers" not in tl2["points"][0]

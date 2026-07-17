@@ -22,6 +22,7 @@ import grpc
 import numpy as np
 from prometheus_client import Counter, Histogram, start_http_server
 
+from explain.winprob_shap import explain_matrix
 from gen import services_pb2, services_pb2_grpc
 from predictors.win_probability import DEFAULT_MODEL, WinProbability
 
@@ -81,11 +82,20 @@ class MLService(services_pb2_grpc.MLServiceServicer):
                               f"{missing}")
             with PREDICT_LATENCY.time():
                 wp = float(self.model.predict(X)[0])
+                # SHAP кадра (TreeSHAP через pred_contrib — дёшево на
+                # одном снапшоте): потребители прикладывают топ-вклады к
+                # DetectedError в отчёте (Гл. 6.2, интерпретируемость).
+                drivers = explain_matrix(self.model.booster, X,
+                                         self.model.features, k=3)[0]
             PREDICTIONS.labels("stream").inc()
             yield services_pb2.WinProbability(
                 game_time=frame.game_time,
                 radiant=wp,
                 confidence=_confidence(wp),
+                top_contributions=[
+                    services_pb2.FeatureContribution(
+                        feature_name=name, contribution=val)
+                    for name, val in drivers],
             )
 
 

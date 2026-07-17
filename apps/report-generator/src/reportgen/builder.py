@@ -44,9 +44,11 @@ def hero_id(npc_name: str) -> int:
     return int(HEROES.get(npc_name, {}).get("id", 0))
 
 
-def build_timeline(match_id: int, rows: list[dict],
-                   wp: list[float]) -> dict:
-    """Схема Timeline: точки {game_time, radiant_wp, net_worth_diff}."""
+def build_timeline(match_id: int, rows: list[dict], wp: list[float],
+                   drivers: list[list[dict]] | None = None) -> dict:
+    """Схема Timeline: точки {game_time, radiant_wp, net_worth_diff
+    [, drivers]}; drivers — SHAP-вклады кадра из PredictStream (топ фич,
+    лог-оддсы), прикладываются и к ошибкам в wp_attribution."""
     points = [
         {
             "game_time": int(r["game_time"]),
@@ -55,6 +57,9 @@ def build_timeline(match_id: int, rows: list[dict],
         }
         for r, p in zip(rows, wp)
     ]
+    if drivers:
+        for pt, drv in zip(points, drivers):
+            pt["drivers"] = drv
     return {"match_id": match_id, "points": points}
 
 
@@ -235,7 +240,7 @@ def wp_attribution(points: list[dict], kills: list[dict],
                 note = ""
                 if si >= 0.6:
                     note = f" Позиция была рискованной (SI {si:.2f})."
-                errors.setdefault(pid, []).append({
+                err = {
                     "type": "critical_death",
                     "game_time": int(k["game_time"]),
                     "delta_wp": round(share, 4),
@@ -245,7 +250,12 @@ def wp_attribution(points: list[dict], kills: list[dict],
                         f"вероятность победы команды упала на "
                         f"{abs(share) * 100:.0f}% (окно {t_lo // 60}–{t_hi // 60} мин)."
                         + note),
-                })
+                }
+                # SHAP-вклады снапшота после события (конец окна): что
+                # именно модель «увидела» в состоянии игры (Гл. 6.2).
+                if points[i].get("drivers"):
+                    err["top_contributions"] = points[i]["drivers"]
+                errors.setdefault(pid, []).append(err)
 
         killers = {hero_player[str(k["attacker"])]
                    for k in window
