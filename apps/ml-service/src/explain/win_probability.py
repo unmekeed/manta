@@ -35,7 +35,8 @@ def main() -> int:
                 "default_format": "JSONEachRow",
                 "param_match_id": str(args.match_id)},
         data="SELECT game_time, networth_diff, xp_diff,"
-             "       kills_radiant, kills_dire, position_advance"
+             "       kills_radiant, kills_dire, position_advance,"
+             "       alive_diff, towers_diff, rax_diff"
              "  FROM MatchTimelineFeatures FINAL"
              " WHERE match_id = {match_id:UInt64} ORDER BY game_time",
         headers={"X-ClickHouse-User": os.getenv("CLICKHOUSE_USER", "dota"),

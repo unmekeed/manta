@@ -29,7 +29,8 @@ def channel(tmp_path_factory):
 
 def fv(**overrides):
     values = {"game_time": 1800.0, "networth_diff": 0.0, "xp_diff": 0.0,
-              "kills_diff": 0.0, "kills_total": 20.0, "position_advance": 0.0}
+              "kills_diff": 0.0, "kills_total": 20.0, "position_advance": 0.0,
+              "alive_diff": 0.0, "towers_diff": 0.0, "rax_diff": 0.0}
     values.update(overrides)
     return services_pb2.FeatureVector(values=values)
 
@@ -100,12 +101,14 @@ def test_predict_stream_shap_contributions(channel):
             match_id=1, game_time=1800,
             features=fv(game_time=1800.0, networth_diff=20000.0,
                         xp_diff=24000.0, kills_diff=15.0, kills_total=30.0,
-                        position_advance=0.8)),
+                        position_advance=0.8, alive_diff=3.0,
+                        towers_diff=5.0, rax_diff=1.0)),
         services_pb2.FeatureFrame(
             match_id=1, game_time=1860,
             features=fv(game_time=1860.0, networth_diff=-20000.0,
                         xp_diff=-24000.0, kills_diff=-15.0, kills_total=30.0,
-                        position_advance=-0.8)),
+                        position_advance=-0.8, alive_diff=-3.0,
+                        towers_diff=-5.0, rax_diff=-1.0)),
     ])
     ahead, behind = list(stub.PredictStream(frames))
     for p in (ahead, behind):

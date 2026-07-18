@@ -77,6 +77,24 @@ def timeline_rows(m: dict) -> list[dict]:
             c += 1
         return c
 
+    # Снесённые здания из objectives: снесённое goodguys (Radiant) здание —
+    # очко Dire, badguys — очко Radiant (знак согласован с networth_diff).
+    tower_events, rax_events = [], []
+    for obj in m.get("objectives") or []:
+        key = str(obj.get("key", ""))
+        if obj.get("type") != "building_kill" or "time" not in obj:
+            continue
+        delta = 1 if "badguys" in key else -1
+        if "tower" in key:
+            tower_events.append((int(obj["time"]), delta))
+        elif "_rax_" in key:
+            rax_events.append((int(obj["time"]), delta))
+    tower_events.sort()
+    rax_events.sort()
+
+    def _cum_delta(events: list[tuple[int, int]], t: int) -> int:
+        return sum(d for et, d in events if et <= t)
+
     rows = []
     for i in range(1, n):
         t = i * 60
@@ -88,6 +106,9 @@ def timeline_rows(m: dict) -> list[dict]:
             "kills_radiant": _cum(r_kills, t),
             "kills_dire": _cum(d_kills, t),
             "position_advance": math.nan,   # позиций в JSON нет — пропуск
+            "alive_diff": math.nan,         # живые герои — только из реплея
+            "towers_diff": float(_cum_delta(tower_events, t)),
+            "rax_diff": float(_cum_delta(rax_events, t)),
             "radiant_win": radiant_win,
         })
     return rows

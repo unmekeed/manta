@@ -147,8 +147,33 @@ def test_runner_inserts_and_marks(monkeypatch):
     assert len(lines) == 3
     first = lines[0].split("\t")
     assert first[0] == "42" and first[1] == "60"
-    assert "nan" in lines[0]                      # position_advance
-    assert "opendota-json@1" in lines[0]
+    assert lines[0].count("nan") == 2             # position_advance + alive_diff
+    assert "opendota-json@2" in lines[0]
     # PG: INSERT в CollectedMatches и CollectorCursor
     kinds = [k for k, _ in pg_store["sql"]]
     assert kinds.count("INSERT") == 2
+
+
+def test_timeline_rows_building_diffs_from_objectives():
+    """towers_diff/rax_diff из objectives: снесённое goodguys-здание — очко
+    Dire (−1), badguys — очко Radiant (+1), накопительно по минутам."""
+    m = _parsed_match(minutes=10)
+    m["objectives"] = [
+        {"type": "building_kill", "time": 130,
+         "key": "npc_dota_badguys_tower1_mid"},     # Radiant снёс: +1
+        {"type": "building_kill", "time": 250,
+         "key": "npc_dota_goodguys_tower1_top"},    # Dire снёс: -1
+        {"type": "building_kill", "time": 400,
+         "key": "npc_dota_badguys_melee_rax_bot"},  # ракс Radiant'ом: +1
+        {"type": "CHAT_MESSAGE_FIRSTBLOOD", "time": 90},  # не здание
+    ]
+    rows = timeline_rows(m)
+    by_t = {r["game_time"]: r for r in rows}
+    assert by_t[120]["towers_diff"] == 0.0
+    assert by_t[180]["towers_diff"] == 1.0
+    assert by_t[300]["towers_diff"] == 0.0     # +1 и −1
+    assert by_t[360]["rax_diff"] == 0.0
+    assert by_t[420]["rax_diff"] == 1.0
+    # alive недоступен из JSON
+    import math as _m
+    assert all(_m.isnan(r["alive_diff"]) for r in rows)

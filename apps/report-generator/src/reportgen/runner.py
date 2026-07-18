@@ -87,7 +87,8 @@ class ReportGenerator:
     def _timeline_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT game_time, networth_diff, xp_diff, kills_radiant,"
-            "       kills_dire, position_advance, radiant_win"
+            "       kills_dire, position_advance, alive_diff,"
+            "       towers_diff, rax_diff, radiant_win"
             "  FROM MatchTimelineFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY game_time", match_id)
 
@@ -112,10 +113,11 @@ class ReportGenerator:
 
     def _wp_curve(self, match_id: int, rows: list[dict]
                   ) -> tuple[list[float], list[list[dict]], str]:
-        def _pos(r: dict) -> float:
-            # У JSON-матчей позиции нет: ClickHouse отдаёт NaN как null.
-            # NaN — корректный пропуск для модели (protobuf double его несёт).
-            v = r.get("position_advance")
+        def _f(r: dict, key: str) -> float:
+            # Отсутствующие фичи (JSON-матчи, строки до миграции 008):
+            # ClickHouse отдаёт NaN как null → NaN — корректный пропуск
+            # для модели (protobuf double его несёт).
+            v = r.get(key)
             return float(v) if v is not None else float("nan")
 
         def frames():
@@ -130,7 +132,10 @@ class ReportGenerator:
                         "xp_diff": float(r["xp_diff"]),
                         "kills_diff": kills_r - kills_d,
                         "kills_total": kills_r + kills_d,
-                        "position_advance": _pos(r),
+                        "position_advance": _f(r, "position_advance"),
+                        "alive_diff": _f(r, "alive_diff"),
+                        "towers_diff": _f(r, "towers_diff"),
+                        "rax_diff": _f(r, "rax_diff"),
                     }))
 
         wp, drivers = [], []
@@ -149,7 +154,10 @@ class ReportGenerator:
                 "xp_diff": float(last["xp_diff"]),
                 "kills_diff": float(last["kills_radiant"]) - float(last["kills_dire"]),
                 "kills_total": float(last["kills_radiant"]) + float(last["kills_dire"]),
-                "position_advance": _pos(last),
+                "position_advance": _f(last, "position_advance"),
+                "alive_diff": _f(last, "alive_diff"),
+                "towers_diff": _f(last, "towers_diff"),
+                "rax_diff": _f(last, "rax_diff"),
             })))
         return wp, drivers, resp.model_version
 

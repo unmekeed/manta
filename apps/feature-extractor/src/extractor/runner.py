@@ -92,8 +92,14 @@ class Extractor:
             "   AND target LIKE 'npc_dota_hero_%'"
             " ORDER BY game_time",
             {"match_id": match_id})
+        building_kills = self.ch.select(
+            "SELECT game_time, target FROM ReplayEvents"
+            " WHERE match_id = {match_id:UInt64} AND event_type = 'KILL'"
+            "   AND (target LIKE '%_tower%' OR target LIKE '%_rax_%')"
+            " ORDER BY game_time",
+            {"match_id": match_id})
         positions = self.ch.select(
-            "SELECT game_time, hero, x, y FROM PositionSnapshots"
+            "SELECT game_time, hero, x, y, is_alive FROM PositionSnapshots"
             " WHERE match_id = {match_id:UInt64} ORDER BY game_time",
             {"match_id": match_id})
         if not economy:
@@ -101,7 +107,8 @@ class Extractor:
 
         prows = player_features(economy, roster, duration_s,
                                 positions=positions)
-        trows = timeline_features(economy, kills, roster, positions=positions)
+        trows = timeline_features(economy, kills, roster, positions=positions,
+                                  building_kills=building_kills)
         for r in prows:
             r["match_id"] = match_id
             r["tier"] = tier

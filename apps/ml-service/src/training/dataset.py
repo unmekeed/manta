@@ -23,11 +23,15 @@ FEATURES = [
     "kills_diff",
     "kills_total",
     "position_advance",   # территориальное продвижение [-1,1] (миграция 005)
+    "alive_diff",         # живые герои R−D (миграция 008; NaN у JSON-матчей)
+    "towers_diff",        # снесённые башни R−D накопительно (миграция 008)
+    "rax_diff",           # снесённые бараки R−D накопительно (миграция 008)
 ]
 
 # Фичи, меняющие знак при зеркалировании сторон Radiant↔Dire (все
 # разностные и территориальные). game_time и kills_total симметричны.
-MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance"}
+MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
+                 "alive_diff", "towers_diff", "rax_diff"}
 
 
 PRO_TIER = "Professional"
@@ -113,18 +117,24 @@ class Dataset:
 def row_to_features(row: dict) -> list[float]:
     kills_r = float(row["kills_radiant"])
     kills_d = float(row["kills_dire"])
-    # position_advance есть только у реплей-матчей; у JSON-таймлайнов
-    # (источник opendota_timeline) её нет. Отсутствие = NaN — нативный
-    # пропуск LightGBM, НЕ 0: ноль означал бы «бой ровно в центре карты»,
-    # ложный сигнал. ClickHouse отдаёт NaN в JSONEachRow как null → None.
-    pos = row.get("position_advance")
+    # Отсутствующие фичи = NaN — нативный пропуск LightGBM, НЕ 0 (ноль —
+    # ложный сигнал «ровно посередине»). ClickHouse отдаёт NaN как null →
+    # None: position_advance/alive_diff нет у JSON-матчей, alive/towers/rax
+    # нет у строк, собранных до миграции 008.
+    def _f(key: str) -> float:
+        v = row.get(key)
+        return float(v) if v is not None else math.nan
+
     return [
         float(row["game_time"]),
         float(row["networth_diff"]),
         float(row["xp_diff"]),
         kills_r - kills_d,
         kills_r + kills_d,
-        float(pos) if pos is not None else math.nan,
+        _f("position_advance"),
+        _f("alive_diff"),
+        _f("towers_diff"),
+        _f("rax_diff"),
     ]
 
 
@@ -135,6 +145,7 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
         params={"database": database, "default_format": "JSONEachRow"},
         data="SELECT match_id, game_time, networth_diff, xp_diff,"
              "       kills_radiant, kills_dire, position_advance,"
+             "       alive_diff, towers_diff, rax_diff,"
              "       radiant_win, tier"
              "  FROM MatchTimelineFeatures FINAL ORDER BY match_id, game_time",
         headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
@@ -180,7 +191,12 @@ def synth_matches(n: int, seed: int = 7) -> Dataset:
                     kills_r += int(rng.integers(0, 2))
                     kills_d += int(rng.integers(0, 3))
             adv = max(-1.0, min(1.0, nw / 25000.0 + rng.normal(0, 0.15)))
-            Xs.append([t, nw, xp, kills_r - kills_d, kills_r + kills_d, adv])
+            # редкие тимфайты/пуши: живые и здания коррелируют с преимуществом
+            alive = float(int(max(-5, min(5, rng.normal(nw / 12000.0, 1.2)))))
+            towers = float(int(max(-11, min(11, nw / 9000.0 + rng.normal(0, 0.7)))))
+            rax = float(int(max(-6, min(6, nw / 20000.0 + rng.normal(0, 0.3)))))
+            Xs.append([t, nw, xp, kills_r - kills_d, kills_r + kills_d, adv,
+                       alive, towers, rax])
             gs.append(match_id)
         p_radiant = 1.0 / (1.0 + math.exp(-nw / 8000.0))
         radiant_win = 1 if rng.random() < p_radiant else 0

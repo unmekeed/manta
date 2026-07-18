@@ -149,3 +149,63 @@ def test_player_features_lane_and_duel():
     rows0 = player_features(economy_rows(), r, duration_s=1200)
     assert all(row["lane"] == "" and row["lane_nw_diff_at_10"] == 0
                for row in rows0)
+
+
+def test_building_diffs_by_window():
+    from extractor.features import building_diffs_by_window
+
+    kills = [
+        {"game_time": 130, "target": "npc_dota_badguys_tower1_mid"},   # R: +1
+        {"game_time": 250, "target": "npc_dota_goodguys_tower1_top"},  # D: -1
+        {"game_time": 400, "target": "npc_dota_badguys_melee_rax_bot"},  # rax +1
+        {"game_time": 500, "target": "npc_dota_goodguys_fort"},        # не считаем
+    ]
+    d = building_diffs_by_window(kills, 600)
+    assert d[120] == (0, 0)
+    assert d[180] == (1, 0)
+    assert d[300] == (0, 0)      # +1 −1
+    assert d[420] == (0, 1)
+    assert d[600] == (0, 1)      # форт не башня и не ракс
+
+
+def test_alive_diff_by_window():
+    from extractor.features import alive_diff_by_window
+
+    hero_team = {"npc_dota_hero_axe": 2, "npc_dota_hero_puck": 2,
+                 "npc_dota_hero_kez": 3, "npc_dota_hero_lina": 3}
+    positions = [
+        # окно 60: все живы
+        {"game_time": 50, "hero": "npc_dota_hero_axe", "is_alive": 1},
+        {"game_time": 55, "hero": "npc_dota_hero_kez", "is_alive": 1},
+        # окно 120: kez умер (последний снапшот в окне решает)
+        {"game_time": 100, "hero": "npc_dota_hero_kez", "is_alive": 1},
+        {"game_time": 115, "hero": "npc_dota_hero_kez", "is_alive": 0},
+        {"game_time": 110, "hero": "npc_dota_hero_axe", "is_alive": 1},
+    ]
+    d = alive_diff_by_window(positions, hero_team, 180)
+    assert d[60] == 0.0          # 2 живых против 2 (нет снапшота → жив)
+    assert d[120] == 1.0         # kez мёртв: 2 R против 1 D
+    assert d[180] == 0.0         # нет снапшотов в окне → все живы
+
+
+def test_timeline_features_include_new_columns():
+    from extractor.features import Roster, timeline_features
+
+    roster = Roster(teams={0: 2, 5: 3},
+                    heroes={0: "npc_dota_hero_axe", 5: "npc_dota_hero_kez"},
+                    names={}, hero_team={"npc_dota_hero_axe": 2,
+                                         "npc_dota_hero_kez": 3},
+                    winner=2)
+    economy = [
+        {"player_id": 0, "game_time": 60, "net_worth": 1000, "total_xp": 800},
+        {"player_id": 5, "game_time": 60, "net_worth": 900, "total_xp": 700},
+        {"player_id": 0, "game_time": 120, "net_worth": 2000, "total_xp": 1500},
+        {"player_id": 5, "game_time": 120, "net_worth": 1500, "total_xp": 1200},
+    ]
+    building_kills = [{"game_time": 90, "target": "npc_dota_badguys_tower1_mid"}]
+    rows = timeline_features(economy, [], roster,
+                             building_kills=building_kills)
+    by_t = {r["game_time"]: r for r in rows}
+    assert by_t[60]["towers_diff"] == 0.0
+    assert by_t[120]["towers_diff"] == 1.0
+    assert "alive_diff" in by_t[60] and "rax_diff" in by_t[60]

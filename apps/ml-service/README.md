@@ -37,8 +37,11 @@ make ml-serve           # gRPC на :50051 (GRPC_PORT, MODEL_PATH)
 ## Датасет
 
 Строка — снапшот матча в минуту t из `MatchTimelineFeatures`
-(`game_time`, `networth_diff`, `xp_diff`, `kills_diff`, `kills_total`),
-target — `radiant_win`. Сплит train/valid — **по матчам** (group split):
+(`game_time`, `networth_diff`, `xp_diff`, `kills_diff`, `kills_total`,
+`position_advance`, `alive_diff`, `towers_diff`, `rax_diff`),
+target — `radiant_win`. Отсутствующие у части строк фичи (позиции и живые
+герои у JSON-матчей, alive/towers у строк до миграции 008) — NaN, нативный
+пропуск LightGBM. Сплит train/valid — **по матчам** (group split):
 снапшоты одного матча скоррелированы, разрез по строкам дал бы утечку.
 
 Пока реальных матчей мало, `--synthetic N` дополняет датасет симуляцией

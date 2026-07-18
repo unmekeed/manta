@@ -36,7 +36,8 @@ def test_prediction_monotone_in_networth():
     cal = art["calibrator"]
     t = 1800.0
     diffs = np.linspace(-30000, 30000, 13)
-    X = np.array([[t, d, d * 1.2, d / 3000, 20, d / 30000] for d in diffs])
+    X = np.array([[t, d, d * 1.2, d / 3000, 20, d / 30000,
+                   d / 10000, d / 6000, d / 15000] for d in diffs])
     wp = cal.predict(booster.predict(X))
     # Допускаем плато (изотоника), но не убывание.
     assert all(b - a >= -1e-9 for a, b in zip(wp, wp[1:]))
@@ -276,13 +277,15 @@ def test_mirror_xy_symmetry():
     from training.dataset import FEATURES, mirror_xy
     import numpy as np
 
-    # одна строка: Radiant ведёт (+nw, +xp, +kills_diff, +pos), метка 1
-    X = np.array([[1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5]])
+    # одна строка: Radiant ведёт (+nw, +xp, +kills_diff, +pos, +alive,
+    # +towers, +rax), метка 1
+    X = np.array([[1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5, 2.0, 3.0, 1.0]])
     y = np.array([1])
     Xm, ym = mirror_xy(X, y)
     assert len(ym) == 2
     # зеркало: разностные фичи меняют знак, kills_total и time — нет, метка 0
-    neg = {"networth_diff", "xp_diff", "kills_diff", "position_advance"}
+    neg = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
+           "alive_diff", "towers_diff", "rax_diff"}
     for i, f in enumerate(FEATURES):
         if f in neg:
             assert Xm[1, i] == -X[0, i]
@@ -377,3 +380,27 @@ def test_train_with_nan_position_feature():
     assert art["metrics"]["brier_calibrated"] < 0.3
     p = predict_calibrated(art, ds.X[:10])
     assert np.all((p >= 0) & (p <= 1)) and not np.any(np.isnan(p))
+
+
+def test_gate_handles_feature_set_growth():
+    """Гейт после добавления фич: старая prod (6 фич) честно оценивается на
+    новой 9-колоночной матрице срезом до её набора — переход между
+    поколениями фич не ломает продвижение."""
+    import lightgbm as lgb
+    from sklearn.isotonic import IsotonicRegression
+    from training.train_winprob import evaluate_gate, train
+
+    ds = synth_matches(80, seed=13)
+    new_art = train(ds, num_rounds=60)
+
+    # «старая» модель: бустер видел только первые 6 фич
+    X6 = ds.X[:, :6]
+    booster = lgb.train({"objective": "binary", "verbose": -1},
+                        lgb.Dataset(X6, label=ds.y), num_boost_round=30)
+    raw = booster.predict(X6)
+    cal = IsotonicRegression(y_min=0, y_max=1,
+                             out_of_bounds="clip").fit(raw, ds.y)
+    old_art = {"booster": booster.model_to_string(), "calibrator": cal,
+               "features": FEATURES[:6]}
+    ok, reason = evaluate_gate(new_art, old_art, ds)
+    assert isinstance(ok, bool) and "одни данные" in reason

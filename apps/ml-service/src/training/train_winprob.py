@@ -33,7 +33,7 @@ from .drift import compute_reference
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.4.0"  # 0.4.0: референс распределения фич для PSI-дрейфа
+MODEL_VERSION = "0.5.0"  # 0.5.0: alive_diff, towers_diff, rax_diff
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -46,6 +46,9 @@ MONOTONE = {
     "kills_diff": 1,
     "kills_total": 0,
     "position_advance": 1,
+    "alive_diff": 1,     # больше живых у Radiant → WP не убывает
+    "towers_diff": 1,    # снесено больше зданий Dire → WP не убывает
+    "rax_diff": 1,
 }
 
 LGB_PARAMS = {
@@ -165,9 +168,15 @@ def _brier(y: np.ndarray, p: np.ndarray) -> float:
 
 
 def predict_calibrated(model: dict, X: np.ndarray) -> np.ndarray:
-    """Калиброванная WP по артефакту (booster-строка + изотоника)."""
+    """Калиброванная WP по артефакту (booster-строка + изотоника).
+
+    X режется до набора фич АРТЕФАКТА: FEATURES только дописываются в конец,
+    поэтому старая модель (меньше фич) корректно оценивается на новой матрице
+    — критично для честного гейта, где обе версии считаются на одних данных.
+    """
     booster = lgb.Booster(model_str=model["booster"])
-    return model["calibrator"].predict(booster.predict(X))
+    n = len(model.get("features") or []) or X.shape[1]
+    return model["calibrator"].predict(booster.predict(X[:, :n]))
 
 
 def _paired_bootstrap_delta(y, p_new, p_prod, groups, n_boot: int = 200,
