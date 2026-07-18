@@ -112,6 +112,12 @@ class ReportGenerator:
 
     def _wp_curve(self, match_id: int, rows: list[dict]
                   ) -> tuple[list[float], list[list[dict]], str]:
+        def _pos(r: dict) -> float:
+            # У JSON-матчей позиции нет: ClickHouse отдаёт NaN как null.
+            # NaN — корректный пропуск для модели (protobuf double его несёт).
+            v = r.get("position_advance")
+            return float(v) if v is not None else float("nan")
+
         def frames():
             for r in rows:
                 kills_r = float(r["kills_radiant"])
@@ -124,7 +130,7 @@ class ReportGenerator:
                         "xp_diff": float(r["xp_diff"]),
                         "kills_diff": kills_r - kills_d,
                         "kills_total": kills_r + kills_d,
-                        "position_advance": float(r.get("position_advance", 0)),
+                        "position_advance": _pos(r),
                     }))
 
         wp, drivers = [], []
@@ -143,7 +149,7 @@ class ReportGenerator:
                 "xp_diff": float(last["xp_diff"]),
                 "kills_diff": float(last["kills_radiant"]) - float(last["kills_dire"]),
                 "kills_total": float(last["kills_radiant"]) + float(last["kills_dire"]),
-                "position_advance": float(last.get("position_advance", 0)),
+                "position_advance": _pos(last),
             })))
         return wp, drivers, resp.model_version
 

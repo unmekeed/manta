@@ -113,13 +113,18 @@ class Dataset:
 def row_to_features(row: dict) -> list[float]:
     kills_r = float(row["kills_radiant"])
     kills_d = float(row["kills_dire"])
+    # position_advance есть только у реплей-матчей; у JSON-таймлайнов
+    # (источник opendota_timeline) её нет. Отсутствие = NaN — нативный
+    # пропуск LightGBM, НЕ 0: ноль означал бы «бой ровно в центре карты»,
+    # ложный сигнал. ClickHouse отдаёт NaN в JSONEachRow как null → None.
+    pos = row.get("position_advance")
     return [
         float(row["game_time"]),
         float(row["networth_diff"]),
         float(row["xp_diff"]),
         kills_r - kills_d,
         kills_r + kills_d,
-        float(row.get("position_advance", 0.0)),
+        float(pos) if pos is not None else math.nan,
     ]
 
 

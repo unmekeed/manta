@@ -34,6 +34,10 @@ def compute_reference(X: np.ndarray, features: list[str],
     ref: dict[str, dict] = {}
     for i, name in enumerate(features):
         col = X[:, i].astype(float)
+        col = col[~np.isnan(col)]  # NaN — «фичи нет» (JSON-матчи), не сигнал
+        if len(col) == 0:
+            ref[name] = {"edges": [], "props": [1.0]}
+            continue
         qs = np.quantile(col, np.linspace(0, 1, bins + 1))
         edges = np.unique(qs)  # константная фича схлопывается в один бин
         if len(edges) < 2:
@@ -45,7 +49,10 @@ def compute_reference(X: np.ndarray, features: list[str],
 
 
 def _bin_props(col: np.ndarray, edges: np.ndarray) -> np.ndarray:
-    """Доли строк по бинам; крайние бины открыты (±inf)."""
+    """Доли строк по бинам; крайние бины открыты (±inf), NaN исключаются
+    (PSI сравнивает распределения НАБЛЮДАЕМЫХ значений; рост доли
+    JSON-матчей без position_advance — не дрейф самой фичи)."""
+    col = col[~np.isnan(col)]
     open_edges = np.concatenate(([-np.inf], edges[1:-1], [np.inf]))
     counts, _ = np.histogram(col, bins=open_edges)
     total = counts.sum()

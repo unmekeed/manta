@@ -82,13 +82,22 @@ else
     skip "feature-extractor"
 fi
 
-if ! pgrep -f "python3 -u -m collector" >/dev/null; then
+if ! pgrep -f "collector --source opendota-public" >/dev/null; then
     say "запускаю data-collector (лог: $LOG_DIR/collector.log)"
     (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-3}" PYTHONPATH=src \
         nohup python3 -u -m collector --source opendota-public --interval 60 \
             >"$LOG_DIR/collector.log" 2>&1 &)
 else
     skip "data-collector"
+fi
+
+if ! pgrep -f "collector --source opendota-timeline" >/dev/null; then
+    say "запускаю timeline-collector (лог: $LOG_DIR/timeline.log)"
+    (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-30}" PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota-timeline --interval 300 \
+            >"$LOG_DIR/timeline.log" 2>&1 &)
+else
+    skip "timeline-collector"
 fi
 
 if ! pgrep -f "python3 -u -m app" >/dev/null; then
@@ -132,7 +141,8 @@ printf '   %-18s %s\n' clickhouse "$(curl -s http://localhost:8123/ping)"
 check() { printf '   %-18s %s\n' "$1" "$(pgrep -f "$2" >/dev/null && echo OK || echo DOWN)"; }
 check parser-svc "^/tmp/parser-svc"
 check feature-extractor "python3 -u -m extractor"
-check data-collector "python3 -u -m collector"
+check data-collector "collector --source opendota-public"
+check timeline-coll. "collector --source opendota-timeline"
 check ml-service "python3 -u -m app"
 check report-generator "python3 -u -m reportgen"
 check auto-train "python3 -u -m training.auto"

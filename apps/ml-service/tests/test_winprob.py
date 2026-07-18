@@ -321,3 +321,59 @@ def test_shap_contributions_sum_to_raw_score():
     # топ-1 действительно максимален по модулю (вклады округлены до 4 знаков)
     for row, drv in zip(contribs, drivers):
         assert abs(drv[0][1]) >= abs(row).max() - 1e-3
+
+
+def test_row_to_features_missing_position_is_nan():
+    """Отсутствие position_advance (JSON-матчи) = NaN, не 0: ноль — это
+    «бой в центре карты», ложный сигнал."""
+    import math
+    from training.dataset import row_to_features
+
+    base = {"game_time": 600, "networth_diff": 1000, "xp_diff": 1200,
+            "kills_radiant": 5, "kills_dire": 3}
+    # null из ClickHouse → None
+    assert math.isnan(row_to_features({**base, "position_advance": None})[5])
+    # ключа нет вовсе (старые данные)
+    assert math.isnan(row_to_features(base)[5])
+    # реальное значение проходит как есть
+    assert row_to_features({**base, "position_advance": 0.4})[5] == 0.4
+
+
+def test_psi_ignores_nan_rows():
+    """PSI сравнивает распределения наблюдаемых значений: рост доли
+    JSON-матчей (NaN в position_advance) — не дрейф самой фичи."""
+    import numpy as np
+    from training.drift import compute_reference, psi_report
+
+    rng = np.random.default_rng(3)
+    ref_X = rng.normal(0, 1, size=(4000, 1))
+    ref = compute_reference(ref_X, ["pos"])
+    # то же распределение, но 80% строк — NaN (JSON-матчи); оставшихся
+    # наблюдений достаточно, чтобы выборочный шум не имитировал дрейф
+    cur = rng.normal(0, 1, size=(4000, 1))
+    cur[rng.random(4000) < 0.8, 0] = np.nan
+    rep = psi_report(ref, cur, ["pos"])
+    assert rep["pos"] < 0.1          # дрейфа нет
+    # полностью NaN-колонка не роняет расчёт
+    all_nan = np.full((100, 1), np.nan)
+    rep2 = psi_report(ref, all_nan, ["pos"])
+    assert "pos" in rep2  # равномерный fallback, без исключений
+
+
+def test_train_with_nan_position_feature():
+    """LightGBM обучается и предсказывает при NaN в части строк
+    (смешанный датасет реплеи+JSON)."""
+    import numpy as np
+    from training.train_winprob import train, predict_calibrated
+
+    ds = synth_matches(60, seed=8)
+    ds.X = ds.X.copy()
+    # половина матчей «из JSON» — позиции нет
+    json_matches = {g for g in set(ds.groups.tolist()) if g % 2 == 0}
+    mask = np.array([g in json_matches for g in ds.groups])
+    pos_idx = FEATURES.index("position_advance")
+    ds.X[mask, pos_idx] = np.nan
+    art = train(ds, num_rounds=60)
+    assert art["metrics"]["brier_calibrated"] < 0.3
+    p = predict_calibrated(art, ds.X[:10])
+    assert np.all((p >= 0) & (p <= 1)) and not np.any(np.isnan(p))

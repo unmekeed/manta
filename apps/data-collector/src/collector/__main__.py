@@ -20,6 +20,7 @@ CYCLES_FAILED = Counter("collector_cycles_failed_total",
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
+from .sources.opendota_timeline import OpenDotaTimelineSource
 
 
 def build_source(name: str):
@@ -35,6 +36,13 @@ def build_source(name: str):
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
         )
+    if name == "opendota-timeline":
+        min_patch = os.getenv("OPENDOTA_MIN_PATCH")
+        return OpenDotaTimelineSource(
+            limit_per_cycle=int(os.getenv("TIMELINE_LIMIT", "30")),
+            min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
+            min_patch=int(min_patch) if min_patch else None,
+        )
     raise ValueError(f"unknown source {name!r}")
 
 
@@ -46,7 +54,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
-                        choices=["fixture", "opendota", "opendota-public"])
+                        choices=["fixture", "opendota", "opendota-public",
+                                 "opendota-timeline"])
     parser.add_argument("--interval", type=int,
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
     parser.add_argument("--once", action="store_true",
@@ -54,21 +63,28 @@ def main() -> None:
     args = parser.parse_args()
 
     source = build_source(args.source)
-    cfg = CollectorConfig(
-        postgres_dsn=os.getenv(
-            "POSTGRES_DSN",
-            "postgresql://dota:dota_dev_password@localhost:5432/manta"),
-        kafka_brokers=os.getenv("KAFKA_BROKERS", "localhost:9092"),
-        s3_endpoint=os.getenv("S3_ENDPOINT", "localhost:9500"),
-        s3_access_key=os.getenv("S3_ACCESS_KEY", "dota"),
-        s3_secret_key=os.getenv("S3_SECRET_KEY", "dota_dev_password"),
-        s3_bucket=os.getenv("S3_BUCKET", "replays"),
-    )
+    if args.source == "opendota-timeline":
+        # JSON-путь: без S3/Kafka — витрина пишется напрямую.
+        from .timeline_runner import TimelineCollector, TimelineConfig
+        collector = TimelineCollector(TimelineConfig(), source)
+        default_metrics_port = "9108"
+    else:
+        cfg = CollectorConfig(
+            postgres_dsn=os.getenv(
+                "POSTGRES_DSN",
+                "postgresql://dota:dota_dev_password@localhost:5432/manta"),
+            kafka_brokers=os.getenv("KAFKA_BROKERS", "localhost:9092"),
+            s3_endpoint=os.getenv("S3_ENDPOINT", "localhost:9500"),
+            s3_access_key=os.getenv("S3_ACCESS_KEY", "dota"),
+            s3_secret_key=os.getenv("S3_SECRET_KEY", "dota_dev_password"),
+            s3_bucket=os.getenv("S3_BUCKET", "replays"),
+        )
+        collector = Collector(cfg, source)
+        default_metrics_port = "9105"
 
-    metrics_port = int(os.getenv("METRICS_PORT", "9105"))
+    metrics_port = int(os.getenv("METRICS_PORT", default_metrics_port))
     if metrics_port and not args.once:
         start_http_server(metrics_port)
-    collector = Collector(cfg, source)
     log = logging.getLogger("collector")
     try:
         while True:
