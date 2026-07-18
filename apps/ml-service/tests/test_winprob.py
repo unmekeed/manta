@@ -404,3 +404,49 @@ def test_gate_handles_feature_set_growth():
                "features": FEATURES[:6]}
     ok, reason = evaluate_gate(new_art, old_art, ds)
     assert isinstance(ok, bool) and "одни данные" in reason
+
+
+def test_oof_calibration_and_platt_switch():
+    """OOF-метрики в артефакте; калибратор по размеру: Platt < 50 матчей
+    (train-часть), изотоника дальше — выбор зафиксирован в артефакте."""
+    small = train(synth_matches(30, seed=17), num_rounds=40)
+    assert small["metrics"]["calibrator"] == "platt"
+    assert "platt" in small["algo"]
+    big = train(synth_matches(90, seed=17), num_rounds=40)
+    assert big["metrics"]["calibrator"] == "isotonic"
+    for art in (small, big):
+        m = art["metrics"]
+        assert 0 < m["brier_oof"] < 0.3
+        assert m["oof_folds"] >= 2
+        assert m["best_iteration"] >= 1
+
+
+def test_match_weights_equalize_matches():
+    import numpy as np
+    from training.train_winprob import _match_weights
+
+    groups = np.array([1, 1, 1, 1, 2, 2])   # матч 1 — 4 строки, матч 2 — 2
+    w = _match_weights(groups)
+    # суммарный вес каждого матча одинаков
+    assert abs(w[:4].sum() - w[4:].sum()) < 1e-9
+    assert np.allclose(w[:4], 0.25) and np.allclose(w[4:], 0.5)
+
+
+def test_gate_prefers_fresh_matches_holdout():
+    """Если prod хранит max_match_id и в валидации ≥30 матчей новее — гейт
+    сравнивает на них: эти матчи не видел ни prod (их не существовало), ни
+    кандидат (валидация исключена из обучения)."""
+    from training.train_winprob import evaluate_gate, train
+
+    ds = synth_matches(200, seed=19)   # groups 1000..1199
+    cand = train(ds, num_rounds=30)
+    prod = dict(cand)
+    prod["dataset"] = {**cand["dataset"], "max_match_id": 1005}
+    ok, reason = evaluate_gate(cand, prod, ds)
+    assert ok and "свежие матчи" in reason
+    # без max_match_id (старый артефакт) — обычная валидация
+    prod2 = dict(cand)
+    prod2["dataset"] = {k: v for k, v in cand["dataset"].items()
+                        if k != "max_match_id"}
+    ok2, reason2 = evaluate_gate(cand, prod2, ds)
+    assert ok2 and "валидация" in reason2

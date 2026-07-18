@@ -33,7 +33,7 @@ from .drift import compute_reference
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.5.0"  # 0.5.0: alive_diff, towers_diff, rax_diff
+MODEL_VERSION = "0.6.0"  # 0.6.0: OOF-калибровка, веса матчей, Platt<50
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -54,7 +54,12 @@ MONOTONE = {
 LGB_PARAMS = {
     "objective": "binary",
     "metric": "binary_logloss",
-    "num_leaves": 31,
+    # Гиперпараметры под режим «строк много, матчей мало»: снапшоты матча
+    # скоррелированы, поэтому сложность дерева ограничиваем жёстче обычного —
+    # листья не должны подгоняться под отдельные матчи.
+    "num_leaves": 20,
+    "min_data_in_leaf": 60,
+    "lambda_l2": 2.0,
     "learning_rate": 0.05,
     "feature_fraction": 0.9,
     "monotone_constraints": [MONOTONE[f] for f in FEATURES],
@@ -62,38 +67,123 @@ LGB_PARAMS = {
     "seed": 42,
 }
 
+# Порог перехода изотоника → Platt: изотоника на «ступеньках» малой выборки
+# переобучается, логистическая калибровка устойчивее.
+PLATT_MAX_MATCHES = 50
+N_FOLDS = 5
+
+
+class _PlattCalibrator:
+    """Platt scaling: логистическая регрессия на сыром скоре бустера.
+
+    Интерфейс совместим с IsotonicRegression (predict → вероятности),
+    сериализуется joblib'ом как часть артефакта.
+    """
+
+    def __init__(self):
+        from sklearn.linear_model import LogisticRegression
+        self._lr = LogisticRegression()
+
+    def fit(self, raw: np.ndarray, y: np.ndarray) -> "_PlattCalibrator":
+        self._lr.fit(np.asarray(raw).reshape(-1, 1), y)
+        return self
+
+    def predict(self, raw: np.ndarray) -> np.ndarray:
+        return self._lr.predict_proba(np.asarray(raw).reshape(-1, 1))[:, 1]
+
+
+def _match_weights(groups: np.ndarray) -> np.ndarray:
+    """Вес строки 1/n_rows(match): каждый матч вносит одинаковый вклад в
+    лосс — длинные матчи (60+ снапшотов) не доминируют над короткими."""
+    _, inverse, counts = np.unique(groups, return_inverse=True,
+                                   return_counts=True)
+    return 1.0 / counts[inverse]
+
 
 def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
-    """Обучить модель + калибратор; вернуть артефакт со всеми метаданными.
+    """Обучить модель + OOF-калибратор; вернуть артефакт с метаданными.
 
-    mirror=True (по умолчанию): train-часть зеркалируется по сторонам
-    (dataset.mirror_xy) — модель становится side-agnostic, приор стороны
-    обнуляется. Валидация и эталон НЕ зеркалируются (оценка в исходной
-    ориентации).
+    Схема против двойного использования данных (малые датасеты):
+
+    1. Датасет делится на train-часть и НЕТРОНУТУЮ валидацию (group split,
+       фиксированный seed — гейт использует тот же holdout и кандидат его
+       не видел НИ на одном этапе).
+    2. Внутри train-части — K-fold OOF по матчам: K бустеров, каждый
+       предсказывает свой отложенный фолд → out-of-fold предсказания на
+       всю train-часть. Калибратор фитится ТОЛЬКО на OOF (бустер этих
+       строк не видел) — калибровка не оптимистична.
+    3. Финальный бустер обучается на всей train-части с числом раундов =
+       медиана best_iteration фолдов (early stopping уже отработал в фолдах).
+    4. Метрики: brier_oof — честная внутренняя оценка; brier_calibrated —
+       на нетронутой валидации (метрика спеки и гейта).
+
+    mirror=True: обучающие строки зеркалируются по сторонам (side-agnostic);
+    OOF-предсказания, валидация и эталон — в исходной ориентации.
+    Веса строк 1/n_rows(match) — вклад матча не зависит от его длины.
     """
-    (X_tr, y_tr), (X_va, y_va) = ds.split_by_match()
-    if mirror:
-        X_tr, y_tr = mirror_xy(X_tr, y_tr)
-    booster = lgb.train(
-        LGB_PARAMS,
-        lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURES),
-        num_boost_round=num_rounds,
-        valid_sets=[lgb.Dataset(X_va, label=y_va)],
-        callbacks=[lgb.early_stopping(30, verbose=False)],
-    )
-    raw_va = booster.predict(X_va)
+    in_valid, pro = ds._valid_mask()
+    tr_mask = ~in_valid & ~pro
+    X_tr_all, y_tr_all = ds.X[tr_mask], ds.y[tr_mask]
+    g_tr_all = ds.groups[tr_mask]
+    X_va, y_va = ds.X[in_valid & ~pro], ds.y[in_valid & ~pro]
 
-    # Калибровка (Гл. 6.2.2): изотоническая регрессия на отложенных матчах.
-    calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-    calibrator.fit(raw_va, y_va)
+    def _fit_booster(X, y, g, rounds, valid=None):
+        w = _match_weights(g)
+        if mirror:
+            X, y = mirror_xy(X, y)
+            w = np.concatenate([w, w])
+        dtrain = lgb.Dataset(X, label=y, weight=w, feature_name=FEATURES)
+        kwargs = {}
+        if valid is not None:
+            kwargs = {"valid_sets": [lgb.Dataset(valid[0], label=valid[1])],
+                      "callbacks": [lgb.early_stopping(30, verbose=False)]}
+        return lgb.train(LGB_PARAMS, dtrain, num_boost_round=rounds, **kwargs)
+
+    # -- K-fold OOF по матчам train-части -------------------------------------
+    matches = np.array(sorted(set(g_tr_all.tolist())))
+    rng = np.random.default_rng(42)
+    rng.shuffle(matches)
+    folds = np.array_split(matches, min(N_FOLDS, max(2, len(matches))))
+    oof_raw = np.full(len(y_tr_all), np.nan)
+    best_iters = []
+    for fold_matches in folds:
+        va_f = np.isin(g_tr_all, fold_matches)
+        tr_f = ~va_f
+        if va_f.sum() == 0 or tr_f.sum() == 0:
+            continue
+        b = _fit_booster(X_tr_all[tr_f], y_tr_all[tr_f], g_tr_all[tr_f],
+                         num_rounds, valid=(X_tr_all[va_f], y_tr_all[va_f]))
+        oof_raw[va_f] = b.predict(X_tr_all[va_f])
+        best_iters.append(int(b.best_iteration or num_rounds))
+    seen = ~np.isnan(oof_raw)
+
+    # -- Калибратор на OOF (Гл. 6.2.2) ----------------------------------------
+    n_tr_matches = len(matches)
+    if n_tr_matches < PLATT_MAX_MATCHES:
+        calibrator, calibrator_kind = _PlattCalibrator(), "platt"
+    else:
+        calibrator = IsotonicRegression(y_min=0.0, y_max=1.0,
+                                        out_of_bounds="clip")
+        calibrator_kind = "isotonic"
+    calibrator.fit(oof_raw[seen], y_tr_all[seen])
+    oof_cal = calibrator.predict(oof_raw[seen])
+
+    # -- Финальный бустер на всей train-части ---------------------------------
+    final_rounds = int(np.median(best_iters)) if best_iters else num_rounds
+    booster = _fit_booster(X_tr_all, y_tr_all, g_tr_all, max(final_rounds, 1))
+
+    raw_va = booster.predict(X_va)
     cal_va = calibrator.predict(raw_va)
 
     metrics = {
+        "brier_oof": round(float(brier_score_loss(y_tr_all[seen], oof_cal)), 4),
         "brier_raw": round(float(brier_score_loss(y_va, raw_va)), 4),
         "brier_calibrated": round(float(brier_score_loss(y_va, cal_va)), 4),
         "logloss_calibrated": round(float(log_loss(y_va, np.clip(cal_va, 1e-6, 1 - 1e-6))), 4),
         "valid_rows": int(len(y_va)),
-        "best_iteration": int(booster.best_iteration or num_rounds),
+        "best_iteration": final_rounds,
+        "calibrator": calibrator_kind,
+        "oof_folds": len(best_iters),
     }
 
     # Эталон: матчи про-команд (tier=Professional) — вне train/valid.
@@ -116,7 +206,7 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
 
     return {
         "model_version": MODEL_VERSION,
-        "algo": "lightgbm+isotonic+mirror",
+        "algo": f"lightgbm+oof-{calibrator_kind}+mirror",
         "features": FEATURES,
         "booster": booster.model_to_string(),
         "calibrator": calibrator,
@@ -127,6 +217,10 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
             "synthetic_matches": ds.n_synthetic,
             "rows": int(len(ds.y)),
             "hash": dataset_hash(ds),
+            # Верхняя граница виденных матчей: гейт следующих поколений
+            # сравнивает версии на матчах НОВЕЕ этой отметки — их не видел
+            # ни prod (их ещё не было), ни кандидат (valid-сплит исключён).
+            "max_match_id": int(ds.groups.max()) if len(ds.groups) else 0,
         },
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -212,6 +306,17 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
     предпочитаем новую версию — она обучена на бОльших данных и устойчивее.
     """
     X, y, groups, kind = ds.eval_holdout()
+    # Матчи новее всего, что видела production, — идеальный holdout: их не
+    # видел никто (prod — потому что их ещё не существовало, кандидат —
+    # потому что валидация исключена из его обучения). Снимает смещение
+    # переходного периода, когда prod старой схемы обучала калибратор на
+    # общем valid-сплите и имела на нём нечестное преимущество.
+    prod_max = (prod_art.get("dataset") or {}).get("max_match_id")
+    if kind == "valid" and prod_max:
+        fresh = groups > int(prod_max)
+        if len(set(groups[fresh].tolist())) >= 30:
+            X, y, groups = X[fresh], y[fresh], groups[fresh]
+            kind = "fresh"
     if len(y) == 0:
         return True, "нет общего holdout — продвигаем"
     p_new = predict_calibrated(new_art, X)
@@ -220,7 +325,8 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
     delta, std = _paired_bootstrap_delta(y, p_new, p_prod, groups)
     tol = max(tol_floor, std)
     ok = delta <= tol
-    label = "про-эталон" if kind == "benchmark_pro" else "валидация"
+    label = {"benchmark_pro": "про-эталон",
+             "fresh": "свежие матчи (никто не видел)"}.get(kind, "валидация")
     n_m = len(set(groups.tolist()))
     verdict = "не хуже prod" if ok else "значимо хуже prod"
     reason = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
