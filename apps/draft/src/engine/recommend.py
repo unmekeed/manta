@@ -63,12 +63,20 @@ def suggest(stats: DraftStats, radiant: list[int], dire: list[int],
             top_k: int = TOP_SUGGESTIONS) -> tuple[float, list[dict], str]:
     """(winrate_radiant текущего драфта, топ-k пиков, действующая сторона).
 
-    next_action: 'pick_radiant' | 'pick_dire'; пусто — сторона с меньшим
-    числом пиков (Radiant при равенстве).
+    next_action — свободная строка из DraftState: принимаем любое
+    написание со словом стороны ('pick_dire', 'dire_pick', 'dire', ...);
+    незнакомое значение без имени стороны — как пустое: сторона с меньшим
+    числом пиков (Radiant при равенстве). Раньше строгое сравнение с
+    'pick_dire' молча превращало 'dire_pick' в пик Radiant.
     """
-    side = next_action or ("pick_radiant" if len(radiant) <= len(dire)
-                           else "pick_dire")
-    acting_radiant = side != "pick_dire"
+    action = next_action.lower()
+    if "dire" in action:
+        acting_radiant = False
+    elif "radiant" in action:
+        acting_radiant = True
+    else:
+        acting_radiant = len(radiant) <= len(dire)
+    side = "pick_radiant" if acting_radiant else "pick_dire"
 
     base = predicted_winrate_radiant(stats, radiant, dire)
     taken = set(radiant) | set(dire) | set(bans)

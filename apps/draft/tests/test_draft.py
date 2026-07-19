@@ -104,3 +104,15 @@ def test_grpc_contract():
         assert e.value.code() == grpc.StatusCode.FAILED_PRECONDITION
     finally:
         server.stop(0)
+
+
+def test_suggest_side_normalization():
+    """Любое написание стороны в next_action понимается правильно —
+    'dire_pick' из HTTP-запроса не должен молча стать пиком Radiant."""
+    st = build_stats(_rows([([1, 2], [3, 4], 1)] * 4), _hid)
+    for action in ("dire_pick", "pick_dire", "DIRE", "next: dire"):
+        _, _, side = suggest(st, [1], [], bans=[], next_action=action)
+        assert side == "pick_dire", action
+    for action in ("radiant_pick", "pick_radiant", "Radiant"):
+        _, _, side = suggest(st, [], [3], bans=[], next_action=action)
+        assert side == "pick_radiant", action

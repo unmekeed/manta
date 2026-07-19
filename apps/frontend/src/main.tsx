@@ -4,6 +4,7 @@ import ReactDOM from "react-dom/client";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 
 import App from "./App";
+import DraftPage from "./pages/DraftPage";
 import MatchList from "./pages/MatchList";
 import MatchPage from "./pages/MatchPage";
 import "./styles.css";
@@ -19,6 +20,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <MatchList /> },
       { path: "matches/:matchId", element: <MatchPage /> },
+      { path: "draft", element: <DraftPage /> },
     ],
   },
 ]);

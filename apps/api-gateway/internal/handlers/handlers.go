@@ -12,12 +12,15 @@ import (
 	"github.com/unmekeed/manta/api-gateway/internal/events"
 	"github.com/unmekeed/manta/api-gateway/internal/middleware"
 	"github.com/unmekeed/manta/api-gateway/internal/storage"
+	corev1 "github.com/unmekeed/manta/proto/core/v1"
 )
 
 // Handlers объединяет зависимости HTTP-обработчиков шлюза.
 type Handlers struct {
 	DB      *pgxpool.Pool
 	Replays *storage.ReplayStore
+	Draft   corev1.DraftServiceClient // nil — драфт-эндпоинты вернут 503
+	Heroes  []Hero
 }
 
 // problem — тело ошибки в формате RFC 7807 (Гл. 7.5).

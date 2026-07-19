@@ -94,6 +94,10 @@ proto-gen:     ## Сгенерировать Python-стабы gRPC из proto/ 
 		--python_out=apps/coach/src/gen \
 		--grpc_python_out=apps/coach/src/gen \
 		proto/services.proto
+	PATH=$$PATH:$$HOME/go/bin protoc -I proto \
+		--go_out=proto/gen/go --go_opt=module=github.com/unmekeed/manta/proto \
+		--go-grpc_out=proto/gen/go --go-grpc_opt=module=github.com/unmekeed/manta/proto \
+		proto/services.proto
 
 ml-serve:      ## Запустить gRPC-сервер ML Service
 	cd apps/ml-service && PYTHONPATH=src python3 -m app

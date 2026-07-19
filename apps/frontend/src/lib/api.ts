@@ -55,8 +55,44 @@ export interface MatchListItem {
   generated_at: string;
 }
 
+export interface Hero {
+  id: number;
+  name: string;
+  npc: string;
+}
+
+export interface DraftState {
+  radiant_picks: number[];
+  dire_picks: number[];
+  bans: number[];
+  next_action: "radiant_pick" | "dire_pick";
+}
+
+export interface DraftSuggestion {
+  hero_id: number;
+  expected_winrate: number;
+  reason: string;
+}
+
+export interface DraftRecommendation {
+  predicted_winrate_radiant: number;
+  suggestions: DraftSuggestion[];
+}
+
 async function get<T>(url: string): Promise<T> {
   const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`${url}: HTTP ${resp.status}`);
+  }
+  return resp.json() as Promise<T>;
+}
+
+async function post<T>(url: string, body: unknown): Promise<T> {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!resp.ok) {
     throw new Error(`${url}: HTTP ${resp.status}`);
   }
@@ -70,6 +106,10 @@ export const api = {
     get<MatchAnalysis>(`/api/v1/matches/${matchId}/analysis`),
   timeline: (matchId: string) =>
     get<Timeline>(`/api/v1/matches/${matchId}/timeline`),
+  heroes: () =>
+    get<{ heroes: Hero[] }>("/api/v1/heroes").then((r) => r.heroes),
+  simulateDraft: (state: DraftState) =>
+    post<DraftRecommendation>("/api/v1/draft/simulate", state),
 };
 
 export const heroLabel = (npc: string) =>

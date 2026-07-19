@@ -22,6 +22,9 @@ type Config struct {
 	S3UseSSL    bool
 
 	KafkaBrokers []string
+
+	DraftGRPCAddr string // Draft Engine (пусто — эндпоинты драфта отдают 503)
+	HeroesPath    string // libs/data/heroes.json; пусто — путь по умолчанию
 }
 
 func Load() Config {
@@ -39,6 +42,9 @@ func Load() Config {
 		S3UseSSL:    getEnv("S3_USE_SSL", "false") == "true",
 
 		KafkaBrokers: []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
+
+		DraftGRPCAddr: getEnv("DRAFT_GRPC_ADDR", "localhost:50053"),
+		HeroesPath:    getEnv("HEROES_PATH", ""),
 	}
 }
 

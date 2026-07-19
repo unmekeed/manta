@@ -10,12 +10,15 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/unmekeed/manta/api-gateway/internal/config"
 	"github.com/unmekeed/manta/api-gateway/internal/events"
 	"github.com/unmekeed/manta/api-gateway/internal/handlers"
 	"github.com/unmekeed/manta/api-gateway/internal/router"
 	"github.com/unmekeed/manta/api-gateway/internal/storage"
+	corev1 "github.com/unmekeed/manta/proto/core/v1"
 )
 
 func main() {
@@ -60,6 +63,25 @@ func main() {
 	go jobStatus.Run(ctx)
 
 	h := &handlers.Handlers{DB: pool, Replays: replays}
+
+	// Драфт-симулятор (C6): gRPC-клиент Draft Engine + словарь героев.
+	// Ленивое соединение — недоступный движок даёт 503 на эндпоинтах
+	// драфта, не мешая остальному API.
+	if cfg.DraftGRPCAddr != "" {
+		conn, err := grpc.NewClient(cfg.DraftGRPCAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			logger.Error("draft_grpc_init_failed", "error", err)
+		} else {
+			defer conn.Close()
+			h.Draft = corev1.NewDraftServiceClient(conn)
+		}
+	}
+	if heroes, err := handlers.LoadHeroes(cfg.HeroesPath); err != nil {
+		logger.Warn("heroes_dict_missing", "error", err)
+	} else {
+		h.Heroes = heroes
+	}
 	srv := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: router.New(h, logger, cfg.RateLimitRPS, cfg.RateLimitBurst),

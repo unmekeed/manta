@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/components/WpChart.tsx","./src/lib/api.ts","./src/pages/MatchList.tsx","./src/pages/MatchPage.tsx"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/main.tsx","./src/components/WpChart.tsx","./src/lib/api.ts","./src/pages/DraftPage.tsx","./src/pages/MatchList.tsx","./src/pages/MatchPage.tsx"],"version":"5.9.3"}
