@@ -86,6 +86,10 @@ proto-gen:     ## Сгенерировать Python-стабы gRPC из proto/ 
 		--python_out=apps/similarity/src/gen \
 		--grpc_python_out=apps/similarity/src/gen \
 		proto/services.proto
+	python3 -m grpc_tools.protoc -I proto \
+		--python_out=apps/draft/src/gen \
+		--grpc_python_out=apps/draft/src/gen \
+		proto/services.proto
 
 ml-serve:      ## Запустить gRPC-сервер ML Service
 	cd apps/ml-service && PYTHONPATH=src python3 -m app
@@ -98,6 +102,9 @@ report-gen:    ## Запустить Report Generator (Kafka-петля)
 
 sim-serve:     ## Similarity Engine: gRPC-поиск похожих матчей (:50052)
 	cd apps/similarity && PYTHONPATH=src python3 -m serve
+
+draft-serve:   ## Draft Engine: рекомендации пиков (:50053)
+	cd apps/draft && PYTHONPATH=src python3 -m serve_draft
 
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto

@@ -1,0 +1,5 @@
+numpy>=1.26
+requests>=2.32
+grpcio>=1.60
+protobuf>=7.35
+prometheus-client>=0.20

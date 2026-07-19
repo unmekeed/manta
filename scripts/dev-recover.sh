@@ -135,6 +135,14 @@ else
     skip "similarity"
 fi
 
+if ! pgrep -f "python3 -u -m serve_draft" >/dev/null; then
+    say "запускаю draft (gRPC :50053, лог: $LOG_DIR/draft.log)"
+    (cd apps/draft && PYTHONPATH=src \
+        nohup python3 -u -m serve_draft >"$LOG_DIR/draft.log" 2>&1 &)
+else
+    skip "draft"
+fi
+
 if ! pgrep -f "python3 -u -m reportgen" >/dev/null; then
     say "запускаю report-generator (лог: $LOG_DIR/report-gen.log)"
     (cd apps/report-generator && PYTHONPATH=src \
@@ -173,6 +181,7 @@ check pro-timeline "collector --source opendota-timeline-pro"
 check pro-replay "collector --source opendota --interval"
 check ml-service "python3 -u -m app"
 check similarity "python3 -u -m serve"
+check draft "python3 -u -m serve_draft"
 check report-generator "python3 -u -m reportgen"
 check auto-train "python3 -u -m training.auto"
 matches=$(echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL" |
