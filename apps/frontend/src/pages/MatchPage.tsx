@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
+import DeathMap, { type DeathPoint } from "../components/DeathMap";
 import WpChart from "../components/WpChart";
 import {
   api,
@@ -98,9 +99,24 @@ export default function MatchPage() {
   const wp = a.win_probability.final_radiant;
   const errors = a.players
     .flatMap((p) =>
-      p.errors.map((e) => ({ ...e, player: p.player_name || heroLabel(p.hero) })),
+      p.errors.map((e) => ({
+        ...e,
+        player: p.player_name || heroLabel(p.hero),
+        team: (p.player_id < 5 ? "radiant" : "dire") as "radiant" | "dire",
+      })),
     )
     .sort((x, y) => x.delta_wp - y.delta_wp);
+
+  const deaths: DeathPoint[] = errors
+    .filter((e) => e.pos)
+    .map((e) => ({
+      x: e.pos!.x,
+      y: e.pos!.y,
+      team: e.team,
+      label:
+        `${e.player}, ${Math.floor(e.game_time / 60)}' · ` +
+        `ΔWP ${(e.delta_wp * 100).toFixed(0)}% · SI ${e.safety_index.toFixed(2)}`,
+    }));
 
   return (
     <>
@@ -127,6 +143,22 @@ export default function MatchPage() {
       <div className="panel">
         <PlayersTable players={a.players} />
       </div>
+
+      {deaths.length > 0 && (
+        <>
+          <h2>Карта смертей</h2>
+          <div className="panel map-panel">
+            <DeathMap deaths={deaths} />
+            <div className="map-legend">
+              <span className="dot radiant" /> Radiant
+              <span className="dot dire" /> Dire
+              <span className="muted">
+                точка — смерть-ошибка; наведите для деталей
+              </span>
+            </div>
+          </div>
+        </>
+      )}
 
       <h2>Ключевые ошибки (ΔWP)</h2>
       {errors.length === 0 ? (

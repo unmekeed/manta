@@ -258,3 +258,34 @@ def test_timeline_points_carry_drivers():
     # без drivers ключ отсутствует (обратная совместимость отчёта)
     tl2 = build_timeline(1, rows, [0.5, 0.6])
     assert "drivers" not in tl2["points"][0]
+
+
+def test_errors_carry_death_position():
+    """Точка смерти нормализуется в доли карты 0..1 для мини-карты (C6)."""
+    from reportgen.builder import MAP_BOUND, index_positions, wp_attribution
+
+    pts_wp = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+              for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                           (300, 0.3)]]
+    positions = [{"game_time": 200, "hero": "CDOTA_Unit_Hero_Axe",
+                  "x": 4600, "y": -4600}]
+    kills = [{"game_time": 200, "target": "npc_dota_hero_axe",
+              "attacker": "npc_dota_hero_kez"}]
+    errors, _ = wp_attribution(
+        pts_wp, kills, {"npc_dota_hero_axe": 0, "npc_dota_hero_kez": 5},
+        {0: 2, 5: 3}, positions_by_hero=index_positions(positions))
+    pos = errors[0][0]["pos"]
+    assert pos == {"x": round((4600 + MAP_BOUND) / (2 * MAP_BOUND), 4),
+                   "y": round((-4600 + MAP_BOUND) / (2 * MAP_BOUND), 4)}
+
+
+def test_errors_without_positions_have_no_pos():
+    from reportgen.builder import detect_errors
+
+    pts = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+           for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                        (300, 0.3)]]
+    errors = detect_errors(
+        pts, [{"game_time": 200, "target": "npc_dota_hero_axe"}],
+        {"npc_dota_hero_axe": 0}, {0: 2})
+    assert "pos" not in errors[0][0]

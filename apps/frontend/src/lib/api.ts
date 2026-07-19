@@ -16,12 +16,18 @@ export interface FeatureContribution {
   value: number; // SHAP-вклад в log-odds; знак — в чью пользу тянет фича
 }
 
+export interface MapPos {
+  x: number; // доли карты 0..1, (0,0) — юго-запад (база Radiant)
+  y: number;
+}
+
 export interface GameError {
   type: string;
   game_time: number;
   delta_wp: number;
   safety_index: number;
   explanation: string;
+  pos?: MapPos;
   top_contributions?: FeatureContribution[];
 }
 

@@ -81,6 +81,21 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
   text-transform: uppercase; vertical-align: middle;
 }
 
+/* Карта смертей (C6): стилизованная схема, точки — смерти-ошибки. */
+.map-panel { display: flex; gap: 18px; align-items: flex-start; }
+.death-map { width: 340px; max-width: 100%; border-radius: 8px; }
+.death-map .half.radiant { fill: rgba(107, 208, 107, 0.07); }
+.death-map .half.dire { fill: rgba(224, 90, 90, 0.07); }
+.death-map .river { stroke: rgba(90, 150, 224, 0.35); stroke-width: 7; }
+.death-map .lane { stroke: var(--border); stroke-width: 1; }
+.death-map .death { stroke-width: 0.7; stroke: #0e1114; cursor: help; }
+.death-map .death.radiant { fill: var(--radiant); }
+.death-map .death.dire { fill: var(--dire); }
+.map-legend { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); flex-wrap: wrap; }
+.map-legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.map-legend .dot.radiant { background: var(--radiant); }
+.map-legend .dot.dire { background: var(--dire); }
+
 /* Навигация в шапке. */
 .nav { display: flex; gap: 14px; }
 .nav a { color: var(--muted); text-decoration: none; font-size: 14px; }

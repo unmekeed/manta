@@ -112,6 +112,13 @@ SI_PRESSURE_RADIUS = 4000.0   # дальность влияния врага (ю
 SI_PRESSURE_SATURATION = 2.5  # столько «полных» врагов дают pressure = 1
 SI_STALE_S = 45               # снапшот позиций старше — не используется
 MAP_HALF_DIAG = 8000.0
+MAP_BOUND = 9200.0            # полукоордината карты: x,y ∈ [-BOUND, BOUND]
+
+
+def _norm_map(x: float, y: float) -> dict:
+    """Мировые координаты → доли карты 0..1 (0,0 — юго-запад, база Radiant)."""
+    return {"x": round((x + MAP_BOUND) / (2 * MAP_BOUND), 4),
+            "y": round((y + MAP_BOUND) / (2 * MAP_BOUND), 4)}
 
 
 def _normalize_hero(name: str) -> str:
@@ -230,6 +237,7 @@ def wp_attribution(points: list[dict], kills: list[dict],
                 hero = str(k["target"]).replace("npc_dota_hero_", "")
                 impact[pid] = impact.get(pid, 0.0) + share
                 si = 0.0
+                death_pos = None
                 if positions_by_hero:
                     hero_team = {h: player_team.get(p, 0)
                                  for h, p in ((_normalize_hero(hh), pp)
@@ -237,6 +245,14 @@ def wp_attribution(points: list[dict], kills: list[dict],
                     si = safety_index(str(k["target"]), losing_team,
                                       int(k["game_time"]), positions_by_hero,
                                       hero_team)
+                    # Точка смерти для карты позиций (C6): тот же снапшот
+                    # жертвы, по которому считался Safety Index.
+                    vpts = positions_by_hero.get(
+                        _normalize_hero(str(k["target"])))
+                    vpos = (_pos_at(vpts, int(k["game_time"]))
+                            if vpts else None)
+                    if vpos is not None:
+                        death_pos = _norm_map(*vpos)
                 note = ""
                 if si >= 0.6:
                     note = f" Позиция была рискованной (SI {si:.2f})."
@@ -251,6 +267,8 @@ def wp_attribution(points: list[dict], kills: list[dict],
                         f"{abs(share) * 100:.0f}% (окно {t_lo // 60}–{t_hi // 60} мин)."
                         + note),
                 }
+                if death_pos is not None:
+                    err["pos"] = death_pos
                 # SHAP-вклады снапшота после события (конец окна): что
                 # именно модель «увидела» в состоянии игры (Гл. 6.2).
                 if points[i].get("drivers"):
