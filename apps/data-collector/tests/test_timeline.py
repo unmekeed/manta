@@ -177,3 +177,49 @@ def test_timeline_rows_building_diffs_from_objectives():
     # alive недоступен из JSON
     import math as _m
     assert all(_m.isnan(r["alive_diff"]) for r in rows)
+
+
+def test_pro_mode_filters_and_tier(monkeypatch):
+    """pro-режим: кандидаты из /proMatches, tier=Professional, фильтр без
+    рангов/лобби (CM в турнирном лобби проходит), короткие отсекаются."""
+    src = OpenDotaTimelineSource(limit_per_cycle=2, min_patch=60,
+                                 api_delay_s=0, mode="pro")
+    assert src.name == "opendota_timeline_pro"
+
+    def _pro_match(mid, minutes=25):
+        m = _parsed_match(mid=mid, minutes=minutes)
+        m["lobby_type"] = 1      # турнирное лобби
+        m["game_mode"] = 2       # Captains Mode
+        for p in m["players"]:
+            p.pop("rank_tier", None)   # у про-игроков ранги скрыты
+        return m
+
+    calls = []
+
+    class FakeResp:
+        def __init__(self, payload): self._p = payload
+        def json(self): return self._p
+
+    def fake_get(path, **params):
+        calls.append(path)
+        if path == "proMatches":
+            return FakeResp([{"match_id": m} for m in (9, 8, 7)])
+        mid = int(path.split("/")[1])
+        return FakeResp(_pro_match(mid, minutes=25 if mid != 8 else 5))
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    got = list(src.fetch_new(skip=lambda mid: False))
+    assert "proMatches" in calls
+    assert [t.match_id for t in got] == [9, 7]     # 8 отсечён (5 минут)
+    assert all(t.tier == "Professional" for t in got)
+
+
+def test_pro_match_passes_ignores_rank_and_lobby():
+    m = _parsed_match()
+    m["lobby_type"] = 1
+    m["game_mode"] = 2
+    for p in m["players"]:
+        p.pop("rank_tier", None)
+    # public-фильтр отверг бы (lobby), pro — пропускает
+    assert match_passes(m, 80, 900, 60)[0] is False
+    assert match_passes(m, 80, 900, 60, pro=True) == (True, "ok")

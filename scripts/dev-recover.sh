@@ -91,13 +91,31 @@ else
     skip "data-collector"
 fi
 
-if ! pgrep -f "collector --source opendota-timeline" >/dev/null; then
+if ! pgrep -f "collector --source opendota-timeline --interval" >/dev/null; then
     say "запускаю timeline-collector (лог: $LOG_DIR/timeline.log)"
     (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-30}" PYTHONPATH=src \
         nohup python3 -u -m collector --source opendota-timeline --interval 300 \
             >"$LOG_DIR/timeline.log" 2>&1 &)
 else
     skip "timeline-collector"
+fi
+
+if ! pgrep -f "collector --source opendota-timeline-pro" >/dev/null; then
+    say "запускаю pro-timeline-collector (лог: $LOG_DIR/timeline-pro.log)"
+    (cd apps/data-collector && TIMELINE_LIMIT="${PRO_TIMELINE_LIMIT:-15}" PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota-timeline-pro --interval 600 \
+            >"$LOG_DIR/timeline-pro.log" 2>&1 &)
+else
+    skip "pro-timeline-collector"
+fi
+
+if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
+    say "запускаю pro-replay-collector (лог: $LOG_DIR/pro-collector.log)"
+    (cd apps/data-collector && OPENDOTA_LIMIT=2 METRICS_PORT=9109 PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota --interval 300 \
+            >"$LOG_DIR/pro-collector.log" 2>&1 &)
+else
+    skip "pro-replay-collector"
 fi
 
 if ! pgrep -f "python3 -u -m app" >/dev/null; then
@@ -142,7 +160,9 @@ check() { printf '   %-18s %s\n' "$1" "$(pgrep -f "$2" >/dev/null && echo OK || 
 check parser-svc "^/tmp/parser-svc"
 check feature-extractor "python3 -u -m extractor"
 check data-collector "collector --source opendota-public"
-check timeline-coll. "collector --source opendota-timeline"
+check timeline-coll. "collector --source opendota-timeline --interval"
+check pro-timeline "collector --source opendota-timeline-pro"
+check pro-replay "collector --source opendota --interval"
 check ml-service "python3 -u -m app"
 check report-generator "python3 -u -m reportgen"
 check auto-train "python3 -u -m training.auto"

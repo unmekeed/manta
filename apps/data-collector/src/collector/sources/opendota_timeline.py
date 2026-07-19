@@ -115,34 +115,52 @@ def timeline_rows(m: dict) -> list[dict]:
 
 
 def match_passes(m: dict, min_rank: int, min_duration_s: int,
-                 min_patch: int | None) -> tuple[bool, str]:
-    """Фильтр качества: та же популяция, что у реплей-источника."""
-    if int(m.get("lobby_type", -1)) not in RANKED_LOBBIES:
-        return False, "lobby"
-    if int(m.get("game_mode", -1)) not in STANDARD_MODES:
-        return False, "mode"
+                 min_patch: int | None, pro: bool = False) -> tuple[bool, str]:
+    """Фильтр качества.
+
+    public: та же популяция, что у реплей-источника (ranked/All Pick,
+    средний rank_tier). pro: лиговые матчи играются в лобби турнира и
+    Captains Mode, а rank_tier у про-игроков обычно скрыт — проверяются
+    только длительность, патч и наличие таймлайна.
+    """
+    if not pro:
+        if int(m.get("lobby_type", -1)) not in RANKED_LOBBIES:
+            return False, "lobby"
+        if int(m.get("game_mode", -1)) not in STANDARD_MODES:
+            return False, "mode"
     if int(m.get("duration") or 0) < min_duration_s:
         return False, "short"
     if min_patch is not None and int(m.get("patch") or 0) < min_patch:
         return False, "old-patch"
-    ranks = [p["rank_tier"] for p in (m.get("players") or [])
-             if p.get("rank_tier")]
-    if len(ranks) < 5:
-        return False, "ranks-unknown"
-    if sum(ranks) / len(ranks) < min_rank:
-        return False, "low-rank"
+    if not pro:
+        ranks = [p["rank_tier"] for p in (m.get("players") or [])
+                 if p.get("rank_tier")]
+        if len(ranks) < 5:
+            return False, "ranks-unknown"
+        if sum(ranks) / len(ranks) < min_rank:
+            return False, "low-rank"
     if not (m.get("radiant_gold_adv") and m.get("radiant_xp_adv")):
         return False, "no-timeline"
     return True, "ok"
 
 
 class OpenDotaTimelineSource:
-    name = "opendota_timeline"
+    """mode="public": /parsedMatches, фильтр по рангу → tier=Premium.
+    mode="pro": /proMatches (лиги распаршены всегда) → tier=Professional —
+    эталонная выборка для гейта, в train не попадает никогда."""
 
     def __init__(self, base_url: str = "https://api.opendota.com/api",
                  limit_per_cycle: int = 30, min_rank: int = 80,
                  min_duration_s: int = 900, min_patch: int | None = None,
-                 timeout: float = 30.0, api_delay_s: float = 1.1) -> None:
+                 timeout: float = 30.0, api_delay_s: float = 1.1,
+                 mode: str = "public") -> None:
+        assert mode in ("public", "pro")
+        self._mode = mode
+        self.name = ("opendota_timeline" if mode == "public"
+                     else "opendota_timeline_pro")
+        self._candidates_path = ("parsedMatches" if mode == "public"
+                                 else "proMatches")
+        self._tier = "Premium" if mode == "public" else "Professional"
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._min_rank = min_rank
@@ -184,7 +202,7 @@ class OpenDotaTimelineSource:
             params = {}
             if cursor:
                 params["less_than_match_id"] = cursor
-            batch = self._get("parsedMatches", **params).json()
+            batch = self._get(self._candidates_path, **params).json()
             if not batch:
                 return
             pages += 1
@@ -199,7 +217,8 @@ class OpenDotaTimelineSource:
                     logger.warning("матч %d: %s — пропуск", mid, e)
                     continue
                 ok, why = match_passes(m, self._min_rank,
-                                       self._min_duration_s, self._min_patch)
+                                       self._min_duration_s, self._min_patch,
+                                       pro=(self._mode == "pro"))
                 if not ok:
                     logger.debug("матч %d отфильтрован: %s", mid, why)
                     continue
@@ -207,7 +226,7 @@ class OpenDotaTimelineSource:
                 if not rows:
                     continue
                 yielded += 1
-                yield TimelineMatch(match_id=mid, tier="Premium", rows=rows,
+                yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
                                     source_cursor=str(mid))
                 if yielded >= self._limit:
                     return

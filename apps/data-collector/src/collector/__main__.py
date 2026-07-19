@@ -36,12 +36,13 @@ def build_source(name: str):
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
         )
-    if name == "opendota-timeline":
+    if name in ("opendota-timeline", "opendota-timeline-pro"):
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
         return OpenDotaTimelineSource(
             limit_per_cycle=int(os.getenv("TIMELINE_LIMIT", "30")),
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
+            mode="pro" if name.endswith("-pro") else "public",
         )
     raise ValueError(f"unknown source {name!r}")
 
@@ -55,7 +56,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
                         choices=["fixture", "opendota", "opendota-public",
-                                 "opendota-timeline"])
+                                 "opendota-timeline", "opendota-timeline-pro"])
     parser.add_argument("--interval", type=int,
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
     parser.add_argument("--once", action="store_true",
@@ -63,11 +64,12 @@ def main() -> None:
     args = parser.parse_args()
 
     source = build_source(args.source)
-    if args.source == "opendota-timeline":
+    if args.source.startswith("opendota-timeline"):
         # JSON-путь: без S3/Kafka — витрина пишется напрямую.
         from .timeline_runner import TimelineCollector, TimelineConfig
         collector = TimelineCollector(TimelineConfig(), source)
-        default_metrics_port = "9108"
+        default_metrics_port = ("9108" if args.source == "opendota-timeline"
+                                else "9110")
     else:
         cfg = CollectorConfig(
             postgres_dsn=os.getenv(
