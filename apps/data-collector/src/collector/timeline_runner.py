@@ -24,9 +24,10 @@ import requests
 
 logger = logging.getLogger("collector.timeline")
 
-FEATURE_VERSION = "opendota-json@2"
+FEATURE_VERSION = "opendota-json@3"
 
-MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "xp_diff",
+MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
+               "xp_diff",
                "kills_radiant", "kills_dire", "position_advance",
                "alive_diff", "towers_diff", "rax_diff",
                "radiant_win", "tier", "feature_version"]

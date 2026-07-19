@@ -58,6 +58,9 @@ FEATURE_PSI = Gauge("wp_feature_psi",
                     "PSI фичи: текущая витрина против референса production",
                     ["feature"])
 PSI_MAX = Gauge("wp_psi_max", "Максимальный PSI по фичам")
+BRIER_PHASE = Gauge("wp_brier_phase",
+                    "Brier последней тренировки по фазам игры",
+                    ["phase"])  # early | mid | late
 
 _notifier = TelegramNotifier()
 
@@ -129,6 +132,9 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     BRIER_VALID.set(m.get("brier_calibrated", 0))
     if "brier_benchmark_pro" in m:
         BRIER_BENCHMARK.set(m["brier_benchmark_pro"])
+    for phase in ("early", "mid", "late"):
+        if f"brier_{phase}" in m:
+            BRIER_PHASE.labels(phase).set(m[f"brier_{phase}"])
     # Честный гейт: обе модели пересчитываются на общем holdout текущих данных
     # (evaluate_gate внутри push_with_gate) — устойчиво к «удачному» prod.
     _, promoted, reason = push_with_gate(artifact, out_path, logger, ds=ds)

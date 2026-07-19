@@ -34,7 +34,7 @@ def main() -> int:
         params={"database": os.getenv("CLICKHOUSE_DB", "manta"),
                 "default_format": "JSONEachRow",
                 "param_match_id": str(args.match_id)},
-        data="SELECT game_time, networth_diff, xp_diff,"
+        data="SELECT game_time, networth_diff, networth_total, xp_diff,"
              "       kills_radiant, kills_dire, position_advance,"
              "       alive_diff, towers_diff, rax_diff"
              "  FROM MatchTimelineFeatures FINAL"

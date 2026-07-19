@@ -35,10 +35,17 @@ def _parsed_match(mid=100, minutes=20, radiant_win=True):
 
 
 def test_timeline_rows_grid_and_kills():
-    rows = timeline_rows(_parsed_match(minutes=20))
+    m = _parsed_match(minutes=20)
+    # gold_t игроков → networth_total по минутам (сумма обеих команд)
+    for p in m["players"]:
+        p["gold_t"] = [i * 200 for i in range(21)]
+    rows = timeline_rows(m)
     # сетка минут: 60..1200 (нулевая пропущена)
     assert [r["game_time"] for r in rows] == [i * 60 for i in range(1, 21)]
     assert rows[0]["networth_diff"] == 100 and rows[-1]["networth_diff"] == 2000
+    # 5 игроков в фикстуре × 200·i золота
+    assert rows[0]["networth_total"] == 5 * 200.0
+    assert rows[-1]["networth_total"] == 5 * 200.0 * 20
     # убийства накопительно: к 60с — 0; к 120с — 1 (Radiant, 90с);
     # к 240с — 1R + 1D (200с); к 420с — 2R
     by_t = {r["game_time"]: r for r in rows}
@@ -147,8 +154,9 @@ def test_runner_inserts_and_marks(monkeypatch):
     assert len(lines) == 3
     first = lines[0].split("\t")
     assert first[0] == "42" and first[1] == "60"
-    assert lines[0].count("nan") == 2             # position_advance + alive_diff
-    assert "opendota-json@2" in lines[0]
+    # position_advance + alive_diff + networth_total (фикстура без gold_t)
+    assert lines[0].count("nan") == 3
+    assert "opendota-json@3" in lines[0]
     # PG: INSERT в CollectedMatches и CollectorCursor
     kinds = [k for k, _ in pg_store["sql"]]
     assert kinds.count("INSERT") == 2

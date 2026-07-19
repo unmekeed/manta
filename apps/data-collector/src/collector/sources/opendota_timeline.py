@@ -95,6 +95,15 @@ def timeline_rows(m: dict) -> list[dict]:
     def _cum_delta(events: list[tuple[int, int]], t: int) -> int:
         return sum(d for et, d in events if et <= t)
 
+    # Суммарное золото обеих команд по минутам: players[].gold_t —
+    # накопительное золото игрока (прокси net worth). Если массивы короче
+    # таймлайна или отсутствуют — NaN (фича networth_rel честно выпадает).
+    gold_t = [p.get("gold_t") or [] for p in m.get("players") or []]
+
+    def _total_at(i: int) -> float:
+        vals = [gt[i] for gt in gold_t if len(gt) > i]
+        return float(sum(vals)) if len(vals) == len(gold_t) and vals else math.nan
+
     rows = []
     for i in range(1, n):
         t = i * 60
@@ -102,6 +111,7 @@ def timeline_rows(m: dict) -> list[dict]:
             "match_id": int(m["match_id"]),
             "game_time": t,
             "networth_diff": int(gold[i]),
+            "networth_total": _total_at(i),
             "xp_diff": int(xp[i]),
             "kills_radiant": _cum(r_kills, t),
             "kills_dire": _cum(d_kills, t),

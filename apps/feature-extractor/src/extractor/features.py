@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FEATURE_VERSION = "1.3.0"  # 1.3.0: + alive_diff, towers_diff, rax_diff
+FEATURE_VERSION = "1.4.0"  # 1.4.0: + networth_total (для networth_rel)
 
 WINDOW_S = 60  # шаг таймлайна фич
 
@@ -366,6 +366,7 @@ def timeline_features(economy: list[dict], kills: list[dict],
         out.append({
             "game_time": t,
             "networth_diff": nw[2] - nw[3],
+            "networth_total": float(nw[2] + nw[3]),
             "xp_diff": xp[2] - xp[3],
             "kills_radiant": kills_r,
             "kills_dire": kills_d,

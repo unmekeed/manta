@@ -26,12 +26,13 @@ FEATURES = [
     "alive_diff",         # живые герои R−D (миграция 008; NaN у JSON-матчей)
     "towers_diff",        # снесённые башни R−D накопительно (миграция 008)
     "rax_diff",           # снесённые бараки R−D накопительно (миграция 008)
+    "networth_rel",       # доля преимущества: networth_diff/networth_total
 ]
 
 # Фичи, меняющие знак при зеркалировании сторон Radiant↔Dire (все
 # разностные и территориальные). game_time и kills_total симметричны.
 MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
-                 "alive_diff", "towers_diff", "rax_diff"}
+                 "alive_diff", "towers_diff", "rax_diff", "networth_rel"}
 
 
 PRO_TIER = "Professional"
@@ -125,6 +126,12 @@ def row_to_features(row: dict) -> list[float]:
         v = row.get(key)
         return float(v) if v is not None else math.nan
 
+    # networth_rel — производная при загрузке: доля преимущества вместо
+    # абсолюта (5k на 10-й и на 40-й минуте — разные вселенные). NaN, если
+    # networth_total неизвестен (старые строки).
+    total = _f("networth_total")
+    rel = (float(row["networth_diff"]) / total
+           if total == total and total > 0 else math.nan)
     return [
         float(row["game_time"]),
         float(row["networth_diff"]),
@@ -135,6 +142,7 @@ def row_to_features(row: dict) -> list[float]:
         _f("alive_diff"),
         _f("towers_diff"),
         _f("rax_diff"),
+        rel,
     ]
 
 
@@ -143,8 +151,8 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
     resp = requests.post(
         url,
         params={"database": database, "default_format": "JSONEachRow"},
-        data="SELECT match_id, game_time, networth_diff, xp_diff,"
-             "       kills_radiant, kills_dire, position_advance,"
+        data="SELECT match_id, game_time, networth_diff, networth_total,"
+             "       xp_diff, kills_radiant, kills_dire, position_advance,"
              "       alive_diff, towers_diff, rax_diff,"
              "       radiant_win, tier"
              "  FROM MatchTimelineFeatures FINAL ORDER BY match_id, game_time",
@@ -195,8 +203,9 @@ def synth_matches(n: int, seed: int = 7) -> Dataset:
             alive = float(int(max(-5, min(5, rng.normal(nw / 12000.0, 1.2)))))
             towers = float(int(max(-11, min(11, nw / 9000.0 + rng.normal(0, 0.7)))))
             rax = float(int(max(-6, min(6, nw / 20000.0 + rng.normal(0, 0.3)))))
+            total = 12000.0 + t * 18.0   # рост суммарной экономики
             Xs.append([t, nw, xp, kills_r - kills_d, kills_r + kills_d, adv,
-                       alive, towers, rax])
+                       alive, towers, rax, nw / total])
             gs.append(match_id)
         p_radiant = 1.0 / (1.0 + math.exp(-nw / 8000.0))
         radiant_win = 1 if rng.random() < p_radiant else 0

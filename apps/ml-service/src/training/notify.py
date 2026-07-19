@@ -110,6 +110,9 @@ class TelegramNotifier:
         """Уведомление о завершённом переобучении."""
         bm = new_metrics.get("brier_benchmark_pro", "—")
         val = new_metrics.get("brier_calibrated", "—")
+        oof = new_metrics.get("brier_oof", "—")
+        phases = " / ".join(str(new_metrics.get(f"brier_{p}", "—"))
+                            for p in ("early", "mid", "late"))
         icon = "✅ продвинута в production" if promoted else "⏸ отклонена гейтом"
         # reason приходит из should_promote и содержит '<='/'>' — экранируем,
         # иначе parse_mode=HTML в Telegram отдаёт 400 (символы как теги).
@@ -117,7 +120,8 @@ class TelegramNotifier:
             f"<b>Manta · переобучение завершено</b>\n"
             f"{icon}\n"
             f"датасет: {dataset_matches} матчей\n"
-            f"Brier эталон (pro): <b>{bm}</b>  ·  валидация: {val}\n"
+            f"Brier эталон (pro): <b>{bm}</b>  ·  валидация: {val}  ·  OOF: {oof}\n"
+            f"по фазам (0–10/10–25/25+ мин): {phases}\n"
             f"гейт: {html.escape(str(reason))}"
         )
         return self.send(text)

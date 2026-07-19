@@ -86,7 +86,8 @@ class ReportGenerator:
 
     def _timeline_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
-            "SELECT game_time, networth_diff, xp_diff, kills_radiant,"
+            "SELECT game_time, networth_diff, networth_total,"
+            "       xp_diff, kills_radiant,"
             "       kills_dire, position_advance, alive_diff,"
             "       towers_diff, rax_diff, radiant_win"
             "  FROM MatchTimelineFeatures FINAL"
@@ -113,6 +114,12 @@ class ReportGenerator:
 
     def _wp_curve(self, match_id: int, rows: list[dict]
                   ) -> tuple[list[float], list[list[dict]], str]:
+        def _rel(r: dict) -> float:
+            total = _f(r, "networth_total")
+            if total == total and total > 0:
+                return float(r["networth_diff"]) / total
+            return float("nan")
+
         def _f(r: dict, key: str) -> float:
             # Отсутствующие фичи (JSON-матчи, строки до миграции 008):
             # ClickHouse отдаёт NaN как null → NaN — корректный пропуск
@@ -136,6 +143,7 @@ class ReportGenerator:
                         "alive_diff": _f(r, "alive_diff"),
                         "towers_diff": _f(r, "towers_diff"),
                         "rax_diff": _f(r, "rax_diff"),
+                        "networth_rel": _rel(r),
                     }))
 
         wp, drivers = [], []
@@ -158,6 +166,7 @@ class ReportGenerator:
                 "alive_diff": _f(last, "alive_diff"),
                 "towers_diff": _f(last, "towers_diff"),
                 "rax_diff": _f(last, "rax_diff"),
+                "networth_rel": _rel(last),
             })))
         return wp, drivers, resp.model_version
 

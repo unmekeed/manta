@@ -37,7 +37,7 @@ def test_prediction_monotone_in_networth():
     t = 1800.0
     diffs = np.linspace(-30000, 30000, 13)
     X = np.array([[t, d, d * 1.2, d / 3000, 20, d / 30000,
-                   d / 10000, d / 6000, d / 15000] for d in diffs])
+                   d / 10000, d / 6000, d / 15000, d / 40000] for d in diffs])
     wp = cal.predict(booster.predict(X))
     # Допускаем плато (изотоника), но не убывание.
     assert all(b - a >= -1e-9 for a, b in zip(wp, wp[1:]))
@@ -180,13 +180,16 @@ def test_psi_zero_on_same_distribution():
     from training.dataset import FEATURES
     from training.drift import compute_reference, max_psi, psi_report
 
-    ds = synth_matches(60, seed=5)
+    # networth_rel почти детерминирована драфтом матча → распределение по
+    # матчам шумное; для проверки «нет дрейфа между сэмплами одной
+    # популяции» нужна выборка побольше
+    ds = synth_matches(250, seed=5)
     ref = compute_reference(ds.X, FEATURES)
     report = psi_report(ref, ds.X, FEATURES)
     # те же данные → PSI ≈ 0 по каждой фиче
     assert report and max_psi(report) < 0.01
     # другой seed того же генератора — та же популяция, дрейфа нет
-    other = synth_matches(60, seed=6)
+    other = synth_matches(250, seed=6)
     assert max_psi(psi_report(ref, other.X, FEATURES)) < 0.1
 
 
@@ -279,13 +282,14 @@ def test_mirror_xy_symmetry():
 
     # одна строка: Radiant ведёт (+nw, +xp, +kills_diff, +pos, +alive,
     # +towers, +rax), метка 1
-    X = np.array([[1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5, 2.0, 3.0, 1.0]])
+    X = np.array([[1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5, 2.0, 3.0, 1.0,
+                   0.12]])
     y = np.array([1])
     Xm, ym = mirror_xy(X, y)
     assert len(ym) == 2
     # зеркало: разностные фичи меняют знак, kills_total и time — нет, метка 0
     neg = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
-           "alive_diff", "towers_diff", "rax_diff"}
+           "alive_diff", "towers_diff", "rax_diff", "networth_rel"}
     for i, f in enumerate(FEATURES):
         if f in neg:
             assert Xm[1, i] == -X[0, i]

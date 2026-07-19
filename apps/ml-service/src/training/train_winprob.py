@@ -33,7 +33,7 @@ from .drift import compute_reference
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.6.0"  # 0.6.0: OOF-калибровка, веса матчей, Platt<50
+MODEL_VERSION = "0.7.0"  # 0.7.0: networth_rel + фазовые Brier
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -49,6 +49,7 @@ MONOTONE = {
     "alive_diff": 1,     # больше живых у Radiant → WP не убывает
     "towers_diff": 1,    # снесено больше зданий Dire → WP не убывает
     "rax_diff": 1,
+    "networth_rel": 1,   # доля преимущества — та же монотонность, что у diff
 }
 
 LGB_PARAMS = {
@@ -185,6 +186,15 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         "calibrator": calibrator_kind,
         "oof_folds": len(best_iters),
     }
+    # Фазовые Brier (Гл. 6.2.2): агрегат маскирует, что поздние минуты
+    # тривиальны (WP → 0/1), а ранние — где модель реально слаба.
+    t_va = X_va[:, 0]
+    for name, lo, hi in (("early", 0, 600), ("mid", 600, 1500),
+                         ("late", 1500, float("inf"))):
+        m_ph = (t_va >= lo) & (t_va < hi)
+        if m_ph.sum() > 0:
+            metrics[f"brier_{name}"] = round(
+                float(brier_score_loss(y_va[m_ph], cal_va[m_ph])), 4)
 
     # Эталон: матчи про-команд (tier=Professional) — вне train/valid.
     # Метрика на них показывает перенос модели, обученной на high-rank
