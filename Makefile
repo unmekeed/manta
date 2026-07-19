@@ -90,6 +90,10 @@ proto-gen:     ## Сгенерировать Python-стабы gRPC из proto/ 
 		--python_out=apps/draft/src/gen \
 		--grpc_python_out=apps/draft/src/gen \
 		proto/services.proto
+	python3 -m grpc_tools.protoc -I proto \
+		--python_out=apps/coach/src/gen \
+		--grpc_python_out=apps/coach/src/gen \
+		proto/services.proto
 
 ml-serve:      ## Запустить gRPC-сервер ML Service
 	cd apps/ml-service && PYTHONPATH=src python3 -m app
@@ -105,6 +109,9 @@ sim-serve:     ## Similarity Engine: gRPC-поиск похожих матчей
 
 draft-serve:   ## Draft Engine: рекомендации пиков (:50053)
 	cd apps/draft && PYTHONPATH=src python3 -m serve_draft
+
+coach-serve:   ## AI Coach: план тренировки из отчётов + RAG (:50054)
+	cd apps/coach && PYTHONPATH=src python3 -m serve_coach
 
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
