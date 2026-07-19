@@ -88,20 +88,29 @@ services:
 
   # MLflow Tracking + Model Registry (Гл. 10.6, Фаза 4). Артефакты
   # проксируются через сервер (--serve-artifacts) — клиентам не нужны
-  # S3-креды. Dev-хранилище — sqlite на volume; в проде заменяется на
-  # postgres одним URI. Клиенты включают его переменной
-  # REGISTRY_BACKEND=mlflow (по умолчанию — собственный S3-реестр).
+  # S3-креды. Прод-режим (D1): метаданные в postgres (БД mlflow из
+  # миграции 004 — прогнать make migrate-pg до первого старта).
+  # Официальный образ без драйвера postgres — ставится на старте.
+  # Клиенты включают бэкенд переменной REGISTRY_BACKEND=mlflow
+  # (по умолчанию — собственный S3-реестр).
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.16.2
+    # Фолбэк на /mlflow/wheels — для сред без прямого выхода в PyPI
+    # (колесо кладётся на volume заранее: pip download psycopg2-binary).
     command: >
+      bash -c "(pip install --quiet psycopg2-binary ||
+      pip install --quiet --no-index --find-links /mlflow/wheels psycopg2-binary) && exec
       mlflow server --host 0.0.0.0 --port 5000
-      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --backend-store-uri postgresql://dota:dota_dev_password@postgres:5432/mlflow
       --artifacts-destination /mlflow/artifacts
-      --serve-artifacts
+      --serve-artifacts"
     ports:
       - "9600:5000"
     volumes:
       - mlflow_data:/mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
