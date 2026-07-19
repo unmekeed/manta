@@ -11,12 +11,18 @@ export interface Timeline {
   points: TimelinePoint[];
 }
 
+export interface FeatureContribution {
+  feature: string;
+  value: number; // SHAP-вклад в log-odds; знак — в чью пользу тянет фича
+}
+
 export interface GameError {
   type: string;
   game_time: number;
   delta_wp: number;
   safety_index: number;
   explanation: string;
+  top_contributions?: FeatureContribution[];
 }
 
 export interface PlayerAnalysis {
@@ -68,3 +74,19 @@ export const api = {
 
 export const heroLabel = (npc: string) =>
   npc.replace("npc_dota_hero_", "").replace(/_/g, " ");
+
+// Человекочитаемые метки фич WP-модели (для SHAP-драйверов у ошибок).
+const FEATURE_LABELS: Record<string, string> = {
+  game_time: "время игры",
+  networth_diff: "разрыв нетворса",
+  networth_rel: "отн. разрыв нетворса",
+  xp_diff: "разрыв опыта",
+  kills_diff: "разница убийств",
+  kills_total: "сумма убийств",
+  position_advance: "продвижение по карте",
+  alive_diff: "живые герои",
+  towers_diff: "вышки",
+  rax_diff: "бараки",
+};
+
+export const featureLabel = (name: string) => FEATURE_LABELS[name] ?? name;

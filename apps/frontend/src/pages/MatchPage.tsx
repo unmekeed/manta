@@ -2,7 +2,33 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
 import WpChart from "../components/WpChart";
-import { api, heroLabel, type PlayerAnalysis } from "../lib/api";
+import {
+  api,
+  featureLabel,
+  heroLabel,
+  type FeatureContribution,
+  type PlayerAnalysis,
+} from "../lib/api";
+
+// SHAP-вклады снапшота после ошибки: какие фичи модель «увидела» главными
+// в состоянии игры (Гл. 6.2; данные в отчёте со спринта 29).
+function ErrorDrivers({ drivers }: { drivers: FeatureContribution[] }) {
+  const max = Math.max(...drivers.map((d) => Math.abs(d.value)), 1e-9);
+  return (
+    <div className="drivers">
+      {drivers.map((d) => (
+        <span
+          key={d.feature}
+          className={`driver ${d.value >= 0 ? "pos" : "neg"}`}
+          title={`SHAP-вклад ${d.value.toFixed(3)} в log-odds WP`}
+        >
+          <i style={{ width: `${Math.round((Math.abs(d.value) / max) * 36)}px` }} />
+          {featureLabel(d.feature)}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function ScoreBar({ value }: { value: number }) {
   return (
@@ -86,7 +112,15 @@ export default function MatchPage() {
       </h1>
       <div className="narrative">{a.narrative}</div>
 
-      <h2>Win Probability</h2>
+      <h2>
+        Win Probability
+        <span
+          className="beta-badge"
+          title="Модель WP в бета-версии: обучена на высокоранговых матчах текущего патча, Brier на про-эталоне ~0.15. Оценки уточняются по мере роста датасета."
+        >
+          beta
+        </span>
+      </h2>
       {timeline.data && <WpChart points={timeline.data.points} />}
 
       <h2>Игроки</h2>
@@ -106,6 +140,9 @@ export default function MatchPage() {
               {e.explanation}
               {e.safety_index >= 0.6 && (
                 <span className="si-badge">риск {e.safety_index.toFixed(2)}</span>
+              )}
+              {e.top_contributions && e.top_contributions.length > 0 && (
+                <ErrorDrivers drivers={e.top_contributions} />
               )}
             </div>
           ))}

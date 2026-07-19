@@ -72,3 +72,21 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
   margin-left: 8px; padding: 1px 8px; border-radius: 5px; font-size: 12px;
   background: rgba(217, 164, 65, 0.15); color: var(--accent); font-weight: 600;
 }
+
+/* Бета-метка WP (B3): модель прошла гейты B1/B2, но датасет ещё растёт. */
+.beta-badge {
+  margin-left: 8px; padding: 1px 8px; border-radius: 5px; font-size: 11px;
+  background: rgba(217, 164, 65, 0.15); color: var(--accent);
+  font-weight: 700; letter-spacing: 0.08em; cursor: help;
+  text-transform: uppercase; vertical-align: middle;
+}
+
+/* SHAP-драйверы у ошибки: полоска = |вклад|, цвет = знак (в чью пользу). */
+.drivers { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.driver {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--muted); font-size: 12px; cursor: help;
+}
+.driver > i { display: inline-block; height: 6px; border-radius: 3px; min-width: 3px; }
+.driver.pos > i { background: var(--radiant); }
+.driver.neg > i { background: var(--dire); }
