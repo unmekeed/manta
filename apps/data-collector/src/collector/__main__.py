@@ -8,6 +8,7 @@ import argparse
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 from prometheus_client import Counter, start_http_server
@@ -24,6 +25,19 @@ from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
 from .sources.opendota_timeline import OpenDotaTimelineSource
+
+
+def seconds_until_utc_midnight(now: datetime | None = None,
+                               buffer_s: int = 120) -> int:
+    """До заявленного сброса дневной квоты OpenDota (00:00 UTC) + запас.
+
+    Запас нужен, чтобы не выстрелить циклом за секунду до реального
+    сброса и не словить тот же 429 второй раз подряд.
+    """
+    now = now or datetime.now(timezone.utc)
+    midnight = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return int((midnight - now).total_seconds()) + buffer_s
 
 
 def build_source(name: str):
@@ -99,7 +113,12 @@ def main() -> None:
     try:
         while True:
             # Временный сбой внешнего API (5xx OpenDota, сеть) не должен
-            # убивать демона — цикл повторится через interval.
+            # убивать демона — цикл повторится через interval. 429 —
+            # особый случай: обычный interval означал бы ещё десяток
+            # бесполезных попыток до полуночи UTC, каждая из которых всё
+            # равно немного дожигает и без того отрицательный остаток
+            # квоты (см. docs/runbooks.md) — ждём настоящего сброса.
+            sleep_s = args.interval
             try:
                 n = collector.collect_once()
                 MATCHES_COLLECTED.inc(n)
@@ -112,10 +131,12 @@ def main() -> None:
                     RATE_LIMITED.inc()
                     remaining = e.response.headers.get(
                         "x-rate-limit-remaining-day", "?")
+                    sleep_s = max(sleep_s, seconds_until_utc_midnight())
                     log.warning(
                         "429: квота OpenDota исчерпана (remaining-day=%s); "
-                        "сбор встал до сброса в 00:00 UTC — см. "
-                        "docs/runbooks.md и OPENDOTA_API_KEY", remaining)
+                        "жду сброса ~%.1fч вместо обычных %ss — см. "
+                        "docs/runbooks.md и OPENDOTA_API_KEY",
+                        remaining, sleep_s / 3600, args.interval)
                 else:
                     log.exception("цикл сбора упал; повтор через %ss",
                                   args.interval)
@@ -126,7 +147,7 @@ def main() -> None:
                 log.exception("цикл сбора упал; повтор через %ss", args.interval)
             if args.once:
                 break
-            time.sleep(args.interval)
+            time.sleep(sleep_s)
     finally:
         collector.close()
 
