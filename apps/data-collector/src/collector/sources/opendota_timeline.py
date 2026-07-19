@@ -27,6 +27,8 @@ from typing import Iterable
 
 import requests
 
+from . import with_api_key
+
 logger = logging.getLogger("collector.opendota_timeline")
 
 # Форматы качества данных — как у реплей-источника (opendota_public).
@@ -163,7 +165,7 @@ class OpenDotaTimelineSource:
                  limit_per_cycle: int = 30, min_rank: int = 80,
                  min_duration_s: int = 900, min_patch: int | None = None,
                  timeout: float = 30.0, api_delay_s: float = 1.1,
-                 mode: str = "public") -> None:
+                 mode: str = "public", api_key: str | None = None) -> None:
         assert mode in ("public", "pro")
         self._mode = mode
         self.name = ("opendota_timeline" if mode == "public"
@@ -178,10 +180,12 @@ class OpenDotaTimelineSource:
         self._min_patch = min_patch      # None → определить при первом цикле
         self._timeout = timeout
         self._delay = api_delay_s
+        self._api_key = api_key
 
     def _get(self, path: str, **params) -> requests.Response:
         time.sleep(self._delay)          # бюджет free tier: 60 вызовов/мин
-        resp = requests.get(f"{self._base}/{path}", params=params or None,
+        resp = requests.get(f"{self._base}/{path}",
+                            params=with_api_key(params, self._api_key),
                             timeout=self._timeout, headers=UA)
         resp.raise_for_status()
         return resp

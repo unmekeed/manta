@@ -23,6 +23,14 @@ LOG_DIR="${MANTA_LOG_DIR:-/tmp}"
 say()  { printf '>> %s\n' "$*"; }
 skip() { printf '   %s — уже работает, пропуск\n' "$*"; }
 
+# Секреты (Telegram, OPENDOTA_API_KEY и пр.) — общий env-файл вне git,
+# доступен всем шагам ниже (не только auto-train, как раньше).
+if [ -n "$TRAIN_ENV" ] && [ -f "$TRAIN_ENV" ]; then
+    set -a; . "$TRAIN_ENV"; set +a
+else
+    echo "   ВНИМАНИЕ: MANTA_TRAIN_ENV не задан/не найден — Telegram и OPENDOTA_API_KEY выключены" >&2
+fi
+
 # 1. dockerd -------------------------------------------------------------------
 if docker info >/dev/null 2>&1; then
     skip "dockerd"
@@ -162,15 +170,8 @@ fi
 # 5. Авто-обучение (+ Telegram-уведомления из env-файла) -----------------------
 if ! pgrep -f "python3 -u -m training.auto" >/dev/null; then
     say "запускаю auto-train (лог: $LOG_DIR/wp-auto.log)"
-    (
-        cd apps/ml-service
-        if [ -n "$TRAIN_ENV" ] && [ -f "$TRAIN_ENV" ]; then
-            set -a; . "$TRAIN_ENV"; set +a
-        else
-            echo "   ВНИМАНИЕ: MANTA_TRAIN_ENV не задан/не найден — Telegram-уведомления выключены" >&2
-        fi
-        PYTHONPATH=src nohup python3 -u -m training.auto >"$LOG_DIR/wp-auto.log" 2>&1 &
-    )
+    (cd apps/ml-service && PYTHONPATH=src \
+        nohup python3 -u -m training.auto >"$LOG_DIR/wp-auto.log" 2>&1 &)
 else
     skip "auto-train"
 fi

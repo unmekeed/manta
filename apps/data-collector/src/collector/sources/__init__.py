@@ -20,6 +20,15 @@ class MatchRef:
     source_cursor: str       # позиция в источнике (для CollectorCursor)
 
 
+def with_api_key(params: dict | None, api_key: str | None) -> dict:
+    """Домешать OPENDOTA_API_KEY в query-параметры (снимает суточный лимит
+    анонимного тарифа — см. docs/ROADMAP.md, D-раздел «rate limit»)."""
+    params = dict(params) if params else {}
+    if api_key:
+        params["api_key"] = api_key
+    return params
+
+
 class Source(Protocol):
     """Контракт источника: имя + итератор новых матчей после курсора."""
 

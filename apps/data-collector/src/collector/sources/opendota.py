@@ -19,7 +19,7 @@ from typing import Iterable
 
 import requests
 
-from . import MatchRef
+from . import MatchRef, with_api_key
 
 logger = logging.getLogger("collector.opendota")
 
@@ -31,14 +31,17 @@ class OpenDotaSource:
 
     def __init__(self, base_url: str = "https://api.opendota.com/api",
                  limit_per_cycle: int = 3, timeout: float = 30.0,
-                 api_delay_s: float = 1.1) -> None:
+                 api_delay_s: float = 1.1, api_key: str | None = None) -> None:
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._timeout = timeout
         self._api_delay_s = api_delay_s  # бережём rate limit бесплатного тарифа
+        self._api_key = api_key
 
     def fetch_new(self, after_cursor: str | None) -> Iterable[MatchRef]:
-        resp = requests.get(f"{self._base}/proMatches", timeout=self._timeout)
+        resp = requests.get(f"{self._base}/proMatches",
+                            params=with_api_key(None, self._api_key),
+                            timeout=self._timeout)
         resp.raise_for_status()
         floor = int(after_cursor) if after_cursor else 0
         # Старые вперёд: курсор растёт монотонно, прерванный цикл
@@ -69,6 +72,7 @@ class OpenDotaSource:
     def _match_detail(self, match_id: int) -> dict | None:
         time.sleep(self._api_delay_s)
         resp = requests.get(f"{self._base}/matches/{match_id}",
+                            params=with_api_key(None, self._api_key),
                             timeout=self._timeout)
         if resp.status_code == 404:
             return None

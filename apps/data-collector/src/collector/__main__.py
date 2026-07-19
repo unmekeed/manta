@@ -25,16 +25,18 @@ from .sources.opendota_timeline import OpenDotaTimelineSource
 
 def build_source(name: str):
     limit = int(os.getenv("OPENDOTA_LIMIT", "3"))
+    api_key = os.getenv("OPENDOTA_API_KEY") or None
     if name == "fixture":
         return FixtureSource()
     if name == "opendota":
-        return OpenDotaSource(limit_per_cycle=limit)
+        return OpenDotaSource(limit_per_cycle=limit, api_key=api_key)
     if name == "opendota-public":
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
         return OpenDotaPublicSource(
             limit_per_cycle=limit,
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
+            api_key=api_key,
         )
     if name in ("opendota-timeline", "opendota-timeline-pro"):
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
@@ -43,6 +45,7 @@ def build_source(name: str):
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
             mode="pro" if name.endswith("-pro") else "public",
+            api_key=api_key,
         )
     raise ValueError(f"unknown source {name!r}")
 

@@ -22,7 +22,7 @@ from typing import Iterable
 
 import requests
 
-from . import MatchRef
+from . import MatchRef, with_api_key
 from .opendota import DEM_MAGIC, OpenDotaSource
 
 logger = logging.getLogger("collector.opendota_public")
@@ -35,7 +35,7 @@ class OpenDotaPublicSource:
                  limit_per_cycle: int = 5, min_rank: int = 80,
                  min_patch: int | None = None, min_duration_s: int = 900,
                  lag_matches: int = 60_000, timeout: float = 30.0,
-                 api_delay_s: float = 1.1) -> None:
+                 api_delay_s: float = 1.1, api_key: str | None = None) -> None:
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._min_rank = min_rank
@@ -44,13 +44,16 @@ class OpenDotaPublicSource:
         self._lag = lag_matches
         self._timeout = timeout
         self._api_delay_s = api_delay_s
+        self._api_key = api_key
         # Скачивание/распаковка идентичны pro-источнику.
-        self._downloader = OpenDotaSource(base_url=base_url, timeout=timeout)
+        self._downloader = OpenDotaSource(base_url=base_url, timeout=timeout,
+                                          api_key=api_key)
 
     # -- патч ------------------------------------------------------------------
 
     def _latest_patch(self) -> int:
         resp = requests.get(f"{self._base}/constants/patch",
+                            params=with_api_key(None, self._api_key),
                             timeout=self._timeout)
         resp.raise_for_status()
         patches = resp.json()
@@ -69,7 +72,8 @@ class OpenDotaPublicSource:
         # OpenDota обычно ещё не имеет replay_salt.
         newest = requests.get(
             f"{self._base}/publicMatches",
-            params={"min_rank": str(self._min_rank)},
+            params=with_api_key({"min_rank": str(self._min_rank)},
+                                self._api_key),
             timeout=self._timeout)
         newest.raise_for_status()
         rows = newest.json()
@@ -80,8 +84,9 @@ class OpenDotaPublicSource:
         time.sleep(self._api_delay_s)
         resp = requests.get(
             f"{self._base}/publicMatches",
-            params={"min_rank": str(self._min_rank),
-                    "less_than_match_id": str(ceiling)},
+            params=with_api_key({"min_rank": str(self._min_rank),
+                                 "less_than_match_id": str(ceiling)},
+                                self._api_key),
             timeout=self._timeout)
         resp.raise_for_status()
 
@@ -121,6 +126,7 @@ class OpenDotaPublicSource:
     def _match_detail(self, match_id: int) -> dict | None:
         time.sleep(self._api_delay_s)
         resp = requests.get(f"{self._base}/matches/{match_id}",
+                            params=with_api_key(None, self._api_key),
                             timeout=self._timeout)
         if resp.status_code == 404:
             return None
