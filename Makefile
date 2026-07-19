@@ -94,6 +94,14 @@ proto-gen:     ## Сгенерировать Python-стабы gRPC из proto/ 
 		--python_out=apps/coach/src/gen \
 		--grpc_python_out=apps/coach/src/gen \
 		proto/services.proto
+	python3 -m grpc_tools.protoc -I proto \
+		--python_out=apps/feature-store/src/gen \
+		--grpc_python_out=apps/feature-store/src/gen \
+		proto/services.proto
+	python3 -m grpc_tools.protoc -I proto \
+		--python_out=apps/feature-extractor/src/gen \
+		--grpc_python_out=apps/feature-extractor/src/gen \
+		proto/services.proto
 	PATH=$$PATH:$$HOME/go/bin protoc -I proto \
 		--go_out=proto/gen/go --go_opt=module=github.com/unmekeed/manta/proto \
 		--go-grpc_out=proto/gen/go --go-grpc_opt=module=github.com/unmekeed/manta/proto \
@@ -116,6 +124,9 @@ draft-serve:   ## Draft Engine: рекомендации пиков (:50053)
 
 coach-serve:   ## AI Coach: план тренировки из отчётов + RAG (:50054)
 	cd apps/coach && PYTHONPATH=src python3 -m serve_coach
+
+fs-serve:      ## Feature Store: онлайн-фичи поверх Redis (:50055)
+	cd apps/feature-store && PYTHONPATH=src python3 -m serve_features
 
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto

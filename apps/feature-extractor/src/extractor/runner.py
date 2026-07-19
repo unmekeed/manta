@@ -51,6 +51,9 @@ class ExtractorConfig:
         default_factory=lambda: os.getenv("CLICKHOUSE_USER", "dota"))
     clickhouse_password: str = field(
         default_factory=lambda: os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
+    # Онлайн Feature Store (Гл. 3.6): пусто — запись выключена.
+    feature_store_addr: str = field(
+        default_factory=lambda: os.getenv("FEATURE_STORE_ADDR", ""))
 
 
 def build_envelope(match_id: int, payload: dict, trace_id: str | None) -> dict:
@@ -72,6 +75,37 @@ class Extractor:
         self.ch = ClickHouse(cfg.clickhouse_url, cfg.clickhouse_db,
                              cfg.clickhouse_user, cfg.clickhouse_password)
         self.producer = Producer({"bootstrap.servers": cfg.kafka_brokers})
+        self._fs_stub = None
+
+    # -- онлайн Feature Store (Гл. 3.6) ---------------------------------------
+
+    def _push_online(self, match_id: int, trows: list[dict]) -> None:
+        """Последний timeline-срез матча → онлайн-слой (view match_timeline).
+
+        Сбой стора не роняет обработку матча: онлайн-слой — кэш, истина
+        в ClickHouse.
+        """
+        if not self.cfg.feature_store_addr or not trows:
+            return
+        try:
+            import grpc
+
+            from gen import services_pb2, services_pb2_grpc
+            if self._fs_stub is None:
+                chan = grpc.insecure_channel(self.cfg.feature_store_addr)
+                self._fs_stub = services_pb2_grpc.FeatureStoreStub(chan)
+            last = trows[-1]
+            vec = services_pb2.FeatureVector()
+            vec.values["match_id"] = float(match_id)
+            for k, v in last.items():
+                if isinstance(v, (int, float)):
+                    vec.values[k] = float(v)
+            self._fs_stub.WriteFeatures(
+                services_pb2.FeatureBatch(vectors=[vec],
+                                          feature_view="match_timeline"),
+                timeout=3)
+        except Exception as e:  # noqa: BLE001 — best-effort кэш
+            logger.warning("feature-store: запись не удалась (%s)", e)
 
     # -- обработка одного матча ------------------------------------------------
 
@@ -118,6 +152,7 @@ class Extractor:
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)
         self.ch.insert_rows("MatchTimelineFeatures", trows)
+        self._push_online(match_id, trows)
 
         payload = {
             "match_id": match_id,

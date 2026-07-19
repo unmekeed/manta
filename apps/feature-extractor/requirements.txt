@@ -1,3 +1,5 @@
 confluent-kafka>=2.5
 requests>=2.32
 prometheus-client>=0.20
+grpcio>=1.60
+protobuf>=4.25

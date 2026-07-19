@@ -1,0 +1,4 @@
+redis>=5.0
+grpcio>=1.60
+protobuf>=4.25
+prometheus-client>=0.20

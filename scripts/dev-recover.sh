@@ -82,9 +82,18 @@ else
     skip "parser-svc"
 fi
 
+if ! pgrep -f "python3 -u -m serve_features" >/dev/null; then
+    say "запускаю feature-store (gRPC :50055, лог: $LOG_DIR/feature-store.log)"
+    (cd apps/feature-store && PYTHONPATH=src \
+        nohup python3 -u -m serve_features >"$LOG_DIR/feature-store.log" 2>&1 &)
+else
+    skip "feature-store"
+fi
+
 if ! pgrep -f "python3 -u -m extractor" >/dev/null; then
     say "запускаю feature-extractor (лог: $LOG_DIR/extractor.log)"
     (cd apps/feature-extractor && PYTHONPATH=src \
+        FEATURE_STORE_ADDR="${FEATURE_STORE_ADDR:-localhost:50055}" \
         nohup python3 -u -m extractor >"$LOG_DIR/extractor.log" 2>&1 &)
 else
     skip "feature-extractor"
@@ -201,6 +210,7 @@ check ml-service "python3 -u -m app"
 check similarity "python3 -u -m serve"
 check draft "python3 -u -m serve_draft"
 check coach "python3 -u -m serve_coach"
+check feature-store "python3 -u -m serve_features"
 check report-generator "python3 -u -m reportgen"
 check auto-train "python3 -u -m training.auto"
 matches=$(echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL" |

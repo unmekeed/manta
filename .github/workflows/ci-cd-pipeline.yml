@@ -34,8 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [data-collector, feature-extractor, ml-service,
-                  report-generator, similarity, draft, coach]
+        service: [data-collector, feature-extractor, feature-store,
+                  ml-service, report-generator, similarity, draft, coach]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
