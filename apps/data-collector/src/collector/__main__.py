@@ -9,6 +9,7 @@ import logging
 import os
 import time
 
+import requests
 from prometheus_client import Counter, start_http_server
 
 from .runner import Collector, CollectorConfig
@@ -17,6 +18,8 @@ MATCHES_COLLECTED = Counter("matches_collected_total",
                             "Собранные и опубликованные матчи")
 CYCLES_FAILED = Counter("collector_cycles_failed_total",
                         "Циклы сбора, упавшие по внешним причинам")
+RATE_LIMITED = Counter("opendota_rate_limited_total",
+                       "Циклы, оборванные 429 (квота OpenDota исчерпана)")
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
@@ -99,6 +102,21 @@ def main() -> None:
                 n = collector.collect_once()
                 MATCHES_COLLECTED.inc(n)
                 log.info("cycle done, processed=%s", n)
+            except requests.HTTPError as e:
+                if args.once:
+                    raise
+                CYCLES_FAILED.inc()
+                if e.response is not None and e.response.status_code == 429:
+                    RATE_LIMITED.inc()
+                    remaining = e.response.headers.get(
+                        "x-rate-limit-remaining-day", "?")
+                    log.warning(
+                        "429: квота OpenDota исчерпана (remaining-day=%s); "
+                        "сбор встал до сброса в 00:00 UTC — см. "
+                        "docs/runbooks.md и OPENDOTA_API_KEY", remaining)
+                else:
+                    log.exception("цикл сбора упал; повтор через %ss",
+                                  args.interval)
             except Exception:  # noqa: BLE001
                 if args.once:
                     raise

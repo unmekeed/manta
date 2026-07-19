@@ -72,6 +72,41 @@ _notifier = TelegramNotifier()
 # запускает обучение сразу.
 _last_trained_n: int | None = None
 
+# Стагнация витрины (runbook «витрина не растёт»: rate limit OpenDota, упавший
+# коллектор/экстрактор). Алерт шлётся один раз на эпизод, повторный — после
+# возобновления роста.
+_last_growth = (None, 0.0)   # (последний размер, время его изменения)
+_stall_alerted = False
+DATASET_STALLED = Gauge("training_dataset_stalled",
+                        "1 — витрина не растёт дольше DATASET_STALL_ALERT_H")
+
+
+def _check_stall(n_matches: int) -> None:
+    global _last_growth, _stall_alerted
+    now = time.time()
+    last_n, since = _last_growth
+    if n_matches != last_n:
+        _last_growth = (n_matches, now)
+        if _stall_alerted and _notifier.enabled:
+            _notifier.send("✅ <b>Manta</b>: витрина снова растёт "
+                           f"({n_matches} матчей)")
+        _stall_alerted = False
+        DATASET_STALLED.set(0)
+        return
+    stall_h = float(os.getenv("DATASET_STALL_ALERT_H", "12"))
+    if now - since >= stall_h * 3600:
+        DATASET_STALLED.set(1)
+        if not _stall_alerted:
+            _stall_alerted = True
+            logger.warning("витрина не растёт %.1f ч (застыла на %d матчах)",
+                           (now - since) / 3600, n_matches)
+            if _notifier.enabled:
+                _notifier.send(
+                    "⚠️ <b>Manta</b>: витрина не растёт "
+                    f"{(now - since) / 3600:.0f} ч (застыла на {n_matches} "
+                    "матчах).\nЧастые причины — docs/runbooks.md: суточный "
+                    "rate limit OpenDota, упавший коллектор/экстрактор.")
+
 
 def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     """Одна итерация; возвращает статус для лога/теста."""
@@ -82,6 +117,7 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
         os.getenv("CLICKHOUSE_USER", "dota"),
         os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
     DATASET_MATCHES.set(ds.n_matches)
+    _check_stall(ds.n_matches)
     if ds.n_matches < min_total:
         logger.info("матчей %d < %d — рано обучать", ds.n_matches, min_total)
         return "not-enough-data"
@@ -139,6 +175,14 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     # (evaluate_gate внутри push_with_gate) — устойчиво к «удачному» prod.
     _, promoted, reason = push_with_gate(artifact, out_path, logger, ds=ds)
     RETRAINS.labels("promoted" if promoted else "rejected").inc()
+    # D2: реестр растёт на ~4 версии/день — держим последние N + все
+    # продвигавшиеся. MLflow-бэкенд управляет хранением сам (cleanup нет).
+    keep_last = int(os.getenv("REGISTRY_KEEP_LAST", "10"))
+    if keep_last and hasattr(reg, "cleanup"):
+        removed = reg.cleanup(MODEL_NAME, keep_last=keep_last)
+        if removed:
+            logger.info("реестр: удалено %d старых версий (%s ... %s)",
+                        len(removed), removed[0], removed[-1])
     if trigger == "drift":
         reason = f"⚠️ дрейф фич (PSI {drift_max:.2f}) → {reason}"
     if _notifier.enabled:

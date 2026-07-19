@@ -231,3 +231,73 @@ def test_pro_match_passes_ignores_rank_and_lobby():
     # public-фильтр отверг бы (lobby), pro — пропускает
     assert match_passes(m, 80, 900, 60)[0] is False
     assert match_passes(m, 80, 900, 60, pro=True) == (True, "ok")
+
+
+def test_fetch_new_429_aborts_cycle(monkeypatch):
+    """Исчерпанная квота (429) обрывает цикл: остальные кандидаты дали бы
+    те же 429, тратя остаток лимита и время (runbook «витрина не растёт»)."""
+    import pytest
+    import requests
+
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0)
+    detail_calls = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            return FakeResp([{"match_id": m} for m in (3, 2, 1)])
+        mid = int(path.split("/")[1])
+        detail_calls.append(mid)
+        if mid == 2:
+            resp = requests.Response()
+            resp.status_code = 429
+            raise requests.HTTPError(response=resp)
+        return FakeResp(_parsed_match(mid=mid))
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    with pytest.raises(requests.HTTPError):
+        list(src.fetch_new())
+    assert detail_calls == [3, 2]    # матч 1 не запрашивался
+
+
+def test_fetch_new_transient_error_skips_match(monkeypatch):
+    """Не-429 сбой одного матча (таймаут, 5xx) не роняет цикл — пропуск."""
+    import requests
+
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0)
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            if params.get("less_than_match_id"):
+                return FakeResp([])          # старее ничего нет
+            return FakeResp([{"match_id": m} for m in (3, 2, 1)])
+        mid = int(path.split("/")[1])
+        if mid == 2:
+            raise requests.ConnectionError("boom")
+        return FakeResp(_parsed_match(mid=mid))
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    got = list(src.fetch_new())
+    assert [t.match_id for t in got] == [3, 1]
+
+
+def test_with_api_key_mixed_into_params():
+    from collector.sources import with_api_key
+    assert with_api_key(None, None) == {}
+    assert with_api_key(None, "K") == {"api_key": "K"}
+    assert with_api_key({"a": "1"}, "K") == {"a": "1", "api_key": "K"}
+    base = {"a": "1"}
+    assert with_api_key(base, "K") is not base   # исходный dict не мутируем

@@ -55,9 +55,9 @@
 | # | Работа | Заметки |
 |---|---|---|
 | D1 | Продовый MLflow | Бэкенд готов (спринт 30, REGISTRY_BACKEND=mlflow); переключение + postgres-URI вместо sqlite |
-| D2 | Авточистка старых версий моделей в реестре | ~4 версии/день × навсегда = мусор; хранить последние N + все продвигавшиеся |
-| D3 | CI: тесты data-collector и report-generator | Сейчас в workflow только ml-service |
-| D4 | Runbooks инцидентов | «Витрина не растёт», «гейт всё отклоняет», «PSI-алярм» — по мотивам реальных случаев из этого чата |
+| D2 | ~~Авточистка версий реестра~~ | ✅ спринт 39: cleanup() — последние N (REGISTRY_KEEP_LAST=10) + все продвигавшиеся (история промоушенов) |
+| D3 | ~~CI: тесты всех Python-сервисов~~ | ✅ спринт 39: + data-collector, similarity, draft, coach (report-generator уже был) |
+| D4 | ~~Runbooks инцидентов~~ | ✅ спринт 39: docs/runbooks.md + алерт «витрина не растёт» (DATASET_STALL_ALERT_H) + метрика/лог 429 OpenDota |
 | D5 | Нагрузочные тесты NFR-PERF/SCAL | Гейт Фазы 4 |
 | D6 | Security review (SAST/SCA, секреты, GDPR) | Гейт Фазы 4; из практики: секреты уже вынесены в env, `.env` в gitignore |
 

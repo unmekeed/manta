@@ -29,6 +29,7 @@ class Backend(Protocol):
     def put_bytes(self, key: str, data: bytes) -> None: ...
     def get_bytes(self, key: str) -> bytes: ...          # KeyError если нет
     def list_keys(self, prefix: str) -> list[str]: ...
+    def delete_bytes(self, key: str) -> None: ...        # идемпотентно
 
 
 class MinioBackend:
@@ -64,6 +65,9 @@ class MinioBackend:
                 self._client.list_objects(self._bucket, prefix=prefix,
                                           recursive=True)]
 
+    def delete_bytes(self, key: str) -> None:
+        self._client.remove_object(self._bucket, key)
+
 
 class ModelRegistry:
     def __init__(self, backend: Backend):
@@ -89,6 +93,16 @@ class ModelRegistry:
         self._b.get_bytes(f"{name}/versions/{version}/metadata.json")
         self._b.put_bytes(f"{name}/stages/{stage}.json",
                           json.dumps({"version": version}).encode())
+        # История промоушенов: продвигавшиеся версии защищены от cleanup()
+        # навсегда — по ним восстанавливается любой прод прошлого.
+        hist_key = f"{name}/stages/{stage}_history.json"
+        try:
+            hist = json.loads(self._b.get_bytes(hist_key))
+        except KeyError:
+            hist = []
+        if version not in hist:
+            hist.append(version)
+            self._b.put_bytes(hist_key, json.dumps(hist).encode())
 
     # -- чтение ---------------------------------------------------------------
 
@@ -118,6 +132,36 @@ class ModelRegistry:
         seen = sorted({k[len(prefix):].split("/")[0]
                        for k in self._b.list_keys(prefix)})
         return seen
+
+    # -- обслуживание ---------------------------------------------------------
+
+    def cleanup(self, name: str, keep_last: int = 10) -> list[str]:
+        """Удалить старые версии; вернуть список удалённых (D2 роадмапа).
+
+        Защищены: keep_last последних по run_id (хронология, а не semver:
+        «0.10.0-...» лексически младше «0.9.0-...») и все версии, когда-либо
+        продвигавшиеся в любой стейдж (история из promote()).
+        """
+        protected: set[str] = set()
+        for key in self._b.list_keys(f"{name}/stages/"):
+            payload = json.loads(self._b.get_bytes(key))
+            if key.endswith("_history.json"):
+                protected.update(payload)
+            else:
+                protected.add(payload["version"])
+
+        by_age = sorted(self.list_versions(name),
+                        key=lambda v: v.rsplit("-", 1)[-1])
+        protected.update(by_age[-keep_last:] if keep_last else [])
+
+        deleted = []
+        for version in by_age:
+            if version in protected:
+                continue
+            for key in self._b.list_keys(f"{name}/versions/{version}/"):
+                self._b.delete_bytes(key)
+            deleted.append(version)
+        return deleted
 
 
 def registry_from_env() -> ModelRegistry:

@@ -227,6 +227,14 @@ class OpenDotaTimelineSource:
                     continue
                 try:
                     m = self._get(f"matches/{mid}").json()
+                except requests.HTTPError as e:
+                    if (e.response is not None
+                            and e.response.status_code == 429):
+                        # Квота исчерпана — остальные кандидаты дадут те же
+                        # 429; обрываем цикл, не сжигая остаток лимита.
+                        raise
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    continue
                 except requests.RequestException as e:
                     logger.warning("матч %d: %s — пропуск", mid, e)
                     continue
