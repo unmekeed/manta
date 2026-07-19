@@ -90,10 +90,16 @@ else
     skip "feature-extractor"
 fi
 
+# Бюджет анонимного тарифа OpenDota (без OPENDOTA_API_KEY): ~50k
+# вызовов/месяц ≈ 1660/сутки на IP, burst-потолок 60/мин. Дефолты ниже
+# суммарно дают ~1100-1200 вызовов/сутки — сбор идёт круглосуточно,
+# а не сгорает за 3-4 часа (runbook «витрина не растёт»). С ключом
+# лимиты можно вернуть агрессивные через env.
 if ! pgrep -f "collector --source opendota-public" >/dev/null; then
     say "запускаю data-collector (лог: $LOG_DIR/collector.log)"
-    (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-3}" PYTHONPATH=src \
-        nohup python3 -u -m collector --source opendota-public --interval 60 \
+    (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-1}" PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota-public \
+            --interval "${PUBLIC_REPLAY_INTERVAL:-3600}" \
             >"$LOG_DIR/collector.log" 2>&1 &)
 else
     skip "data-collector"
@@ -101,8 +107,9 @@ fi
 
 if ! pgrep -f "collector --source opendota-timeline --interval" >/dev/null; then
     say "запускаю timeline-collector (лог: $LOG_DIR/timeline.log)"
-    (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-30}" PYTHONPATH=src \
-        nohup python3 -u -m collector --source opendota-timeline --interval 300 \
+    (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-10}" PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota-timeline \
+            --interval "${TIMELINE_INTERVAL:-1800}" \
             >"$LOG_DIR/timeline.log" 2>&1 &)
 else
     skip "timeline-collector"
@@ -110,8 +117,9 @@ fi
 
 if ! pgrep -f "collector --source opendota-timeline-pro" >/dev/null; then
     say "запускаю pro-timeline-collector (лог: $LOG_DIR/timeline-pro.log)"
-    (cd apps/data-collector && TIMELINE_LIMIT="${PRO_TIMELINE_LIMIT:-15}" PYTHONPATH=src \
-        nohup python3 -u -m collector --source opendota-timeline-pro --interval 600 \
+    (cd apps/data-collector && TIMELINE_LIMIT="${PRO_TIMELINE_LIMIT:-5}" PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota-timeline-pro \
+            --interval "${PRO_TIMELINE_INTERVAL:-3600}" \
             >"$LOG_DIR/timeline-pro.log" 2>&1 &)
 else
     skip "pro-timeline-collector"
@@ -119,8 +127,9 @@ fi
 
 if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
     say "запускаю pro-replay-collector (лог: $LOG_DIR/pro-collector.log)"
-    (cd apps/data-collector && OPENDOTA_LIMIT=2 METRICS_PORT=9109 PYTHONPATH=src \
-        nohup python3 -u -m collector --source opendota --interval 300 \
+    (cd apps/data-collector && OPENDOTA_LIMIT=1 METRICS_PORT=9109 PYTHONPATH=src \
+        nohup python3 -u -m collector --source opendota \
+            --interval "${PRO_REPLAY_INTERVAL:-3600}" \
             >"$LOG_DIR/pro-collector.log" 2>&1 &)
 else
     skip "pro-replay-collector"

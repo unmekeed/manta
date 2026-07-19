@@ -165,7 +165,8 @@ class OpenDotaTimelineSource:
                  limit_per_cycle: int = 30, min_rank: int = 80,
                  min_duration_s: int = 900, min_patch: int | None = None,
                  timeout: float = 30.0, api_delay_s: float = 1.1,
-                 mode: str = "public", api_key: str | None = None) -> None:
+                 mode: str = "public", api_key: str | None = None,
+                 detail_budget: int | None = None) -> None:
         assert mode in ("public", "pro")
         self._mode = mode
         self.name = ("opendota_timeline" if mode == "public"
@@ -181,6 +182,13 @@ class OpenDotaTimelineSource:
         self._timeout = timeout
         self._delay = api_delay_s
         self._api_key = api_key
+        # Бюджет анонимного тарифа: /matches/{id} — самый дорогой вызов
+        # цикла, ограничиваем их число сверху (yielded + отфильтрованные).
+        self._detail_budget = detail_budget or 2 * limit_per_cycle
+        # Отвергнутые фильтром кандидаты (low-rank, старый патч, без
+        # таймлайна): вердикт не меняется, а без кэша каждый цикл заново
+        # платил бы detail-вызов за те же match_id с вершины /parsedMatches.
+        self._rejected: set[int] = set()
 
     def _get(self, path: str, **params) -> requests.Response:
         time.sleep(self._delay)          # бюджет free tier: 60 вызовов/мин
@@ -209,9 +217,12 @@ class OpenDotaTimelineSource:
         if self._min_patch is None:
             self._min_patch = self._latest_patch()
         skip = skip or (lambda _mid: False)
+        if len(self._rejected) > 50_000:   # id монотонны, старые не вернутся
+            self._rejected.clear()
         cursor: int | None = None
         yielded = 0
         pages = 0
+        details = 0
         while yielded < self._limit and pages < 10:
             params = {}
             if cursor:
@@ -223,8 +234,13 @@ class OpenDotaTimelineSource:
             for entry in batch:
                 mid = int(entry["match_id"])
                 cursor = mid
-                if skip(mid):
+                if skip(mid) or mid in self._rejected:
                     continue
+                if details >= self._detail_budget:
+                    logger.info("бюджет detail-вызовов цикла исчерпан "
+                                "(%d), собрано %d", details, yielded)
+                    return
+                details += 1
                 try:
                     m = self._get(f"matches/{mid}").json()
                 except requests.HTTPError as e:
@@ -243,9 +259,11 @@ class OpenDotaTimelineSource:
                                        pro=(self._mode == "pro"))
                 if not ok:
                     logger.debug("матч %d отфильтрован: %s", mid, why)
+                    self._rejected.add(mid)
                     continue
                 rows = timeline_rows(m)
                 if not rows:
+                    self._rejected.add(mid)
                     continue
                 yielded += 1
                 yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,

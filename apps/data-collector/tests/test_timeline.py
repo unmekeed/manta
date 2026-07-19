@@ -301,3 +301,63 @@ def test_with_api_key_mixed_into_params():
     assert with_api_key({"a": "1"}, "K") == {"a": "1", "api_key": "K"}
     base = {"a": "1"}
     assert with_api_key(base, "K") is not base   # исходный dict не мутируем
+
+
+def test_rejected_candidates_cached_across_cycles(monkeypatch):
+    """Отфильтрованный кандидат платит detail-вызов один раз: второй цикл
+    берёт вердикт из кэша (бюджет анонимного тарифа)."""
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0)
+    detail_calls = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            if params.get("less_than_match_id"):
+                return FakeResp([])
+            return FakeResp([{"match_id": m} for m in (3, 2, 1)])
+        mid = int(path.split("/")[1])
+        detail_calls.append(mid)
+        m = _parsed_match(mid=mid)
+        if mid == 2:                      # low-rank — постоянный отказ
+            for p in m["players"]:
+                p["rank_tier"] = 10
+        return FakeResp(m)
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    assert [t.match_id for t in src.fetch_new()] == [3, 1]
+    assert detail_calls == [3, 2, 1]
+    detail_calls.clear()
+    # Второй цикл: 3 и 1 отсечёт дедуп-предикат, 2 — кэш отказов.
+    assert list(src.fetch_new(skip=lambda mid: mid in {3, 1})) == []
+    assert detail_calls == []
+
+
+def test_detail_budget_caps_cycle(monkeypatch):
+    """Бюджет detail-вызовов обрывает цикл, даже если лимит матчей не добран."""
+    src = OpenDotaTimelineSource(limit_per_cycle=10, min_patch=60,
+                                 api_delay_s=0, detail_budget=2)
+    detail_calls = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            return FakeResp([{"match_id": m} for m in (5, 4, 3, 2, 1)])
+        mid = int(path.split("/")[1])
+        detail_calls.append(mid)
+        return FakeResp(_parsed_match(mid=mid))
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    got = list(src.fetch_new())
+    assert [t.match_id for t in got] == [5, 4]
+    assert detail_calls == [5, 4]        # 3, 2, 1 не запрашивались

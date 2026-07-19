@@ -43,12 +43,14 @@ def build_source(name: str):
         )
     if name in ("opendota-timeline", "opendota-timeline-pro"):
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
+        detail_budget = os.getenv("TIMELINE_DETAIL_BUDGET")
         return OpenDotaTimelineSource(
             limit_per_cycle=int(os.getenv("TIMELINE_LIMIT", "30")),
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
             mode="pro" if name.endswith("-pro") else "public",
             api_key=api_key,
+            detail_budget=int(detail_budget) if detail_budget else None,
         )
     raise ValueError(f"unknown source {name!r}")
 
