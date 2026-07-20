@@ -49,6 +49,13 @@ curl -s localhost:9108/metrics | grep opendota_rate_limited_total
    поддерживает; сайт opendota.com/api-keys периодически лежит).
 2. **Умер процесс конвейера** (перезапуск среды убил dockerd и фоны;
    реальные случаи 2026-07-16/18/19). → `make recover` — идемпотентен.
+   Подслучай (2026-07-20): рестарт Docker Desktop пересоздал
+   Postgres/Kafka, а процессы коллекторов остались живы со СТАРЫМИ
+   соединениями — `pgrep` их видит, recover пропускает, но каждый цикл
+   падает `psycopg.OperationalError: server closed the connection`.
+   Начиная со спринта 47 коллекторы переподключаются к PG сами
+   (лог «postgres: соединение умерло — переподключаюсь»); на старом
+   коде — `pkill -f "collector --source"` и `make recover`.
 3. **ClickHouse после нечистого рестарта** долго разгребает temp-мерджи
    или упёрся в file-descriptor limit (реальный случай 2026-07-19:
    `Too many open files` в logs → зацикленный мердж `system.metric_log`).

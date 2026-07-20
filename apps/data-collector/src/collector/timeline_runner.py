@@ -57,6 +57,23 @@ class TimelineCollector:
     def close(self) -> None:
         self._db.close()
 
+    def _ensure_db(self) -> None:
+        """Пересоздать мёртвое PG-соединение (рестарт контейнера/Docker
+        Desktop): без этого раннер вечно падал бы на первом же запросе
+        цикла до ручного перезапуска процесса (инцидент 2026-07-20)."""
+        if not self._db.closed:
+            try:
+                with self._db.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return
+            except psycopg.OperationalError:
+                try:
+                    self._db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        logger.warning("postgres: соединение умерло — переподключаюсь")
+        self._db = psycopg.connect(self._cfg.postgres_dsn, autocommit=True)
+
     # -- дедуп (общая таблица с реплей-путём) ---------------------------------
 
     def _is_collected(self, match_id: int) -> bool:
@@ -105,6 +122,7 @@ class TimelineCollector:
     # -- цикл -----------------------------------------------------------------
 
     def collect_once(self) -> int:
+        self._ensure_db()
         processed = 0
         for tm in self._source.fetch_new(skip=self._is_collected):
             self._insert_rows(tm.rows, tm.tier)

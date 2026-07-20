@@ -122,6 +122,7 @@ def test_runner_inserts_and_marks(monkeypatch):
             return None  # ничего не собрано
 
     class FakeDB:
+        closed = False
         def __init__(self, store): self._s = store
         def cursor(self): return FakeCur(self._s)
         def close(self): pass
@@ -361,3 +362,52 @@ def test_detail_budget_caps_cycle(monkeypatch):
     got = list(src.fetch_new())
     assert [t.match_id for t in got] == [5, 4]
     assert detail_calls == [5, 4]        # 3, 2, 1 не запрашивались
+
+
+def test_ensure_db_reconnects_after_server_restart(monkeypatch):
+    """Рестарт Postgres (docker restart) убивает соединение: раннер обязан
+    пересоздать его сам, а не падать каждый цикл до ручного pkill
+    (инцидент 2026-07-20)."""
+    import psycopg as psycopg_mod
+
+    from collector import timeline_runner
+    from collector.timeline_runner import TimelineCollector, TimelineConfig
+
+    class DeadCur:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def execute(self, *a, **k):
+            raise psycopg_mod.OperationalError("server closed the connection")
+
+    class LiveCur:
+        def __init__(self, log): self._log = log
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def execute(self, q, params=None): self._log.append(q.split()[0])
+        def fetchone(self): return None
+
+    class FakeConn:
+        def __init__(self, dead, log):
+            self.dead, self.closed, self._log = dead, False, log
+        def cursor(self):
+            return DeadCur() if self.dead else LiveCur(self._log)
+        def close(self): self.closed = True
+
+    queries: list[str] = []
+    conns = [FakeConn(dead=True, log=queries),   # старое, умершее
+             FakeConn(dead=False, log=queries)]  # новое после reconnect
+    monkeypatch.setattr(timeline_runner.psycopg, "connect",
+                        lambda dsn, autocommit: conns.pop(0))
+
+    class EmptySource:
+        name = "opendota_timeline"
+        def fetch_new(self, skip=None):
+            return iter(())
+
+    coll = TimelineCollector(TimelineConfig(), EmptySource())
+    assert coll.collect_once() == 0          # цикл выжил
+    assert conns == []                       # переподключение состоялось
+    assert coll._db.dead is False
+    # Живое соединение повторно не пересоздаётся.
+    assert coll.collect_once() == 0
+    assert queries.count("SELECT") >= 1

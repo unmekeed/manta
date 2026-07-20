@@ -70,6 +70,24 @@ class Collector:
 
     # -- persistence ---------------------------------------------------------
 
+    def _ensure_db(self) -> None:
+        """Пересоздать мёртвое PG-соединение (рестарт контейнера/Docker
+        Desktop): без этого коллектор вечно падал бы на первом же запросе
+        цикла до ручного перезапуска процесса (инцидент 2026-07-20)."""
+        if not self._db.closed:
+            try:
+                with self._db.cursor() as cur:
+                    cur.execute("SELECT 1")
+                self._db.rollback()   # не держим пустую транзакцию ping'а
+                return
+            except psycopg.OperationalError:
+                try:
+                    self._db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        logger.warning("postgres: соединение умерло — переподключаюсь")
+        self._db = psycopg.connect(self._cfg.postgres_dsn, autocommit=False)
+
     def _get_cursor(self) -> str | None:
         with self._db.cursor() as cur:
             cur.execute(
@@ -103,6 +121,7 @@ class Collector:
 
     def collect_once(self) -> int:
         """Один проход сбора; возвращает число обработанных матчей."""
+        self._ensure_db()
         cursor = self._get_cursor()
         processed = 0
         for ref in self._source.fetch_new(cursor):
