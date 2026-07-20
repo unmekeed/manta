@@ -128,6 +128,9 @@ coach-serve:   ## AI Coach: план тренировки из отчётов + 
 fs-serve:      ## Feature Store: онлайн-фичи поверх Redis (:50055)
 	cd apps/feature-store && PYTHONPATH=src python3 -m serve_features
 
+ml-train-risk: ## Обучить Death-Risk модель на реплейных позициях (C5)
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.risk $(RISK_ARGS)
+
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
 

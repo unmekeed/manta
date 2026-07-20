@@ -26,6 +26,7 @@ export interface GameError {
   game_time: number;
   delta_wp: number;
   safety_index: number;
+  si_model?: boolean; // true — SI из Death-Risk модели (P смерти в 30с)
   explanation: string;
   pos?: MapPos;
   top_contributions?: FeatureContribution[];

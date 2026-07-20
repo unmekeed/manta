@@ -131,27 +131,32 @@ def _normalize_hero(name: str) -> str:
     return name.replace("_", "").lower()
 
 
-def index_positions(positions: list[dict]) -> dict[str, list[tuple[int, float, float]]]:
-    """PositionSnapshots → нормализованный герой → [(t, x, y)] (сорт. по t)."""
-    by_hero: dict[str, list[tuple[int, float, float]]] = {}
+def index_positions(positions: list[dict]
+                    ) -> dict[str, list[tuple[int, float, float, int]]]:
+    """PositionSnapshots → нормализованный герой → [(t, x, y, alive)].
+
+    Строки без is_alive (старый вызывающий код, тесты) считаются живыми."""
+    by_hero: dict[str, list[tuple[int, float, float, int]]] = {}
     for p in positions:
         by_hero.setdefault(_normalize_hero(str(p.get("hero", ""))), []).append(
-            (int(p["game_time"]), float(p["x"]), float(p["y"])))
+            (int(p["game_time"]), float(p["x"]), float(p["y"]),
+             int(p.get("is_alive", 1))))
     for pts in by_hero.values():
         pts.sort()
     return by_hero
 
 
-def _pos_at(pts: list[tuple[int, float, float]], t: int,
-            near: tuple[float, float] | None = None) -> tuple[float, float] | None:
+def _pos_at(pts: list[tuple[int, float, float, int]], t: int,
+            near: tuple[float, float] | None = None
+            ) -> tuple[float, float, int] | None:
     """Позиция героя на момент t: последний снапшот <= t (не старше
     SI_STALE_S). Несколько сущностей героя в один момент (иллюзии) —
     берётся ближайшая к точке near (наихудший случай для жертвы)."""
-    cands = [(tt, x, y) for tt, x, y in pts if tt <= t and t - tt <= SI_STALE_S]
+    cands = [q for q in pts if q[0] <= t and t - q[0] <= SI_STALE_S]
     if not cands:
         return None
     last_t = cands[-1][0]
-    same = [(x, y) for tt, x, y in cands if tt == last_t]
+    same = [(x, y, a) for tt, x, y, a in cands if tt == last_t]
     if near is None or len(same) == 1:
         return same[-1]
     nx, ny = near
@@ -172,7 +177,7 @@ def safety_index(victim_hero: str, victim_team: int, t: int,
     vpos = _pos_at(vpts, t) if vpts else None
     if vpos is None:
         return 0.0
-    vx, vy = vpos
+    vx, vy = vpos[0], vpos[1]
 
     pressure = 0.0
     for hero, pts in positions_by_hero.items():
@@ -193,11 +198,66 @@ def safety_index(victim_hero: str, victim_team: int, t: int,
     return round(min(1.0, 0.65 * pressure + 0.35 * depth), 3)
 
 
+RISK_FAR = 20000.0   # «не видно»: дальше любой реальной дистанции на карте
+
+
+def risk_features(victim_hero: str, victim_team: int, t: int,
+                  positions_by_hero: dict[str, list[tuple[int, float, float, int]]],
+                  hero_team: dict[str, int]) -> dict[str, float] | None:
+    """Фичи Death-Risk модели (Гл. 6.3) — зеркало ml-service
+    training.risk.RISK_FEATURES: порядок и формулы обязаны совпадать с
+    трейнером, иначе модель получает не то распределение, что видела при
+    обучении. None — позиция жертвы неизвестна (модель неприменима)."""
+    vpts = positions_by_hero.get(_normalize_hero(victim_hero))
+    vpos = _pos_at(vpts, t) if vpts else None
+    if vpos is None:
+        return None
+    vx, vy = vpos[0], vpos[1]
+
+    raw = (vx + vy) / (2.0 * MAP_HALF_DIAG)
+    depth = (raw + 1.0) / 2.0 if victim_team == 2 else (1.0 - raw) / 2.0
+    depth = min(1.0, max(0.0, depth))
+
+    d_enemy = d_ally = RISK_FAR
+    e1500 = e3000 = a1500 = alive_e = alive_a = 0
+    victim_norm = _normalize_hero(victim_hero)
+    for hero, pts in positions_by_hero.items():
+        team = hero_team.get(hero, 0)
+        if team == 0 or hero == victim_norm:
+            continue
+        p = _pos_at(pts, t, near=(vx, vy))
+        if p is None or not p[2]:
+            continue
+        dist = ((p[0] - vx) ** 2 + (p[1] - vy) ** 2) ** 0.5
+        if team == victim_team:
+            alive_a += 1
+            d_ally = min(d_ally, dist)
+            a1500 += dist <= 1500
+        else:
+            alive_e += 1
+            d_enemy = min(d_enemy, dist)
+            e1500 += dist <= 1500
+            e3000 += dist <= 3000
+
+    return {
+        "game_time": float(t),
+        "depth": depth,
+        "dist_nearest_enemy": d_enemy,
+        "enemies_in_1500": float(e1500),
+        "enemies_in_3000": float(e3000),
+        "allies_in_1500": float(a1500),
+        "dist_nearest_ally": d_ally,
+        "alive_enemies": float(alive_e),
+        "alive_allies": float(alive_a),
+    }
+
+
 def wp_attribution(points: list[dict], kills: list[dict],
                    hero_player: dict[str, int],
                    player_team: dict[int, int],
-                   positions_by_hero: dict[str, list[tuple[int, float, float]]]
+                   positions_by_hero: dict[str, list[tuple[int, float, float, int]]]
                    | None = None,
+                   risk_fn=None,
                    ) -> tuple[dict[int, list[dict]], dict[int, float]]:
     """Оконная атрибуция ΔWP (Гл. 6.1.1) — общая для ошибок и импакта.
 
@@ -237,6 +297,7 @@ def wp_attribution(points: list[dict], kills: list[dict],
                 hero = str(k["target"]).replace("npc_dota_hero_", "")
                 impact[pid] = impact.get(pid, 0.0) + share
                 si = 0.0
+                si_model = False
                 death_pos = None
                 if positions_by_hero:
                     hero_team = {h: player_team.get(p, 0)
@@ -245,6 +306,18 @@ def wp_attribution(points: list[dict], kills: list[dict],
                     si = safety_index(str(k["target"]), losing_team,
                                       int(k["game_time"]), positions_by_hero,
                                       hero_team)
+                    # Death-Risk модель (C5): калиброванная P(смерть в 30 c)
+                    # в точке смерти вместо эвристики; сбой/отсутствие
+                    # модели — остаёмся на эвристическом SI.
+                    if risk_fn is not None:
+                        feats = risk_features(str(k["target"]), losing_team,
+                                              int(k["game_time"]),
+                                              positions_by_hero, hero_team)
+                        if feats is not None:
+                            p_risk = risk_fn(feats)
+                            if p_risk is not None:
+                                si = round(float(p_risk), 3)
+                                si_model = True
                     # Точка смерти для карты позиций (C6): тот же снапшот
                     # жертвы, по которому считался Safety Index.
                     vpts = positions_by_hero.get(
@@ -252,15 +325,22 @@ def wp_attribution(points: list[dict], kills: list[dict],
                     vpos = (_pos_at(vpts, int(k["game_time"]))
                             if vpts else None)
                     if vpos is not None:
-                        death_pos = _norm_map(*vpos)
+                        death_pos = _norm_map(vpos[0], vpos[1])
+                # Пороги «рискованной позиции» различаются: эвристика —
+                # условные 0..1 (историческая шкала 0.6), модель —
+                # калиброванная P(смерть в 30 c), где 0.3 ≈ ×3 к базовой
+                # частоте смертей (~9%) — уже явно опасная позиция.
                 note = ""
-                if si >= 0.6:
-                    note = f" Позиция была рискованной (SI {si:.2f})."
+                threshold = 0.3 if si_model else 0.6
+                if si >= threshold:
+                    label = "риск-модель" if si_model else "SI"
+                    note = f" Позиция была рискованной ({label} {si:.2f})."
                 err = {
                     "type": "critical_death",
                     "game_time": int(k["game_time"]),
                     "delta_wp": round(share, 4),
                     "safety_index": si,
+                    "si_model": si_model,
                     "explanation": (
                         f"Смерть {hero} на {_fmt_min(int(k['game_time']))} — "
                         f"вероятность победы команды упала на "
@@ -339,7 +419,8 @@ def build_narrative(winner: str, players: list[dict],
 def build_analysis(match_id: int, winner: str, players: list[dict],
                    timeline: dict, model_version: str,
                    kills: list[dict] | None = None,
-                   positions: list[dict] | None = None) -> dict:
+                   positions: list[dict] | None = None,
+                   risk_fn=None) -> dict:
     """Схема MatchAnalysis (+ hero/player_name — аддитивные поля)."""
     points = timeline["points"]
     final_wp = points[-1]["radiant_wp"] if points else 0.5
@@ -351,7 +432,8 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
                    for p in players}
     errors, impact = wp_attribution(
         points, kills or [], hero_player, player_team,
-        positions_by_hero=index_positions(positions) if positions else None)
+        positions_by_hero=index_positions(positions) if positions else None,
+        risk_fn=risk_fn)
 
     return {
         "match_id": match_id,

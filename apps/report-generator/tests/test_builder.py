@@ -289,3 +289,75 @@ def test_errors_without_positions_have_no_pos():
         pts, [{"game_time": 200, "target": "npc_dota_hero_axe"}],
         {"npc_dota_hero_axe": 0}, {0: 2})
     assert "pos" not in errors[0][0]
+
+
+def test_risk_features_mirror_trainer():
+    """Фичи Death-Risk: подсчёт соседей, глубина, мёртвые не в счёт."""
+    from reportgen.builder import RISK_FAR, index_positions, risk_features
+
+    positions = [
+        {"game_time": 200, "hero": "CDOTA_Unit_Hero_Axe",
+         "x": 4000, "y": 4000, "is_alive": 1},          # жертва (Radiant)
+        {"game_time": 200, "hero": "CDOTA_Unit_Hero_Kez",
+         "x": 4300, "y": 4400, "is_alive": 1},          # враг в 500
+        {"game_time": 200, "hero": "CDOTA_Unit_Hero_Slardar",
+         "x": 6000, "y": 6000, "is_alive": 0},          # мёртвый враг — мимо
+        {"game_time": 200, "hero": "CDOTA_Unit_Hero_Lion",
+         "x": 3000, "y": 3500, "is_alive": 1},          # союзник в ~1118
+    ]
+    hero_team = {"axe": 2, "kez": 3, "slardar": 3, "lion": 2}
+    f = risk_features("npc_dota_hero_axe", 2, 200,
+                      index_positions(positions), hero_team)
+    assert f["enemies_in_1500"] == 1 and f["enemies_in_3000"] == 1
+    assert f["alive_enemies"] == 1                      # мёртвый не считается
+    assert f["allies_in_1500"] == 1 and f["alive_allies"] == 1
+    assert 490 < f["dist_nearest_enemy"] < 510
+    assert f["depth"] == (( (4000+4000)/(2*8000.0) + 1)/2)
+    # позиций жертвы нет → None
+    assert risk_features("npc_dota_hero_axe", 2, 999,
+                         index_positions(positions), hero_team) is None
+    # врагов не видно → FAR
+    solo = [{"game_time": 200, "hero": "CDOTA_Unit_Hero_Axe",
+             "x": 0, "y": 0, "is_alive": 1}]
+    f2 = risk_features("npc_dota_hero_axe", 2, 200,
+                       index_positions(solo), hero_team)
+    assert f2["dist_nearest_enemy"] == RISK_FAR
+
+
+def test_error_uses_model_risk_when_available():
+    """risk_fn задан → SI в ошибке заменяется калиброванной вероятностью
+    модели, в note — «риск-модель»; risk_fn вернул None → эвристика."""
+    from reportgen.builder import index_positions, wp_attribution
+
+    pts_wp = [{"game_time": t, "radiant_wp": w, "net_worth_diff": 0}
+              for t, w in [(60, 0.5), (120, 0.5), (180, 0.5), (240, 0.3),
+                           (300, 0.3)]]
+    positions = []
+    for t in range(180, 241, 10):
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Axe",
+                          "x": 6000, "y": 6000, "is_alive": 1})
+        positions.append({"game_time": t, "hero": "CDOTA_Unit_Hero_Kez",
+                          "x": 6100, "y": 6050, "is_alive": 1})
+    kills = [{"game_time": 200, "target": "npc_dota_hero_axe",
+              "attacker": "npc_dota_hero_kez"}]
+    heroes = {"npc_dota_hero_axe": 0, "npc_dota_hero_kez": 5}
+    teams = {0: 2, 5: 3}
+
+    seen = []
+    def model(feats):
+        seen.append(feats)
+        return 0.87
+    errors, _ = wp_attribution(pts_wp, kills, heroes, teams,
+                               positions_by_hero=index_positions(positions),
+                               risk_fn=model)
+    e = errors[0][0]
+    assert e["safety_index"] == 0.87
+    assert "риск-модель 0.87" in e["explanation"]
+    assert seen and seen[0]["alive_enemies"] == 1.0
+
+    errors2, _ = wp_attribution(pts_wp, kills, heroes, teams,
+                                positions_by_hero=index_positions(positions),
+                                risk_fn=lambda f: None)
+    si2 = errors2[0][0]["safety_index"]            # фолбэк на эвристику
+    assert si2 != 0.87 and 0 < si2 < 1
+    assert "риск-модель" not in errors2[0][0]["explanation"]

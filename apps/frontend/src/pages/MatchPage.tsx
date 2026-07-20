@@ -170,8 +170,15 @@ export default function MatchPage() {
               <span className="dwp">{(e.delta_wp * 100).toFixed(0)}%</span>
               <span className="who">{e.player}</span>
               {e.explanation}
-              {e.safety_index >= 0.6 && (
-                <span className="si-badge">риск {e.safety_index.toFixed(2)}</span>
+              {e.safety_index >= (e.si_model ? 0.3 : 0.6) && (
+                <span
+                  className="si-badge"
+                  title={e.si_model
+                    ? "Death-Risk модель: калиброванная вероятность смерти в ближайшие 30 секунд в этой позиции"
+                    : "Эвристический Safety Index (давление врагов + глубина захода)"}
+                >
+                  риск {e.safety_index.toFixed(2)}
+                </span>
               )}
               {e.top_contributions && e.top_contributions.length > 0 && (
                 <ErrorDrivers drivers={e.top_contributions} />

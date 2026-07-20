@@ -52,24 +52,33 @@ def _confidence(wp: float) -> float:
 
 
 class MLService(services_pb2_grpc.MLServiceServicer):
-    def __init__(self, model: WinProbability):
+    def __init__(self, model: WinProbability,
+                 extra_models: dict[str, WinProbability] | None = None):
         self.model = model
+        # Дополнительные модели по model_name (Гл. 6.3: death_risk и т.п.).
+        # Формат артефактов у всех одинаковый, сервятся тем же классом;
+        # PredictResponse.win_probability_radiant несёт вероятность модели
+        # (для death_risk — P(смерть в ближайшие 30 c)).
+        self.extra = extra_models or {}
 
     def Predict(self, request, context):
+        model = self.model
         if request.model_name not in ("", "win_probability"):
-            context.abort(grpc.StatusCode.NOT_FOUND,
-                          f"model {request.model_name!r} is not served yet")
+            model = self.extra.get(request.model_name)
+            if model is None:
+                context.abort(grpc.StatusCode.NOT_FOUND,
+                              f"model {request.model_name!r} is not served")
         try:
-            X = _vector_from_features(request.features, self.model.features)
+            X = _vector_from_features(request.features, model.features)
         except KeyError as missing:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                           f"missing features: {missing}")
         with PREDICT_LATENCY.time():
-            wp = float(self.model.predict(X)[0])
+            wp = float(model.predict(X)[0])
         PREDICTIONS.labels("predict").inc()
         return services_pb2.PredictResponse(
             win_probability_radiant=wp,
-            model_version=self.model.version,
+            model_version=model.version,
         )
 
     def PredictStream(self, request_iterator, context):
@@ -122,13 +131,26 @@ def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
 def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server, int]:
     """Собрать сервер; port=0 выбирает свободный порт (для тестов)."""
     model = WinProbability(_resolve_model_path(model_path))
+    # Дополнительные модели: NAME_MODEL_PATH из окружения (пусто/сбой —
+    # сервим без них, Predict вернёт NOT_FOUND по этому имени).
+    extra: dict[str, WinProbability] = {}
+    risk_spec = os.getenv("DEATH_RISK_MODEL_PATH",
+                          "registry://death_risk/production")
+    if risk_spec:
+        try:
+            extra["death_risk"] = WinProbability(_resolve_model_path(risk_spec))
+            logger.info("extra model death_risk loaded (%s)", risk_spec)
+        except Exception as e:  # noqa: BLE001 — опциональная модель
+            logger.warning("death_risk model unavailable (%s): %s",
+                           risk_spec, e)
     # SO_REUSEPORT выключен: gRPC по умолчанию позволяет НЕСКОЛЬКИМ
     # процессам слушать один порт, и ядро молча балансирует соединения
     # между ними — задвоенный сервер со старой моделью отдавал бы часть
     # ответов незаметно. Пусть второй запуск падает с "address in use".
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                          options=[("grpc.so_reuseport", 0)])
-    services_pb2_grpc.add_MLServiceServicer_to_server(MLService(model), server)
+    services_pb2_grpc.add_MLServiceServicer_to_server(
+        MLService(model, extra), server)
     bound = server.add_insecure_port(f"[::]:{port}")
     return server, bound
 

@@ -102,8 +102,34 @@ class ReportGenerator:
 
     def _position_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
-            "SELECT game_time, hero, x, y FROM PositionSnapshots"
+            "SELECT game_time, hero, x, y, is_alive FROM PositionSnapshots"
             " WHERE match_id = {match_id:UInt64} ORDER BY game_time", match_id)
+
+    def _risk_fn(self):
+        """P(смерть в 30 c) от Death-Risk модели через MLService.Predict
+        (model_name=death_risk). Модель не поднята (NOT_FOUND) — один
+        warning и дальше эвристический SI; ошибки сети — то же."""
+        state = {"disabled": False}
+
+        def risk(feats: dict) -> float | None:
+            if state["disabled"]:
+                return None
+            try:
+                resp = self.ml.Predict(services_pb2.PredictRequest(
+                    model_name="death_risk",
+                    features=services_pb2.FeatureVector(values=feats)),
+                    timeout=5)
+                return float(resp.win_probability_radiant)
+            except grpc.RpcError as e:
+                if e.code() == grpc.StatusCode.NOT_FOUND:
+                    logger.warning("death_risk не сервится — эвристический SI")
+                else:
+                    logger.warning("death_risk недоступна (%s) — "
+                                   "эвристический SI", e.code().name)
+                state["disabled"] = True
+                return None
+
+        return risk
 
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
@@ -186,7 +212,8 @@ class ReportGenerator:
         positions = self._position_rows(match_id)
         analysis = build_analysis(match_id, winner, players, timeline,
                                   model_version, kills=kills,
-                                  positions=positions)
+                                  positions=positions,
+                                  risk_fn=self._risk_fn())
 
         self.db.execute(
             """INSERT INTO MatchReports
