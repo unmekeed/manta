@@ -22,7 +22,7 @@ from typing import Iterable
 
 import requests
 
-from . import MatchRef, with_api_key
+from . import MatchRef, Shard, with_api_key
 from .opendota import DEM_MAGIC, OpenDotaSource
 
 logger = logging.getLogger("collector.opendota_public")
@@ -35,7 +35,8 @@ class OpenDotaPublicSource:
                  limit_per_cycle: int = 5, min_rank: int = 80,
                  min_patch: int | None = None, min_duration_s: int = 900,
                  lag_matches: int = 60_000, timeout: float = 30.0,
-                 api_delay_s: float = 1.1, api_key: str | None = None) -> None:
+                 api_delay_s: float = 1.1, api_key: str | None = None,
+                 shard: Shard | None = None) -> None:
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._min_rank = min_rank
@@ -45,6 +46,7 @@ class OpenDotaPublicSource:
         self._timeout = timeout
         self._api_delay_s = api_delay_s
         self._api_key = api_key
+        self._shard = shard or Shard()
         # Скачивание/распаковка идентичны pro-источнику.
         self._downloader = OpenDotaSource(base_url=base_url, timeout=timeout,
                                           api_key=api_key)
@@ -104,6 +106,8 @@ class OpenDotaPublicSource:
             if yielded >= self._limit:
                 break
             match_id = int(row["match_id"])
+            if not self._shard.accepts(match_id):
+                continue                     # чужой шард — не тратим квоту
             detail = self._match_detail(match_id)
             if not detail:
                 continue

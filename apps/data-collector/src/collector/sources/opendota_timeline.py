@@ -27,7 +27,7 @@ from typing import Iterable
 
 import requests
 
-from . import with_api_key
+from . import Shard, with_api_key
 
 logger = logging.getLogger("collector.opendota_timeline")
 
@@ -166,7 +166,8 @@ class OpenDotaTimelineSource:
                  min_duration_s: int = 900, min_patch: int | None = None,
                  timeout: float = 30.0, api_delay_s: float = 1.1,
                  mode: str = "public", api_key: str | None = None,
-                 detail_budget: int | None = None) -> None:
+                 detail_budget: int | None = None,
+                 shard: Shard | None = None) -> None:
         assert mode in ("public", "pro")
         self._mode = mode
         self.name = ("opendota_timeline" if mode == "public"
@@ -182,6 +183,7 @@ class OpenDotaTimelineSource:
         self._timeout = timeout
         self._delay = api_delay_s
         self._api_key = api_key
+        self._shard = shard or Shard()
         # Бюджет анонимного тарифа: /matches/{id} — самый дорогой вызов
         # цикла, ограничиваем их число сверху (yielded + отфильтрованные).
         self._detail_budget = detail_budget or 2 * limit_per_cycle
@@ -234,7 +236,8 @@ class OpenDotaTimelineSource:
             for entry in batch:
                 mid = int(entry["match_id"])
                 cursor = mid
-                if skip(mid) or mid in self._rejected:
+                if (not self._shard.accepts(mid)
+                        or skip(mid) or mid in self._rejected):
                     continue
                 if details >= self._detail_budget:
                     logger.info("бюджет detail-вызовов цикла исчерпан "

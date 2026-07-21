@@ -68,6 +68,10 @@ dota_dev_password. Метрики Prometheus: 9101–9114; живой дашбо
   (высокий ранг) / Professional (про-эталон гейта, в train не входит).
 - Реестр моделей: S3 (MinIO) по умолчанию, REGISTRY_BACKEND=mlflow —
   опция; авточистка REGISTRY_KEEP_LAST=10 + все продвигавшиеся.
+- **Параллельный сбор на 2+ машинах** (разные IP = разные квоты
+  ~3000/сутки): COLLECTOR_SHARD_COUNT/COLLECTOR_SHARD_ID в env-файле
+  (одинаковый COUNT, разный ID) — шардирование match_id % N, пересечений
+  нет, dataset-import конфликт-фри. Реализовано в sources/Shard.
 - `make dataset-export` / `dataset-import IN=…tar` — перенос между
   машинами, идемпотентно. **Слепок НЕ включает ReplayEvents** (TTL,
   объём) — после импорта позиции есть, а combat-лога нет; Death-Risk

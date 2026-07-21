@@ -19,7 +19,7 @@ from typing import Iterable
 
 import requests
 
-from . import MatchRef, with_api_key
+from . import MatchRef, Shard, with_api_key
 
 logger = logging.getLogger("collector.opendota")
 
@@ -31,12 +31,14 @@ class OpenDotaSource:
 
     def __init__(self, base_url: str = "https://api.opendota.com/api",
                  limit_per_cycle: int = 3, timeout: float = 30.0,
-                 api_delay_s: float = 1.1, api_key: str | None = None) -> None:
+                 api_delay_s: float = 1.1, api_key: str | None = None,
+                 shard: Shard | None = None) -> None:
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._timeout = timeout
         self._api_delay_s = api_delay_s  # бережём rate limit бесплатного тарифа
         self._api_key = api_key
+        self._shard = shard or Shard()
 
     def fetch_new(self, after_cursor: str | None) -> Iterable[MatchRef]:
         resp = requests.get(f"{self._base}/proMatches",
@@ -53,6 +55,8 @@ class OpenDotaSource:
             if yielded >= self._limit:
                 break
             match_id = int(row["match_id"])
+            if not self._shard.accepts(match_id):
+                continue                     # чужой шард — не тратим квоту
             detail = self._match_detail(match_id)
             replay_url = (detail or {}).get("replay_url")
             if not replay_url:

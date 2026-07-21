@@ -29,6 +29,35 @@ def with_api_key(params: dict | None, api_key: str | None) -> dict:
     return params
 
 
+@dataclass(frozen=True)
+class Shard:
+    """Разбиение потока кандидатов между независимыми машинами.
+
+    Квота OpenDota считается по IP (~3000/сутки анонимно). Две+ машины с
+    разными IP имеют независимые квоты — но, читая один и тот же список
+    /parsedMatches сверху, обе схватят одни и те же свежие матчи. Чтобы
+    не дублировать сбор (и не жечь квоту впустую), каждая машина берёт
+    СВОЙ класс вычетов match_id по модулю: shard_id ∈ [0, count).
+
+    count=1 (дефолт) — одиночная машина, фильтр пропускает всё. match_id
+    монотонны и плотны, поэтому остатки делятся ~поровну. Координации
+    между машинами не требуется: разбиение статично и детерминировано,
+    пересечение множеств собранных матчей — пустое (слияние баз через
+    dataset-import становится конфликт-фри).
+    """
+
+    shard_id: int = 0
+    count: int = 1
+
+    def __post_init__(self) -> None:
+        if self.count < 1 or not (0 <= self.shard_id < self.count):
+            raise ValueError(
+                f"некорректный шард {self.shard_id}/{self.count}")
+
+    def accepts(self, match_id: int) -> bool:
+        return self.count == 1 or match_id % self.count == self.shard_id
+
+
 class Source(Protocol):
     """Контракт источника: имя + итератор новых матчей после курсора."""
 
