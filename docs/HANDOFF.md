@@ -207,8 +207,9 @@ dota_dev_password. Метрики Prometheus: 9101–9114; живой дашбо
   Desktop + `wsl -d Ubuntu -- make -C ~/manta recover`; туда же —
   ежедневный `make dataset-export` как бэкап (потеря volume = максимум
   день данных).
-- Мелочь: gateway/frontend не входят в recover (поднимать руками);
-  LLM-слой Coach включается ANTHROPIC_API_KEY (каркас готов).
+- Мелочь: LLM-слой Coach включается ANTHROPIC_API_KEY (каркас готов).
+  Спринт 51: gateway (:8080), frontend (vite :5173) и дашборд (:9107)
+  входят в recover — вся платформа поднимается одной командой.
 
 ## Договорённости с владельцем
 

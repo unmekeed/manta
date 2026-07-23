@@ -44,20 +44,24 @@ curl localhost:8080/healthz
 curl -X POST localhost:8080/api/v1/matches/upload -F "file=@replay.dem"
 ```
 
-Если среда разработки перезапустилась (эфемерный контейнер: dockerd и все
-фоновые процессы погибли, данные в volumes целы) — весь стек поднимается
-одной командой:
+Весь стек — от инфраструктуры до веб-интерфейса — поднимается одной
+командой (идемпотентно: живые компоненты не трогает, безопасно запускать
+повторно и после любого перезапуска среды/ПК):
 
 ```bash
-MANTA_TRAIN_ENV=~/manta-train.env make recover   # идемпотентно
+MANTA_TRAIN_ENV=~/manta-train.env make recover
 ```
 
-`scripts/dev-recover.sh` запускает dockerd, инфраструктуру, парсер,
-экстрактор, коллектор и auto-train (env-файл с Telegram-секретами — вне
-репозитория); живые компоненты не трогает. На каждом запуске идемпотентно
-прогоняет `make topics` и миграции (журнал `SchemaMigrations` в PG) и
-заканчивается health-check'ом. Логи сервисов — `~/manta-logs`
-(`MANTA_LOG_DIR`), не `/tmp`.
+`scripts/dev-recover.sh` запускает: dockerd → инфраструктуру (PG, CH,
+Kafka, MinIO, Redis) → топики и миграции (идемпотентно, журнал
+`SchemaMigrations`) → парсер, экстрактор, коллекторы, ml-service,
+similarity/draft/coach/feature-store, report-generator, auto-train →
+**api-gateway (:8080), веб-интерфейс (:5173) и дашборд (:9107)** — и
+заканчивается health-check'ом `make doctor`. Env-файл с секретами — вне
+репозитория; логи сервисов — `~/manta-logs` (`MANTA_LOG_DIR`), не `/tmp`.
+
+После recover открывать: веб-интерфейс http://localhost:5173, живой
+дашборд http://localhost:9107.
 
 Проверить здоровье конвейера в любой момент — по ДАННЫМ, а не по процессам
 (топики, лаг консьюмер-групп, свежесть таблиц, квота OpenDota, часы,

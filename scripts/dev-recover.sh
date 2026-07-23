@@ -208,6 +208,38 @@ else
     skip "auto-train"
 fi
 
+# 5b. UI-контур: gateway, frontend, дашборд (спринт 51: recover поднимает
+# ВСЁ одной командой, руками ничего не запускается) ----------------------------
+if [ ! -x /tmp/api-gateway ]; then
+    say "собираю api-gateway"
+    (cd apps/api-gateway && go build -o /tmp/api-gateway ./cmd/server)
+fi
+if ! pgrep -f "^/tmp/api-gateway" >/dev/null; then
+    say "запускаю api-gateway (:8080, лог: $LOG_DIR/gateway.log)"
+    # HEROES_PATH: дефолт бинарника (../../libs/…) рассчитан на запуск из
+    # каталога gateway — из корня словарь героев не нашёлся бы (503 /heroes).
+    HEROES_PATH="${HEROES_PATH:-$ROOT/libs/data/heroes.json}" \
+        nohup /tmp/api-gateway >"$LOG_DIR/gateway.log" 2>&1 &
+else
+    skip "api-gateway"
+fi
+
+if ! pgrep -f "vite --host" >/dev/null; then
+    say "запускаю frontend (vite, :5173, лог: $LOG_DIR/frontend.log)"
+    (cd apps/frontend && { [ -d node_modules ] || npm ci --silent; } && \
+        nohup npm run dev -- --host 0.0.0.0 --port 5173 \
+            >"$LOG_DIR/frontend.log" 2>&1 &)
+else
+    skip "frontend"
+fi
+
+if ! pgrep -f "scripts/dashboard.py" >/dev/null; then
+    say "запускаю дашборд (:9107, лог: $LOG_DIR/dashboard.log)"
+    nohup python3 scripts/dashboard.py >"$LOG_DIR/dashboard.log" 2>&1 &
+else
+    skip "дашборд"
+fi
+
 # 6. Итог ----------------------------------------------------------------------
 sleep 3
 echo
@@ -227,10 +259,19 @@ check coach "python3 -u -m serve_coach"
 check feature-store "python3 -u -m serve_features"
 check report-generator "python3 -u -m reportgen"
 check auto-train "python3 -u -m training.auto"
+check api-gateway "^/tmp/api-gateway"
+check frontend "vite --host"
+check dashboard "scripts/dashboard.py"
 matches=$(echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL" |
     curl -s "http://localhost:8123/?database=manta" \
         -H "X-ClickHouse-User: dota" -H "X-ClickHouse-Key: dota_dev_password" --data-binary @- || echo '?')
 printf '   %-18s %s\n' "матчей в витрине" "$matches"
+
+echo
+say "адреса"
+printf '   %-18s %s\n' "веб-интерфейс" "http://localhost:5173"
+printf '   %-18s %s\n' "дашборд" "http://localhost:9107"
+printf '   %-18s %s\n' "REST API" "http://localhost:8080/healthz"
 
 # 7. Doctor: здоровье по ДАННЫМ, а не по pgrep (свежие сервисы ещё не успели
 # ничего записать — поэтому не роняем recover, только показываем).
