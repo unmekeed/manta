@@ -138,11 +138,11 @@ else
     ok "PG-миграции: журнал полон"
 fi
 # CH-миграции журнала не ведут (все идемпотентны) — проверяем маркер
-# ПОСЛЕДНЕЙ (009: networth_total). При добавлении миграции обновить маркер.
+# ПОСЛЕДНЕЙ (010: patch). При добавлении миграции обновить маркер.
 sentinel=$(ch "SELECT count() FROM system.columns WHERE database = '$CH_DB'
-               AND table = 'MatchTimelineFeatures' AND name = 'networth_total'")
-if [ "$sentinel" = "1" ]; then ok "CH-миграции: маркер 009 на месте"
-else fail "CH-миграции отстают (нет networth_total) — make migrate"
+               AND table = 'MatchTimelineFeatures' AND name = 'patch'")
+if [ "$sentinel" = "1" ]; then ok "CH-миграции: маркер 010 на месте"
+else fail "CH-миграции отстают (нет колонки patch) — make migrate"
 fi
 
 echo

@@ -18,6 +18,7 @@ class MatchRef:
     replay_url: str          # откуда скачивать .dem
     tier: str                # Pub | Premium | Professional | Tournament
     source_cursor: str       # позиция в источнике (для CollectorCursor)
+    patch: int = 0           # id патча OpenDota; 0 — неизвестен (A9)
 
 
 def with_api_key(params: dict | None, api_key: str | None) -> dict:

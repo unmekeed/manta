@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 from dataclasses import dataclass
 
@@ -63,6 +64,31 @@ class Dataset:
     # tier строки ('' для старых/синтетических данных). Матчи
     # PRO_TIER — эталонный holdout: НИКОГДА не попадают в train/valid.
     tiers: np.ndarray | None = None
+    # id патча OpenDota по строкам (0 — неизвестен: старые строки до
+    # миграции 010). Используется patch_weights().
+    patches: np.ndarray | None = None
+
+    def patch_weights(self) -> np.ndarray:
+        """A9: множитель веса строки по возрасту патча.
+
+        После баланс-патча мета меняется, но выбрасывать старые матчи —
+        терять данные. Компромисс: вес PATCH_OLD_WEIGHT^(latest - patch)
+        (дефолт 0.4 — середина рекомендованного 0.3–0.5), не ниже 0.1.
+        latest — максимальный известный патч в датасете; неизвестный
+        патч (0) не штрафуется — иначе весь старый датасет разом
+        обесценился бы при появлении первой строки с патчем."""
+        n = len(self.y)
+        if self.patches is None:
+            return np.ones(n)
+        known = self.patches[self.patches > 0]
+        if known.size == 0:
+            return np.ones(n)
+        latest = int(known.max())
+        base = float(os.getenv("PATCH_OLD_WEIGHT", "0.4"))
+        w = np.where(self.patches > 0,
+                     base ** (latest - self.patches.astype(np.float64)),
+                     1.0)
+        return np.clip(w, 0.1, 1.0)
 
     def _tier_mask(self, tier: str) -> np.ndarray:
         if self.tiers is None:
@@ -154,7 +180,7 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
         data="SELECT match_id, game_time, networth_diff, networth_total,"
              "       xp_diff, kills_radiant, kills_dire, position_advance,"
              "       alive_diff, towers_diff, rax_diff,"
-             "       radiant_win, tier"
+             "       radiant_win, tier, patch"
              "  FROM MatchTimelineFeatures FINAL ORDER BY match_id, game_time",
         headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
         timeout=120,
@@ -168,8 +194,11 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
     y = np.array([int(r["radiant_win"]) for r in rows], dtype=np.int64)
     groups = np.array([int(r["match_id"]) for r in rows], dtype=np.int64)
     tiers = np.array([str(r.get("tier", "")) for r in rows])
+    patches = np.array([int(r.get("patch") or 0) for r in rows],
+                       dtype=np.int64)
     return Dataset(X=X, y=y, groups=groups,
-                   n_matches=len(set(groups.tolist())), tiers=tiers)
+                   n_matches=len(set(groups.tolist())), tiers=tiers,
+                   patches=patches)
 
 
 # -- Синтетические матчи ------------------------------------------------------
@@ -221,6 +250,10 @@ def merge(a: Dataset, b: Dataset) -> Dataset:
         return a
     tiers_a = a.tiers if a.tiers is not None else np.array([""] * len(a.y))
     tiers_b = b.tiers if b.tiers is not None else np.array([""] * len(b.y))
+    patches_a = (a.patches if a.patches is not None
+                 else np.zeros(len(a.y), dtype=np.int64))
+    patches_b = (b.patches if b.patches is not None
+                 else np.zeros(len(b.y), dtype=np.int64))
     return Dataset(
         X=np.vstack([a.X, b.X]),
         y=np.concatenate([a.y, b.y]),
@@ -228,6 +261,7 @@ def merge(a: Dataset, b: Dataset) -> Dataset:
         n_matches=a.n_matches + b.n_matches,
         n_synthetic=a.n_synthetic + b.n_synthetic,
         tiers=np.concatenate([tiers_a, tiers_b]),
+        patches=np.concatenate([patches_a, patches_b]),
     )
 
 

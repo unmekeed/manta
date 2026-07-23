@@ -45,6 +45,7 @@ class TimelineMatch:
     tier: str
     rows: list[dict] = field(default_factory=list)   # схема MTF
     source_cursor: str = ""
+    patch: int = 0            # id патча OpenDota; 0 — неизвестен (A9)
 
 
 def timeline_rows(m: dict) -> list[dict]:
@@ -270,6 +271,7 @@ class OpenDotaTimelineSource:
                     continue
                 yielded += 1
                 yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
-                                    source_cursor=str(mid))
+                                    source_cursor=str(mid),
+                                    patch=int(m.get("patch") or 0))
                 if yielded >= self._limit:
                     return

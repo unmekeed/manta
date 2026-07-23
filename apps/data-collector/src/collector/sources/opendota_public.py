@@ -125,6 +125,7 @@ class OpenDotaPublicSource:
                 replay_url=replay_url,
                 tier="Premium",  # высокоранговый ранкед (Гл. 4.2 tier-схема)
                 source_cursor=str(match_id),
+                patch=int(detail.get("patch") or 0),
             )
 
     def _match_detail(self, match_id: int) -> dict | None:

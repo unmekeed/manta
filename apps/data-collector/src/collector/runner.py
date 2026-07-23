@@ -52,6 +52,7 @@ def build_envelope(ref: MatchRef, replay_url: str, source_name: str,
             "match_id": ref.match_id,
             "replay_url": replay_url,
             "tier": ref.tier,
+            "patch": ref.patch,
             "source": source_name,
         },
     }

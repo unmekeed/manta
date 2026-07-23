@@ -71,6 +71,7 @@ class OpenDotaSource:
                 replay_url=replay_url,
                 tier="Professional",
                 source_cursor=str(match_id),
+                patch=int((detail or {}).get("patch") or 0),
             )
 
     def _match_detail(self, match_id: int) -> dict | None:

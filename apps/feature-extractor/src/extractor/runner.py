@@ -111,7 +111,7 @@ class Extractor:
 
     def process_match(self, match_id: int, players: list[dict], winner: str,
                       duration_s: float, trace_id: str | None,
-                      tier: str = "") -> dict:
+                      tier: str = "", patch: int = 0) -> dict:
         roster = Roster.from_players(players, winner)
 
         economy = self.ch.select(
@@ -149,6 +149,7 @@ class Extractor:
         for r in trows:
             r["match_id"] = match_id
             r["tier"] = tier
+            r["patch"] = patch
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)
         self.ch.insert_rows("MatchTimelineFeatures", trows)
@@ -201,11 +202,13 @@ class Extractor:
                 winner = "Radiant" if won_teams == {2} else "Dire"
                 duration = float(prows[0].get("duration_s", 0))
                 tier_rows = self.ch.select(
-                    "SELECT any(tier) AS tier FROM MatchTimelineFeatures"
+                    "SELECT any(tier) AS tier, any(patch) AS patch"
+                    "  FROM MatchTimelineFeatures"
                     " WHERE match_id = {match_id:UInt64}", {"match_id": mid})
                 tier = str(tier_rows[0]["tier"]) if tier_rows else ""
+                patch = int(tier_rows[0].get("patch") or 0) if tier_rows else 0
                 self.process_match(mid, players, winner, duration,
-                                   trace_id=None, tier=tier)
+                                   trace_id=None, tier=tier, patch=patch)
                 done += 1
             except Exception:  # noqa: BLE001
                 logger.exception("backfill failed for match %s", mid)
@@ -256,6 +259,7 @@ class Extractor:
             winner = payload.get("winner", "")
             duration_s = float(payload.get("duration_s", 0))
             tier = str(payload.get("tier", "") or "")
+            patch = int(payload.get("patch") or 0)
         except (ValueError, KeyError, TypeError) as exc:
             logger.error("bad replay.parsed event, skipping: %s", exc)
             return
@@ -266,7 +270,7 @@ class Extractor:
         try:
             with FEATURES_DURATION.time():
                 self.process_match(match_id, players, winner, duration_s,
-                                   env.get("trace_id"), tier=tier)
+                                   env.get("trace_id"), tier=tier, patch=patch)
             FEATURES_CALCULATED.inc()
         except Exception:  # noqa: BLE001 — логируем и не блокируем партицию
             FEATURES_FAILED.inc()

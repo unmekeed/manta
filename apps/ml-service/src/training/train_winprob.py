@@ -127,9 +127,15 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
     X_tr_all, y_tr_all = ds.X[tr_mask], ds.y[tr_mask]
     g_tr_all = ds.groups[tr_mask]
     X_va, y_va = ds.X[in_valid & ~pro], ds.y[in_valid & ~pro]
+    # A9: даунвейт строк старого патча (dataset.patch_weights). Метрики
+    # (valid/OOF/эталон) считаются БЕЗ этих весов — оцениваем на честной
+    # популяции, даунвейт влияет только на то, чему модель учится.
+    pw_tr_all = ds.patch_weights()[tr_mask]
 
-    def _fit_booster(X, y, g, rounds, valid=None):
+    def _fit_booster(X, y, g, rounds, pw=None, valid=None):
         w = _match_weights(g)
+        if pw is not None:
+            w = w * pw
         if mirror:
             X, y = mirror_xy(X, y)
             w = np.concatenate([w, w])
@@ -153,7 +159,8 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         if va_f.sum() == 0 or tr_f.sum() == 0:
             continue
         b = _fit_booster(X_tr_all[tr_f], y_tr_all[tr_f], g_tr_all[tr_f],
-                         num_rounds, valid=(X_tr_all[va_f], y_tr_all[va_f]))
+                         num_rounds, pw=pw_tr_all[tr_f],
+                         valid=(X_tr_all[va_f], y_tr_all[va_f]))
         oof_raw[va_f] = b.predict(X_tr_all[va_f])
         best_iters.append(int(b.best_iteration or num_rounds))
     seen = ~np.isnan(oof_raw)
@@ -171,7 +178,8 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
 
     # -- Финальный бустер на всей train-части ---------------------------------
     final_rounds = int(np.median(best_iters)) if best_iters else num_rounds
-    booster = _fit_booster(X_tr_all, y_tr_all, g_tr_all, max(final_rounds, 1))
+    booster = _fit_booster(X_tr_all, y_tr_all, g_tr_all, max(final_rounds, 1),
+                           pw=pw_tr_all)
 
     raw_va = booster.predict(X_va)
     cal_va = calibrator.predict(raw_va)
@@ -227,6 +235,11 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
             "synthetic_matches": ds.n_synthetic,
             "rows": int(len(ds.y)),
             "hash": dataset_hash(ds),
+            # A9: параметры даунвейта старого патча в этой тренировке.
+            "patch_latest": (int(ds.patches[ds.patches > 0].max())
+                             if ds.patches is not None
+                             and (ds.patches > 0).any() else 0),
+            "patch_downweighted_rows": (int(np.sum(ds.patch_weights() < 1.0))),
             # Верхняя граница виденных матчей: гейт следующих поколений
             # сравнивает версии на матчах НОВЕЕ этой отметки — их не видел
             # ни prod (их ещё не было), ни кандидат (valid-сплит исключён).

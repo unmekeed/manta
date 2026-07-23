@@ -30,7 +30,7 @@ MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
                "xp_diff",
                "kills_radiant", "kills_dire", "position_advance",
                "alive_diff", "towers_diff", "rax_diff",
-               "radiant_win", "tier", "feature_version"]
+               "radiant_win", "tier", "patch", "feature_version"]
 
 
 @dataclass
@@ -98,7 +98,8 @@ class TimelineCollector:
 
     # -- ClickHouse -----------------------------------------------------------
 
-    def _insert_rows(self, rows: list[dict], tier: str) -> None:
+    def _insert_rows(self, rows: list[dict], tier: str,
+                     patch: int = 0) -> None:
         def fmt(v) -> str:
             if isinstance(v, float) and math.isnan(v):
                 return "nan"
@@ -106,7 +107,8 @@ class TimelineCollector:
 
         lines = []
         for r in rows:
-            full = {**r, "tier": tier, "feature_version": FEATURE_VERSION}
+            full = {**r, "tier": tier, "patch": patch,
+                    "feature_version": FEATURE_VERSION}
             lines.append("\t".join(fmt(full[c]) for c in MTF_COLUMNS))
         query = (f"INSERT INTO MatchTimelineFeatures ({', '.join(MTF_COLUMNS)}) "
                  f"FORMAT TabSeparated")
@@ -125,7 +127,7 @@ class TimelineCollector:
         self._ensure_db()
         processed = 0
         for tm in self._source.fetch_new(skip=self._is_collected):
-            self._insert_rows(tm.rows, tm.tier)
+            self._insert_rows(tm.rows, tm.tier, patch=tm.patch)
             self._mark_collected(tm.match_id, tm.source_cursor)
             processed += 1
             logger.info("таймлайн матча %d: %d строк (tier=%s)",
