@@ -61,7 +61,11 @@ function PlayersTable({ players }: { players: PlayerAnalysis[] }) {
             <td>{p.player_name || `Игрок ${p.player_id}`}</td>
             <td className="hero-name">{heroLabel(p.hero)}</td>
             <td>{p.lane || "—"}</td>
-            <td>
+            <td
+              title={p.laning_model
+                ? "Laning-модель: шанс выиграть линию по игре первых 5 минут (LH/DN, харас, размены)"
+                : "Эвристика: исход линии по разнице net worth на 10-й минуте"}
+            >
               <ScoreBar value={p.laning_score} />
             </td>
             <td>

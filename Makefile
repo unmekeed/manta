@@ -127,6 +127,9 @@ fs-serve:      ## Feature Store: онлайн-фичи поверх Redis (:5005
 ml-train-risk: ## Обучить Death-Risk модель на реплейных позициях (C5)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.risk $(RISK_ARGS)
 
+ml-train-laning: ## Обучить Laning-модель на combat-логе первых 5 минут (C5)
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.laning $(LANING_ARGS)
+
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
 

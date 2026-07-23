@@ -134,15 +134,18 @@ def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server,
     # Дополнительные модели: NAME_MODEL_PATH из окружения (пусто/сбой —
     # сервим без них, Predict вернёт NOT_FOUND по этому имени).
     extra: dict[str, WinProbability] = {}
-    risk_spec = os.getenv("DEATH_RISK_MODEL_PATH",
-                          "registry://death_risk/production")
-    if risk_spec:
+    for name, env, default in (
+            ("death_risk", "DEATH_RISK_MODEL_PATH",
+             "registry://death_risk/production"),
+            ("laning", "LANING_MODEL_PATH", "registry://laning/production")):
+        spec = os.getenv(env, default)
+        if not spec:
+            continue
         try:
-            extra["death_risk"] = WinProbability(_resolve_model_path(risk_spec))
-            logger.info("extra model death_risk loaded (%s)", risk_spec)
+            extra[name] = WinProbability(_resolve_model_path(spec))
+            logger.info("extra model %s loaded (%s)", name, spec)
         except Exception as e:  # noqa: BLE001 — опциональная модель
-            logger.warning("death_risk model unavailable (%s): %s",
-                           risk_spec, e)
+            logger.warning("%s model unavailable (%s): %s", name, spec, e)
     # SO_REUSEPORT выключен: gRPC по умолчанию позволяет НЕСКОЛЬКИМ
     # процессам слушать один порт, и ядро молча балансирует соединения
     # между ними — задвоенный сервер со старой моделью отдавал бы часть

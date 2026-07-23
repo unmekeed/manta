@@ -105,38 +105,81 @@ class ReportGenerator:
             "SELECT game_time, hero, x, y, is_alive FROM PositionSnapshots"
             " WHERE match_id = {match_id:UInt64} ORDER BY game_time", match_id)
 
-    def _risk_fn(self):
-        """P(смерть в 30 c) от Death-Risk модели через MLService.Predict
-        (model_name=death_risk). Модель не поднята (NOT_FOUND) — один
-        warning и дальше эвристический SI; ошибки сети — то же."""
+    def _model_fn(self, model_name: str, fallback_note: str):
+        """Замыкание Predict(model_name=…) для опциональной extra-модели
+        MLService. Модель не поднята (NOT_FOUND) — один warning и дальше
+        None (вызывающий падает на эвристику); ошибки сети — то же."""
         state = {"disabled": False}
 
-        def risk(feats: dict) -> float | None:
+        def predict(feats: dict) -> float | None:
             if state["disabled"]:
                 return None
             try:
                 resp = self.ml.Predict(services_pb2.PredictRequest(
-                    model_name="death_risk",
+                    model_name=model_name,
                     features=services_pb2.FeatureVector(values=feats)),
                     timeout=5)
                 return float(resp.win_probability_radiant)
             except grpc.RpcError as e:
                 if e.code() == grpc.StatusCode.NOT_FOUND:
-                    logger.warning("death_risk не сервится — эвристический SI")
+                    logger.warning("%s не сервится — %s",
+                                   model_name, fallback_note)
                 else:
-                    logger.warning("death_risk недоступна (%s) — "
-                                   "эвристический SI", e.code().name)
+                    logger.warning("%s недоступна (%s) — %s", model_name,
+                                   e.code().name, fallback_note)
                 state["disabled"] = True
                 return None
 
-        return risk
+        return predict
+
+    def _risk_fn(self):
+        return self._model_fn("death_risk", "эвристический SI")
+
+    def _laning_fn(self):
+        return self._model_fn("laning", "эвристический laning_score")
 
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT player_id, team, hero, player_name, won, gpm, xpm,"
-            "       lh_at_10, dn_at_10, lane, lane_nw_diff_at_10, gold_share"
+            "       lh_at_5, dn_at_5, lh_at_10, dn_at_10, lane,"
+            "       lane_nw_diff_at_10, gold_share"
             "  FROM PlayerMatchFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY player_id", match_id)
+
+    def _early_combat(self, match_id: int) -> dict[str, dict]:
+        """hero → {dealt, taken, kills, deaths} за лейнинг-окно (фичи
+        Laning-модели; тот же расчёт, что COMBAT_QUERY трейнера)."""
+        rows = self._ch_select(
+            "SELECT hero, sum(dealt) AS dealt, sum(taken) AS taken,"
+            "       sum(kills) AS kills, sum(deaths) AS deaths FROM ("
+            "  SELECT attacker AS hero, value_amount AS dealt,"
+            "         0 AS taken, 0 AS kills, 0 AS deaths FROM ReplayEvents"
+            "   WHERE match_id = {match_id:UInt64} AND event_type = 'DAMAGE'"
+            "     AND game_time BETWEEN -90 AND 300"
+            "     AND attacker LIKE 'npc_dota_hero_%'"
+            "     AND target LIKE 'npc_dota_hero_%' AND attacker != target"
+            "  UNION ALL"
+            "  SELECT target, 0, value_amount, 0, 0 FROM ReplayEvents"
+            "   WHERE match_id = {match_id:UInt64} AND event_type = 'DAMAGE'"
+            "     AND game_time BETWEEN -90 AND 300"
+            "     AND attacker LIKE 'npc_dota_hero_%'"
+            "     AND target LIKE 'npc_dota_hero_%' AND attacker != target"
+            "  UNION ALL"
+            "  SELECT attacker, 0, 0, 1, 0 FROM ReplayEvents"
+            "   WHERE match_id = {match_id:UInt64} AND event_type = 'KILL'"
+            "     AND game_time BETWEEN -90 AND 300"
+            "     AND attacker LIKE 'npc_dota_hero_%'"
+            "     AND target LIKE 'npc_dota_hero_%'"
+            "  UNION ALL"
+            "  SELECT target, 0, 0, 0, 1 FROM ReplayEvents"
+            "   WHERE match_id = {match_id:UInt64} AND event_type = 'KILL'"
+            "     AND game_time BETWEEN -90 AND 300"
+            "     AND target LIKE 'npc_dota_hero_%'"
+            ") GROUP BY hero", match_id)
+        return {r["hero"]: {"dealt": float(r["dealt"]),
+                            "taken": float(r["taken"]),
+                            "kills": int(r["kills"]),
+                            "deaths": int(r["deaths"])} for r in rows}
 
     def _wp_curve(self, match_id: int, rows: list[dict]
                   ) -> tuple[list[float], list[list[dict]], str]:
@@ -213,7 +256,9 @@ class ReportGenerator:
         analysis = build_analysis(match_id, winner, players, timeline,
                                   model_version, kills=kills,
                                   positions=positions,
-                                  risk_fn=self._risk_fn())
+                                  risk_fn=self._risk_fn(),
+                                  laning_fn=self._laning_fn(),
+                                  early_combat=self._early_combat(match_id))
 
         self.db.execute(
             """INSERT INTO MatchReports

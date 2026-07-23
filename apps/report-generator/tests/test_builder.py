@@ -361,3 +361,53 @@ def test_error_uses_model_risk_when_available():
     si2 = errors2[0][0]["safety_index"]            # фолбэк на эвристику
     assert si2 != 0.87 and 0 < si2 < 1
     assert "риск-модель" not in errors2[0][0]["explanation"]
+
+
+def test_laning_uses_model_when_available():
+    """laning_fn + early_combat → score = вероятность модели,
+    laning_model=true; roam и отсутствие combat-лога — эвристика."""
+    t = build_timeline(1, ROWS, WP)
+    players = [
+        dict(PLAYERS[0], lane="mid", lane_nw_diff_at_10=900,
+             lh_at_5=30, dn_at_5=5),
+        dict(PLAYERS[1], lane="roam", lane_nw_diff_at_10=0),
+    ]
+    early = {"npc_dota_hero_axe":
+             {"dealt": 1500.0, "taken": 600.0, "kills": 1, "deaths": 0}}
+    seen = []
+
+    def model(feats):
+        seen.append(feats)
+        return 0.81
+
+    a = build_analysis(1, "Dire", players, t, "v",
+                       laning_fn=model, early_combat=early)
+    p0, p1 = a["players"]
+    assert p0["laning_score"] == 0.81 and p0["laning_model"] is True
+    assert seen[0]["lh_at_5"] == 30.0 and seen[0]["is_mid"] == 1.0
+    assert seen[0]["hero_dmg_dealt"] == 1500.0
+    # roam — модель неприменима, эвристика (LH-прокси), флаг false
+    assert p1["laning_model"] is False and 0 <= p1["laning_score"] <= 1
+    assert len(seen) == 1
+
+
+def test_laning_fallback_when_model_declines():
+    """laning_fn вернул None (модель не сервится) → эвристика по
+    lane_nw_diff_at_10, laning_model=false."""
+    t = build_timeline(1, ROWS, WP)
+    players = [dict(PLAYERS[0], lane="top", lane_nw_diff_at_10=1500,
+                    lh_at_5=20, dn_at_5=2)]
+    a = build_analysis(1, "Dire", players, t, "v",
+                       laning_fn=lambda f: None,
+                       early_combat={"npc_dota_hero_axe": {}})
+    p0 = a["players"][0]
+    assert p0["laning_model"] is False
+    assert p0["laning_score"] == round(1 / (1 + 2.718281828 ** -1.0), 3)
+
+
+def test_laning_without_model_keeps_heuristic():
+    """Без laning_fn поведение прежнее (обратная совместимость)."""
+    t = build_timeline(1, ROWS, WP)
+    a = build_analysis(1, "Dire", PLAYERS, t, "v")
+    for p in a["players"]:
+        assert p["laning_model"] is False

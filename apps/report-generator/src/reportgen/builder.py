@@ -67,7 +67,7 @@ import math
 
 
 def _laning_score(p: dict) -> float:
-    """Лейнинг = исход дуэли на линии: sigmoid от разницы net worth на
+    """Лейнинг-эвристика (фолбэк): sigmoid от разницы net worth на
     10-й минуте против прямых оппонентов по линии (lane_nw_diff_at_10 из
     витрины; масштаб 1500 золота ≈ выигранная линия). 0.5 — ровная линия.
     Для roam/неопределённой линии диффа нет — fallback на LH-прокси."""
@@ -76,6 +76,30 @@ def _laning_score(p: dict) -> float:
         return round(1.0 / (1.0 + math.exp(-diff / 1500.0)), 3)
     raw = (float(p.get("lh_at_10", 0)) + 2.0 * float(p.get("dn_at_10", 0))) / 80.0
     return round(min(max(raw, 0.0), 1.0), 3)
+
+
+def _laning_from_model(p: dict, early: dict | None, laning_fn) -> float | None:
+    """Модельный laning_score (спринт 50): калиброванная P(линия выиграна
+    к 10-й) по поведению первых 5 минут — Laning-модель через laning_fn.
+    None — модель неприменима (roam/нет линии, нет combat-лога, модель не
+    сервится) → вызывающий падает на эвристику _laning_score."""
+    lane = str(p.get("lane", "") or "")
+    if laning_fn is None or early is None or lane not in ("top", "mid", "bot"):
+        return None
+    feats = {
+        "lh_at_5": float(p.get("lh_at_5", 0) or 0),
+        "dn_at_5": float(p.get("dn_at_5", 0) or 0),
+        "hero_dmg_dealt": float(early.get("dealt", 0)),
+        "hero_dmg_taken": float(early.get("taken", 0)),
+        "kills_5": float(early.get("kills", 0)),
+        "deaths_5": float(early.get("deaths", 0)),
+        "is_mid": 1.0 if lane == "mid" else 0.0,
+    }
+    try:
+        prob = laning_fn(feats)
+    except Exception:  # noqa: BLE001 — модель опциональна
+        return None
+    return None if prob is None else round(float(prob), 3)
 
 
 def _impact_score(delta_wp_sum: float) -> float:
@@ -420,8 +444,13 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
                    timeline: dict, model_version: str,
                    kills: list[dict] | None = None,
                    positions: list[dict] | None = None,
-                   risk_fn=None) -> dict:
-    """Схема MatchAnalysis (+ hero/player_name — аддитивные поля)."""
+                   risk_fn=None, laning_fn=None,
+                   early_combat: dict[str, dict] | None = None) -> dict:
+    """Схема MatchAnalysis (+ hero/player_name — аддитивные поля).
+
+    early_combat: hero (npc_dota_hero_*) → {dealt, taken, kills, deaths}
+    за первые 5 минут — фичи Laning-модели (laning_fn); без них/без
+    модели laning_score считает эвристика."""
     points = timeline["points"]
     final_wp = points[-1]["radiant_wp"] if points else 0.5
     turning = _turning_point(points)
@@ -435,24 +464,29 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
         positions_by_hero=index_positions(positions) if positions else None,
         risk_fn=risk_fn)
 
+    def _player_entry(p: dict) -> dict:
+        model_ls = _laning_from_model(
+            p, (early_combat or {}).get(str(p.get("hero", ""))), laning_fn)
+        return {
+            "player_id": int(p["player_id"]),
+            "hero_id": hero_id(str(p.get("hero", ""))),
+            "lane": p.get("lane", ""),
+            "hero": p.get("hero", ""),
+            "player_name": p.get("player_name", ""),
+            "laning_score": model_ls if model_ls is not None
+            else _laning_score(p),
+            "laning_model": model_ls is not None,
+            "impact_score": _impact_score(impact.get(int(p["player_id"]), 0.0)),
+            "delta_wp_sum": round(impact.get(int(p["player_id"]), 0.0), 4),
+            "errors": errors.get(int(p["player_id"]), []),
+        }
+
     return {
         "match_id": match_id,
         "status": "completed",
         "win_probability": {"final_radiant": final_wp},
-        "players": [
-            {
-                "player_id": int(p["player_id"]),
-                "hero_id": hero_id(str(p.get("hero", ""))),
-                "lane": p.get("lane", ""),
-                "hero": p.get("hero", ""),
-                "player_name": p.get("player_name", ""),
-                "laning_score": _laning_score(p),
-                "impact_score": _impact_score(impact.get(int(p["player_id"]), 0.0)),
-                "delta_wp_sum": round(impact.get(int(p["player_id"]), 0.0), 4),
-                "errors": errors.get(int(p["player_id"]), []),
-            }
-            for p in sorted(players, key=lambda x: int(x["player_id"]))
-        ],
+        "players": [_player_entry(p) for p in
+                    sorted(players, key=lambda x: int(x["player_id"]))],
         "narrative": build_narrative(winner, players, turning),
         # partial: нарратив шаблонный, laning/impact — прокси, ошибки —
         # rule-based ΔWP-бейзлайн (без Safety Index и классов, кроме

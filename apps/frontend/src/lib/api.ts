@@ -39,6 +39,7 @@ export interface PlayerAnalysis {
   lane: string;
   player_name: string;
   laning_score: number;
+  laning_model?: boolean; // true — score из Laning-модели (P выиграть линию)
   impact_score: number;
   errors: GameError[];
 }
