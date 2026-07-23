@@ -3,7 +3,7 @@
 GO_SERVICES := apps/api-gateway apps/replay-parser/svc
 COMPOSE     := docker compose -f deployments/docker-compose.yml
 
-.PHONY: up down ps topics migrate migrate-pg migrate-ch lint test build clean
+.PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -22,12 +22,8 @@ topics:        ## Создать Kafka-топики по реестру Гл. 2.
 
 migrate: migrate-pg migrate-ch  ## Применить все миграции
 
-migrate-pg:    ## Миграции PostgreSQL (все файлы по порядку)
-	@for f in infra/migrations/postgres/*.sql; do \
-		echo ">> $$f"; \
-		PGPASSWORD=dota_dev_password psql -h localhost -U dota -d manta \
-			-v ON_ERROR_STOP=1 -f $$f || exit 1; \
-	done
+migrate-pg:    ## Миграции PostgreSQL (только новые; журнал SchemaMigrations)
+	./scripts/pg-migrate.sh
 
 migrate-ch:    ## Миграции ClickHouse (все файлы по порядку)
 	@for f in infra/migrations/clickhouse/*.sql; do \
@@ -142,6 +138,9 @@ ml-audit:      ## Аудит датасета: сдвиг приора, длит
 
 recover:       ## Восстановить dev-стек после перезапуска среды (идемпотентно)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/dev-recover.sh
+
+doctor:        ## Health-check конвейера по ДАННЫМ (топики, лаг, свежесть, квота)
+	./scripts/doctor.sh
 
 dashboard:     ## Живой дашборд наблюдаемости без Docker/Grafana (:9107)
 	python3 scripts/dashboard.py

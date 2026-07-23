@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 import joblib
+import requests
 from prometheus_client import Counter, Gauge, start_http_server
 
 from registry import registry_from_env
@@ -108,6 +109,63 @@ def _check_stall(n_matches: int) -> None:
                     "rate limit OpenDota, упавший коллектор/экстрактор.")
 
 
+# Реплейный путь (инцидент №6 HANDOFF): при потере Kafka-топиков ReplayEvents
+# перестаёт наполняться, но витрина продолжает расти за счёт JSON-пути —
+# stall-алерт выше этого НЕ ловит. Свежесть реплейной таблицы проверяется
+# отдельно; алерт один на эпизод, с сообщением о восстановлении.
+_replay_alerted = False
+REPLAY_STALLED = Gauge(
+    "training_replay_path_stalled",
+    "1 — ReplayEvents не пополняется дольше REPLAY_STALL_ALERT_H")
+
+
+def _replay_freshness_ts() -> float | None:
+    """Unix-время последней вставки в ReplayEvents (0.0 — таблица пуста);
+    None — ClickHouse недоступен: это отдельная проблема, не алертим."""
+    try:
+        r = requests.post(
+            os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
+            params={"database": os.getenv("CLICKHOUSE_DB", "manta")},
+            headers={
+                "X-ClickHouse-User": os.getenv("CLICKHOUSE_USER", "dota"),
+                "X-ClickHouse-Key": os.getenv("CLICKHOUSE_PASSWORD",
+                                              "dota_dev_password")},
+            data="SELECT toUnixTimestamp(max(ingested_at)) FROM ReplayEvents",
+            timeout=10)
+        r.raise_for_status()
+        return float(r.text.strip() or 0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _check_replay_stall() -> None:
+    global _replay_alerted
+    ts = _replay_freshness_ts()
+    if ts is None:
+        return
+    age_h = (time.time() - ts) / 3600
+    stall_h = float(os.getenv("REPLAY_STALL_ALERT_H", "6"))
+    if ts > 0 and age_h < stall_h:
+        if _replay_alerted and _notifier.enabled:
+            _notifier.send("✅ <b>Manta</b>: реплейный путь снова пишет "
+                           "ReplayEvents")
+        _replay_alerted = False
+        REPLAY_STALLED.set(0)
+        return
+    REPLAY_STALLED.set(1)
+    if not _replay_alerted:
+        _replay_alerted = True
+        what = ("таблица ReplayEvents пуста — путь никогда не писал"
+                if ts == 0 else f"последняя вставка {age_h:.0f} ч назад")
+        logger.warning("реплейный путь стоит: %s", what)
+        if _notifier.enabled:
+            _notifier.send(
+                f"⚠️ <b>Manta</b>: реплейный путь стоит — {what}.\n"
+                "Витрина может расти по JSON-пути и маскировать это. "
+                "Диагностика: make doctor; частая причина — потерянные "
+                "Kafka-топики (docs/runbooks.md).")
+
+
 def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     """Одна итерация; возвращает статус для лога/теста."""
     global _last_trained_n
@@ -118,6 +176,7 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
         os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
     DATASET_MATCHES.set(ds.n_matches)
     _check_stall(ds.n_matches)
+    _check_replay_stall()
     if ds.n_matches < min_total:
         logger.info("матчей %d < %d — рано обучать", ds.n_matches, min_total)
         return "not-enough-data"

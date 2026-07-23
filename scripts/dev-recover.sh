@@ -18,7 +18,10 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 COMPOSE="docker compose -f deployments/docker-compose.yml"
 TRAIN_ENV="${MANTA_TRAIN_ENV:-}"
-LOG_DIR="${MANTA_LOG_DIR:-/tmp}"
+# Логи — вне /tmp (спринт 49, инцидент №8: /tmp гибнет при рестарте WSL,
+# истории для диагностики не остаётся).
+LOG_DIR="${MANTA_LOG_DIR:-$HOME/manta-logs}"
+mkdir -p "$LOG_DIR"
 
 say()  { printf '>> %s\n' "$*"; }
 skip() { printf '   %s — уже работает, пропуск\n' "$*"; }
@@ -60,6 +63,17 @@ for _ in $(seq 1 60); do
     docker exec manta-kafka-1 kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 && break
     sleep 2
 done
+
+# 2b. Гарантии данных (спринт 49): топики и миграции — идемпотентно на
+# КАЖДОМ запуске. Инцидент №6: volume Kafka пересоздался, топики пропали,
+# реплейный путь молча стоял неделями; инцидент №7: непрогнанная миграция
+# после git pull. Оба класса проблем recover теперь закрывает сам.
+say "топики Kafka (create --if-not-exists)"
+./infra/kafka/create-topics.sh >/dev/null
+say "миграции Postgres (только новые, журнал SchemaMigrations)"
+./scripts/pg-migrate.sh | sed 's/^/   /'
+say "миграции ClickHouse (все файлы идемпотентны)"
+make -s migrate-ch >/dev/null
 
 # 3. Бинарники (пересборка только если отсутствуют) ----------------------------
 if [ ! -x apps/replay-parser/build/demoinfo ]; then
@@ -217,3 +231,9 @@ matches=$(echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures
     curl -s "http://localhost:8123/?database=manta" \
         -H "X-ClickHouse-User: dota" -H "X-ClickHouse-Key: dota_dev_password" --data-binary @- || echo '?')
 printf '   %-18s %s\n' "матчей в витрине" "$matches"
+
+# 7. Doctor: здоровье по ДАННЫМ, а не по pgrep (свежие сервисы ещё не успели
+# ничего записать — поэтому не роняем recover, только показываем).
+echo
+say "doctor (health-check по данным; отдельно: make doctor)"
+./scripts/doctor.sh || true
