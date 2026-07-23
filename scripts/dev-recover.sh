@@ -86,6 +86,25 @@ if [ ! -x /tmp/parser-svc ]; then
     (cd apps/replay-parser/svc && go build -o /tmp/parser-svc ./cmd/parser-svc)
 fi
 
+# 3b. Python-зависимости (спринт 53: чистая машина — recover запускал
+# сервисы без единого pip install, все падали ModuleNotFoundError молча
+# в лог). Штамп по хэшу requirements.txt — pip install при уже
+# удовлетворённых зависимостях быстрый, но не бесплатный на 8 сервисах.
+say "python-зависимости сервисов (пропуск уже установленных)"
+command -v pip3 >/dev/null || sudo apt-get install -y python3-pip
+STAMP_DIR="$LOG_DIR/.pip-stamps"
+mkdir -p "$STAMP_DIR"
+for req in apps/*/requirements.txt; do
+    svc=$(basename "$(dirname "$req")")
+    stamp="$STAMP_DIR/$svc.sha256"
+    hash=$(sha256sum "$req" | cut -d' ' -f1)
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$hash" ]; then
+        continue
+    fi
+    say "  pip install: $svc"
+    pip3 install --break-system-packages -q -r "$req" && echo "$hash" > "$stamp"
+done
+
 # 4. Хост-сервисы конвейера ----------------------------------------------------
 if ! pgrep -f "^/tmp/parser-svc" >/dev/null; then
     say "запускаю parser-svc (лог: $LOG_DIR/parser-svc.log)"
