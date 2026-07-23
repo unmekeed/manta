@@ -25,13 +25,8 @@ migrate: migrate-pg migrate-ch  ## Применить все миграции
 migrate-pg:    ## Миграции PostgreSQL (только новые; журнал SchemaMigrations)
 	./scripts/pg-migrate.sh
 
-migrate-ch:    ## Миграции ClickHouse (все файлы по порядку)
-	@for f in infra/migrations/clickhouse/*.sql; do \
-		echo ">> $$f"; \
-		docker exec -i manta-clickhouse-1 clickhouse-client \
-			--user dota --password dota_dev_password --multiquery \
-			< $$f || exit 1; \
-	done
+migrate-ch:    ## Миграции ClickHouse (только новые; журнал SchemaMigrations)
+	./scripts/ch-migrate.sh
 
 ## Код -------------------------------------------------------------------------
 

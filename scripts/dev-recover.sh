@@ -72,8 +72,8 @@ say "топики Kafka (create --if-not-exists)"
 ./infra/kafka/create-topics.sh >/dev/null
 say "миграции Postgres (только новые, журнал SchemaMigrations)"
 ./scripts/pg-migrate.sh | sed 's/^/   /'
-say "миграции ClickHouse (все файлы идемпотентны)"
-make -s migrate-ch >/dev/null
+say "миграции ClickHouse (только новые, журнал SchemaMigrations)"
+./scripts/ch-migrate.sh | sed 's/^/   /'
 
 # 3. Бинарники (пересборка только если отсутствуют) ----------------------------
 if [ ! -x apps/replay-parser/build/demoinfo ]; then

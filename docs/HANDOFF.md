@@ -1,4 +1,4 @@
-# Manta — сводка для нового чата (обновлено 2026-07-23, после спринта 52)
+# Manta — сводка для нового чата (обновлено 2026-07-23, после спринта 54)
 
 Manta — платформа аналитики Dota 2: сбор матчей → парсинг реплеев →
 фичи → ML-модели (Win Probability, Death-Risk) → отчёты с разбором
@@ -164,6 +164,16 @@ dota_dev_password. Метрики Prometheus: 9101–9114; живой дашбо
     пункт диагностики; лечение: wsl --shutdown из PowerShell).
 12. **Файлы >30 МиБ** через чат не проходят — резать: split -b 25M,
     собирать: cat parts > file (Windows: cmd /c copy /b).
+13. **CH-миграция 002 стирала ReplayEvents на КАЖДОМ recover** (спринт
+    54): 002 делает `DROP TABLE IF EXISTS ReplayEvents` (одноразовая
+    правка схемы), а migrate-ch прогонял все файлы каждый recover — combat-
+    лог обнулялся при каждом запуске. PositionSnapshots/EconomyTimeline/
+    витрина создаются через IF NOT EXISTS без DROP — уцелевали, поэтому
+    терялся именно ReplayEvents (обучение Death-Risk/Laning, атрибуция
+    ошибок). Симптом: сразу после recover doctor «ReplayEvents ПУСТА» при
+    живом parser-svc и непересозданном контейнере ClickHouse. Решение:
+    CH-миграции получили журнал manta.SchemaMigrations (scripts/ch-migrate.sh),
+    как PG в спринте 49 — каждый файл ровно один раз.
 
 Главный мета-урок: «процесс жив» ≠ «конвейер работает». Проверять
 надо ДАННЫЕ (свежесть ingested_at, лаг консьюмер-групп, рост таблиц),
