@@ -63,6 +63,19 @@ similarity/draft/coach/feature-store, report-generator, auto-train →
 После recover открывать: веб-интерфейс http://localhost:5173, живой
 дашборд http://localhost:9107.
 
+**Обновление кода**: recover не перезапускает уже живые процессы (`if !
+pgrep`), поэтому после `git pull` они останутся на старом коде — всё
+«up», а нового поведения нет. Штатный порядок (подробности —
+`docs/runbooks.md` §5):
+
+```bash
+make stop        # только хостовые процессы; контейнеры и данные не трогаются
+git pull origin main
+make migrate
+MANTA_TRAIN_ENV=~/manta-train.env make recover
+make doctor
+```
+
 Проверить здоровье конвейера в любой момент — по ДАННЫМ, а не по процессам
 (топики, лаг консьюмер-групп, свежесть таблиц, квота OpenDota, часы,
 миграции):

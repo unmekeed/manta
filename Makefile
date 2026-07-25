@@ -4,6 +4,7 @@ GO_SERVICES := apps/api-gateway apps/replay-parser/svc
 COMPOSE     := docker compose -f deployments/docker-compose.yml
 
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
+.PHONY: recover stop
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -142,6 +143,9 @@ ml-audit:      ## Аудит датасета: сдвиг приора, длит
 
 recover:       ## Восстановить dev-стек после перезапуска среды (идемпотентно)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/dev-recover.sh
+
+stop:          ## Остановить хостовые процессы (контейнеры и данные не трогает)
+	./scripts/dev-stop.sh
 
 doctor:        ## Health-check конвейера по ДАННЫМ (топики, лаг, свежесть, квота)
 	./scripts/doctor.sh

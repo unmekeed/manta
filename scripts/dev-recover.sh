@@ -186,7 +186,9 @@ else
     skip "ml-service"
 fi
 
-if ! pgrep -f "python3 -u -m serve" >/dev/null; then
+# Якорь на конец: без него шаблон совпадает с serve_draft/serve_coach/
+# serve_features, и similarity молча не поднимался бы, пока жив любой из них.
+if ! pgrep -f "python3 -u -m serve$" >/dev/null; then
     say "запускаю similarity (gRPC :50052, лог: $LOG_DIR/similarity.log)"
     (cd apps/similarity && PYTHONPATH=src \
         nohup python3 -u -m serve >"$LOG_DIR/similarity.log" 2>&1 &)
@@ -272,7 +274,7 @@ check timeline-coll. "collector --source opendota-timeline --interval"
 check pro-timeline "collector --source opendota-timeline-pro"
 check pro-replay "collector --source opendota --interval"
 check ml-service "python3 -u -m app"
-check similarity "python3 -u -m serve"
+check similarity "python3 -u -m serve$"
 check draft "python3 -u -m serve_draft"
 check coach "python3 -u -m serve_coach"
 check feature-store "python3 -u -m serve_features"
