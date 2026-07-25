@@ -9,9 +9,13 @@
 # а с ним обучающие данные Death-Risk/Laning и атрибуция ошибок.
 #
 # Решение как у PG (scripts/pg-migrate.sh): каждый файл применяется РОВНО
-# один раз, применённые запоминаются в manta.SchemaMigrations. На уже
-# развёрнутой базе без журнала (признак: таблица ReplayEvents существует)
-# все текущие файлы помечаются применёнными без прогона — схема уже финальна.
+# один раз, применённые запоминаются в manta.SchemaMigrations.
+#
+# Baseline на развёрнутой базе без журнала помечает применёнными ТОЛЬКО
+# разрушительные файлы (с DROP TABLE) — их повторный прогон и есть баг.
+# Остальные (CREATE/ALTER ... IF NOT EXISTS) идемпотентны и прогоняются
+# честно: машина, отставшая на несколько миграций, доедет до актуальной
+# схемы, а не получит фиктивно «применённые» записи в журнале.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,11 +34,12 @@ n_applied=$(q "SELECT count() FROM SchemaMigrations")
 has_re=$(q "SELECT count() FROM system.tables
             WHERE database = '$CH_DB' AND name = 'ReplayEvents'")
 if [ "$n_applied" = "0" ] && [ "$has_re" != "0" ]; then
-    echo ">> CH: развёрнутая база без журнала — baseline текущих миграций"
+    echo ">> CH: развёрнутая база без журнала — baseline разрушительных миграций"
     for f in infra/migrations/clickhouse/*.sql; do
+        grep -q "DROP TABLE" "$f" || continue
         b=$(basename "$f")
         q "INSERT INTO SchemaMigrations (filename) VALUES ('$b')"
-        echo "   baseline $b"
+        echo "   baseline $b (содержит DROP — повторно не прогоняем)"
     done
 fi
 
