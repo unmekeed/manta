@@ -16,7 +16,7 @@ import numpy as np
 import requests
 
 from calibration import register_legacy_aliases
-from training.dataset import row_to_features
+from training.dataset import match_rows_sql, row_to_features
 
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "win_probability.pkl"
 
@@ -48,11 +48,8 @@ class WinProbability:
             ch_url,
             params={"database": db, "default_format": "JSONEachRow",
                     "param_match_id": str(match_id)},
-            data="SELECT game_time, networth_diff, networth_total, xp_diff,"
-                 "       kills_radiant, kills_dire, position_advance,"
-                 "       alive_diff, towers_diff, rax_diff"
-                 "  FROM MatchTimelineFeatures FINAL"
-                 " WHERE match_id = {match_id:UInt64} ORDER BY game_time",
+            data=match_rows_sql(where="WHERE match_id = {match_id:UInt64}")
+                 + " ORDER BY game_time",
             headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
             timeout=60)
         resp.raise_for_status()

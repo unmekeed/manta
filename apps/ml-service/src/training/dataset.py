@@ -166,6 +166,40 @@ class Dataset:
         return self.X[va], self.y[va], self.groups[va], "valid"
 
 
+# Колонки витрины, из которых row_to_features собирает вектор (draft_prior
+# лежит отдельно — в MatchDraft, подтягивается джойном).
+#
+# Единый источник истины для ЛЮБОГО чтения витрины под инференс. До трека F
+# predictors/explain/report-generator держали каждый свой список из 10
+# колонок; после расширения FEATURES до 22 такие читатели молча кормили бы
+# модель NaN вместо реальных значений, а на 22-фичном артефакте Predict
+# падал бы «missing features». Списку положено быть одним.
+ROW_COLUMNS = [
+    "game_time", "networth_diff", "networth_total", "xp_diff",
+    "kills_radiant", "kills_dire", "position_advance", "alive_diff",
+    "towers_diff", "rax_diff",
+    # Трек F (миграция 012)
+    "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
+    "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
+    "runes_diff", "neutral_tier_diff", "levels_diff",
+]
+
+
+def match_rows_sql(extra: tuple[str, ...] = (), where: str = "") -> str:
+    """SELECT поминутных строк витрины со ВСЕМИ колонками row_to_features.
+
+    `extra` — дополнительные колонки витрины (например radiant_win, tier),
+    `where` — условие внутри подзапроса (например
+    "WHERE match_id = {match_id:UInt64}").
+    """
+    cols = ", ".join(("match_id", *ROW_COLUMNS, *extra))
+    return (f"SELECT t.*, d.prior AS draft_prior"
+            f"  FROM (SELECT {cols}"
+            f"          FROM MatchTimelineFeatures FINAL {where}) AS t"
+            f"  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
+            f"    USING (match_id)")
+
+
 def row_to_features(row: dict) -> list[float]:
     kills_r = float(row["kills_radiant"])
     kills_d = float(row["kills_dire"])
@@ -214,19 +248,8 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
     resp = requests.post(
         url,
         params={"database": database, "default_format": "JSONEachRow"},
-        data="SELECT t.*, d.prior AS draft_prior"
-             "  FROM (SELECT match_id, game_time, networth_diff,"
-             "               networth_total, xp_diff, kills_radiant,"
-             "               kills_dire, position_advance, alive_diff,"
-             "               towers_diff, rax_diff, radiant_win, tier, patch,"
-             "               roshan_diff, aegis_alive, buybacks_diff,"
-             "               first_blood, item_value_diff, key_items_diff,"
-             "               obs_wards_diff, sen_wards_diff, runes_diff,"
-             "               neutral_tier_diff, levels_diff"
-             "          FROM MatchTimelineFeatures FINAL) AS t"
-             "  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
-             "    USING (match_id)"
-             " ORDER BY match_id, game_time",
+        data=match_rows_sql(extra=("radiant_win", "tier", "patch"))
+             + " ORDER BY match_id, game_time",
         headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
         timeout=120,
     )

@@ -16,7 +16,7 @@ import numpy as np
 import requests
 
 from predictors.win_probability import DEFAULT_MODEL, WinProbability
-from training.dataset import row_to_features
+from training.dataset import match_rows_sql, row_to_features
 
 from .winprob_shap import contributions, top_drivers
 
@@ -34,11 +34,8 @@ def main() -> int:
         params={"database": os.getenv("CLICKHOUSE_DB", "manta"),
                 "default_format": "JSONEachRow",
                 "param_match_id": str(args.match_id)},
-        data="SELECT game_time, networth_diff, networth_total, xp_diff,"
-             "       kills_radiant, kills_dire, position_advance,"
-             "       alive_diff, towers_diff, rax_diff"
-             "  FROM MatchTimelineFeatures FINAL"
-             " WHERE match_id = {match_id:UInt64} ORDER BY game_time",
+        data=match_rows_sql(where="WHERE match_id = {match_id:UInt64}")
+             + " ORDER BY game_time",
         headers={"X-ClickHouse-User": os.getenv("CLICKHOUSE_USER", "dota"),
                  "X-ClickHouse-Key": os.getenv("CLICKHOUSE_PASSWORD",
                                                "dota_dev_password")},

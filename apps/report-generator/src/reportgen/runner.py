@@ -39,6 +39,27 @@ PRODUCER_NAME = "report-generator@0.1.0"
 TOPIC_IN = "features.calculated"
 TOPIC_OUT = "report.generated"
 
+# Фичи WP, которые берутся из витрины как есть (остальные — производные:
+# kills_diff/kills_total из kills_radiant/kills_dire, networth_rel из
+# networth_diff/networth_total). Порядок неважен — MLService принимает
+# словарь по именам, — но ПОЛНОТА важна: сервер требует все имена из
+# model.features и отвечает INVALID_ARGUMENT «missing features», если
+# чего-то нет. Зеркало training.dataset.FEATURES из ml-service (импорта
+# между сервисами нет); при добавлении фичи в модель дописывать сюда.
+WP_PASSTHROUGH_FEATURES = [
+    "position_advance", "alive_diff", "towers_diff", "rax_diff",
+    # Трек F (миграция 012 + MatchDraft)
+    "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
+    "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
+    "runes_diff", "neutral_tier_diff", "levels_diff", "draft_prior",
+]
+
+# Колонки витрины для _timeline_rows: сырьё под WP_PASSTHROUGH_FEATURES и
+# производные. draft_prior живёт в MatchDraft — подтягивается джойном.
+WP_ROW_COLUMNS = ["game_time", "networth_diff", "networth_total", "xp_diff",
+                  "kills_radiant", "kills_dire"] + [
+    f for f in WP_PASSTHROUGH_FEATURES if f != "draft_prior"]
+
 
 @dataclass
 class ReportgenConfig:
@@ -85,13 +106,15 @@ class ReportGenerator:
         return [json.loads(line) for line in resp.text.splitlines() if line]
 
     def _timeline_rows(self, match_id: int) -> list[dict]:
+        cols = ", ".join(WP_ROW_COLUMNS)
         return self._ch_select(
-            "SELECT game_time, networth_diff, networth_total,"
-            "       xp_diff, kills_radiant,"
-            "       kills_dire, position_advance, alive_diff,"
-            "       towers_diff, rax_diff, radiant_win"
-            "  FROM MatchTimelineFeatures FINAL"
-            " WHERE match_id = {match_id:UInt64} ORDER BY game_time", match_id)
+            f"SELECT t.*, d.prior AS draft_prior"
+            f"  FROM (SELECT match_id, {cols}, radiant_win"
+            f"          FROM MatchTimelineFeatures FINAL"
+            f"         WHERE match_id = {{match_id:UInt64}}) AS t"
+            f"  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
+            f"    USING (match_id)"
+            f" ORDER BY game_time", match_id)
 
     def _kill_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
@@ -196,24 +219,27 @@ class ReportGenerator:
             v = r.get(key)
             return float(v) if v is not None else float("nan")
 
+        def values(r: dict) -> dict:
+            kills_r = float(r["kills_radiant"])
+            kills_d = float(r["kills_dire"])
+            # Полный набор WP_FEATURES: ml-service требует ВСЕ имена из
+            # model.features, поэтому отдаём и те, которых у строки нет —
+            # NaN, а не пропуск ключа.
+            v = {"game_time": float(r["game_time"]),
+                 "networth_diff": float(r["networth_diff"]),
+                 "xp_diff": float(r["xp_diff"]),
+                 "kills_diff": kills_r - kills_d,
+                 "kills_total": kills_r + kills_d,
+                 "networth_rel": _rel(r)}
+            for name in WP_PASSTHROUGH_FEATURES:
+                v[name] = _f(r, name)
+            return v
+
         def frames():
             for r in rows:
-                kills_r = float(r["kills_radiant"])
-                kills_d = float(r["kills_dire"])
                 yield services_pb2.FeatureFrame(
                     match_id=match_id, game_time=int(r["game_time"]),
-                    features=services_pb2.FeatureVector(values={
-                        "game_time": float(r["game_time"]),
-                        "networth_diff": float(r["networth_diff"]),
-                        "xp_diff": float(r["xp_diff"]),
-                        "kills_diff": kills_r - kills_d,
-                        "kills_total": kills_r + kills_d,
-                        "position_advance": _f(r, "position_advance"),
-                        "alive_diff": _f(r, "alive_diff"),
-                        "towers_diff": _f(r, "towers_diff"),
-                        "rax_diff": _f(r, "rax_diff"),
-                        "networth_rel": _rel(r),
-                    }))
+                    features=services_pb2.FeatureVector(values=values(r)))
 
         wp, drivers = [], []
         for p in self.ml.PredictStream(frames()):
@@ -222,21 +248,9 @@ class ReportGenerator:
                              "value": round(c.contribution, 4)}
                             for c in p.top_contributions])
         # Версию модели узнаём отдельным Predict по последней точке.
-        last = rows[-1]
         resp = self.ml.Predict(services_pb2.PredictRequest(
             match_id=match_id, model_name="win_probability",
-            features=services_pb2.FeatureVector(values={
-                "game_time": float(last["game_time"]),
-                "networth_diff": float(last["networth_diff"]),
-                "xp_diff": float(last["xp_diff"]),
-                "kills_diff": float(last["kills_radiant"]) - float(last["kills_dire"]),
-                "kills_total": float(last["kills_radiant"]) + float(last["kills_dire"]),
-                "position_advance": _f(last, "position_advance"),
-                "alive_diff": _f(last, "alive_diff"),
-                "towers_diff": _f(last, "towers_diff"),
-                "rax_diff": _f(last, "rax_diff"),
-                "networth_rel": _rel(last),
-            })))
+            features=services_pb2.FeatureVector(values=values(rows[-1]))))
         return wp, drivers, resp.model_version
 
     # -- генерация ---------------------------------------------------------------
