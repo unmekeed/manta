@@ -152,6 +152,12 @@ dataset-import: ## Идемпотентно влить слепок: make datase
 backup:        ## Слепок датасета в MANTA_BACKUP_DIR с ротацией KEEP_DAYS (E1)
 	./scripts/backup.sh
 
+loadtest:      ## Нагрузочные тесты NFR-PERF/SCAL (D5): make loadtest ARGS="--only rest"
+	python3 scripts/loadtest.py $(ARGS)
+
+security-scan: ## SAST/SCA + поиск секретов и дефолтных кредов (D6)
+	./scripts/security-scan.sh
+
 stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
 	$(COMPOSE) --profile apps up -d --build
 

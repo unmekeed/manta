@@ -63,8 +63,8 @@ Index в отчётах, шардированный сбор на несколь
 | D2 | ~~Авточистка версий реестра~~ | ✅ спринт 39: cleanup() — последние N (REGISTRY_KEEP_LAST=10) + все продвигавшиеся (история промоушенов) |
 | D3 | ~~CI: тесты всех Python-сервисов~~ | ✅ спринт 39: + data-collector, similarity, draft, coach (report-generator уже был) |
 | D4 | ~~Runbooks инцидентов~~ | ✅ спринт 39: docs/runbooks.md + алерт «витрина не растёт» (DATASET_STALL_ALERT_H) + метрика/лог 429 OpenDota |
-| D5 | Нагрузочные тесты NFR-PERF/SCAL | Гейт Фазы 4 |
-| D6 | Security review (SAST/SCA, секреты, GDPR) | Гейт Фазы 4; из практики: секреты уже вынесены в env, `.env` в gitignore |
+| D5 | ~~Нагрузочные тесты NFR-PERF/SCAL~~ | ✅ спринт 56: scripts/loadtest.py (make loadtest) — все 5 NFR прошли: PERF-01 3.5с (порог 10), PERF-02 p95 8мс (2с), PERF-03 p95 10/p99 17мс (300/800), PERF-04 4136 реплеев/ч (2000), SCAL-01 отсечение партиций на 5М строк |
+| D6 | ~~Security review (SAST/SCA, секреты, GDPR)~~ | ✅ спринт 57: docs/security-review.md + scripts/security-scan.sh (make security-scan, джоба CI). Секретов в дереве и истории нет; Go-модули обновлены (x/net, x/text, x/crypto, pgx); pip-audit/npm audit чисты. Открыто: stdlib Go 1.24.7 (нужен тулчейн 1.25.12+), JWT/RBAC, TLS, GDPR-эндпоинты — гейты публичного релиза |
 
 ## Трек E — окружения
 
@@ -88,9 +88,13 @@ api-gateway (:8080), веб-интерфейс (:5173) и дашборд (:9107)
 Спринты 53–54 ✅ (эксплуатация): recover ставит python-зависимости;
 журнал CH-миграций — 002 больше не стирает ReplayEvents каждый recover.
 Спринт 55 (E1) ✅: автозапуск на Windows + ежедневный бэкап с ротацией.
+Спринты 56–57 (D5/D6) ✅: нагрузочные тесты — все NFR-PERF/SCAL в пределах
+порогов; security review — критичных незакрытых находок нет.
+
+Трек D закрыт целиком. Осталось:
 
 1. **A10**: Roshan/aegis/buyback/hero-фичи + Optuna (порог 5000+ матчей).
 2. **B4**: публичный релиз Win Probability — технические критерии (B1+B2)
-   выполнены, решение за владельцем.
-3. **D5/D6**: нагрузочные тесты (NFR-PERF/SCAL) и security review (SAST/SCA,
-   секреты, GDPR) — гейты Фазы 4.
+   выполнены; перед публикацией обязательны JWT/RBAC, TLS и GDPR-эндпоинты
+   (docs/security-review.md §4–6). Решение за владельцем.
+3. Обновить Go до 1.25.12+ (закрывает stdlib-уязвимости, S2 обзора).
