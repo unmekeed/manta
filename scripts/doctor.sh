@@ -137,12 +137,21 @@ else
     done
     ok "PG-миграции: журнал полон"
 fi
-# CH-миграции журнала не ведут (все идемпотентны) — проверяем маркер
-# ПОСЛЕДНЕЙ (010: patch). При добавлении миграции обновить маркер.
-sentinel=$(ch "SELECT count() FROM system.columns WHERE database = '$CH_DB'
-               AND table = 'MatchTimelineFeatures' AND name = 'patch'")
-if [ "$sentinel" = "1" ]; then ok "CH-миграции: маркер 010 на месте"
-else fail "CH-миграции отстают (нет колонки patch) — make migrate"
+# CH-миграции с спринта 54 ведут журнал manta.SchemaMigrations — сверяем
+# его с каталогом файлов, как для PG. Раньше здесь был захардкоженный
+# маркер последней миграции: его требовалось обновлять руками, и он,
+# конечно, отстал (остался на 010, когда появились 011 и 012).
+ch_applied=$(ch "SELECT filename FROM SchemaMigrations")
+if [ -z "$ch_applied" ]; then
+    fail "журнал CH SchemaMigrations пуст/недоступен — make migrate"
+else
+    ch_missing=0
+    for f in infra/migrations/clickhouse/*.sql; do
+        b=$(basename "$f")
+        grep -qx "$b" <<<"$ch_applied" || {
+            fail "CH-миграция $b не применена — make migrate"; ch_missing=1; }
+    done
+    [ "$ch_missing" -eq 0 ] && ok "CH-миграции: журнал полон"
 fi
 
 echo

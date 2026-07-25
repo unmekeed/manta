@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 import psycopg
 import requests
 
+from .rawstore import RawMatchStore
+from .signals import draft_row, event_rows
+
 logger = logging.getLogger("collector.timeline")
 
 FEATURE_VERSION = "opendota-json@3"
@@ -30,7 +33,20 @@ MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
                "xp_diff",
                "kills_radiant", "kills_dire", "position_advance",
                "alive_diff", "towers_diff", "rax_diff",
-               "radiant_win", "tier", "patch", "feature_version"]
+               "radiant_win", "tier", "patch", "feature_version",
+               # трек F: объективы, предметы, вижн, нейтралки
+               "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
+               "item_value_diff", "key_items_diff", "obs_wards_diff",
+               "sen_wards_diff", "runes_diff", "neutral_tier_diff",
+               "levels_diff"]
+
+# Фичи трека F, которых может не быть (битый JSON) — пишем nan.
+F_TRACK_COLUMNS = MTF_COLUMNS[-11:]
+
+DRAFT_COLUMNS = ["match_id", "patch", "tier", "radiant_win", "radiant_heroes",
+                 "dire_heroes", "bans", "first_pick_team", "source"]
+EVENT_COLUMNS = ["match_id", "game_time", "kind", "team", "player_slot",
+                 "subtype", "x", "y"]
 
 
 @dataclass
@@ -53,6 +69,9 @@ class TimelineCollector:
         self._cfg = cfg
         self._source = source
         self._db = psycopg.connect(cfg.postgres_dsn, autocommit=True)
+        # Хранилище сырого JSON (трек F): выключается RAW_MATCH_STORE=0,
+        # недоступный S3 не мешает сбору — только предупреждение.
+        self._raw_store = RawMatchStore.from_env()
 
     def close(self) -> None:
         self._db.close()
@@ -107,8 +126,9 @@ class TimelineCollector:
 
         lines = []
         for r in rows:
-            full = {**r, "tier": tier, "patch": patch,
-                    "feature_version": FEATURE_VERSION}
+            full = {c: float("nan") for c in F_TRACK_COLUMNS}
+            full.update({**r, "tier": tier, "patch": patch,
+                         "feature_version": FEATURE_VERSION})
             lines.append("\t".join(fmt(full[c]) for c in MTF_COLUMNS))
         query = (f"INSERT INTO MatchTimelineFeatures ({', '.join(MTF_COLUMNS)}) "
                  f"FORMAT TabSeparated")
@@ -121,6 +141,58 @@ class TimelineCollector:
             timeout=60)
         resp.raise_for_status()
 
+    def _ch_insert(self, table: str, columns: list[str],
+                   rows: list[dict]) -> None:
+        """Вставка в ClickHouse в TabSeparated. Массивы (Array(String))
+        сериализуются в литерал ['a','b'] — формат понимает их сам."""
+        if not rows:
+            return
+
+        def fmt(v) -> str:
+            if isinstance(v, float) and math.isnan(v):
+                return "nan"
+            if isinstance(v, list):
+                return "[" + ",".join("'" + str(x).replace("'", "\\'") + "'"
+                                      for x in v) + "]"
+            return str(v)
+
+        lines = ["\t".join(fmt(r.get(c, "")) for c in columns) for r in rows]
+        query = f"INSERT INTO {table} ({', '.join(columns)}) FORMAT TabSeparated"
+        resp = requests.post(
+            self._cfg.clickhouse_url,
+            params={"database": self._cfg.clickhouse_db, "query": query},
+            data=("\n".join(lines) + "\n").encode(),
+            headers={"X-ClickHouse-User": self._cfg.clickhouse_user,
+                     "X-ClickHouse-Key": self._cfg.clickhouse_password},
+            timeout=60)
+        resp.raise_for_status()
+
+    def _store_signals(self, tm) -> None:
+        """Трек F: драфт, события и сырой JSON матча. Сбой здесь НЕ должен
+        рушить сбор — витрина уже записана и она первична."""
+        raw = getattr(tm, "raw", None) or {}
+        if not raw:
+            return
+        try:
+            d = draft_row(raw)
+            if d:
+                d["tier"] = tm.tier
+                self._ch_insert("MatchDraft", DRAFT_COLUMNS, [d])
+            evs = event_rows(raw)
+            if evs:
+                self._ch_insert("MatchEvents", EVENT_COLUMNS, evs)
+        except Exception:  # noqa: BLE001
+            logger.warning("матч %d: сигналы не записаны", tm.match_id,
+                           exc_info=True)
+        # Сырой JSON — страховка на будущее: любая новая фича бэкфиллится
+        # без единого вызова API (квота — главный дефицит проекта).
+        if self._raw_store is not None:
+            try:
+                self._raw_store.put(tm.match_id, raw)
+            except Exception:  # noqa: BLE001
+                logger.warning("матч %d: сырой JSON не сохранён", tm.match_id,
+                               exc_info=True)
+
     # -- цикл -----------------------------------------------------------------
 
     def collect_once(self) -> int:
@@ -128,6 +200,7 @@ class TimelineCollector:
         processed = 0
         for tm in self._source.fetch_new(skip=self._is_collected):
             self._insert_rows(tm.rows, tm.tier, patch=tm.patch)
+            self._store_signals(tm)
             self._mark_collected(tm.match_id, tm.source_cursor)
             processed += 1
             logger.info("таймлайн матча %d: %d строк (tier=%s)",

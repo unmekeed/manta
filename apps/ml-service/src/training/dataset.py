@@ -28,12 +28,35 @@ FEATURES = [
     "towers_diff",        # снесённые башни R−D накопительно (миграция 008)
     "rax_diff",           # снесённые бараки R−D накопительно (миграция 008)
     "networth_rel",       # доля преимущества: networth_diff/networth_total
+    # Трек F (миграция 012). Все NaN у матчей, собранных до трека —
+    # LightGBM обрабатывает пропуск нативно.
+    "roshan_diff",        # убийства Рошана R−D накопительно (F2)
+    "aegis_alive",        # у кого сейчас аегис: −1/0/+1 (F2)
+    "buybacks_diff",      # потрачено бэйбеков R−D (F2)
+    "first_blood",        # сторона первой крови (F2)
+    "item_value_diff",    # стоимость закупа R−D (F4)
+    "key_items_diff",     # взято ключевых предметов R−D (F4)
+    "obs_wards_diff",     # активных обс-вардов R−D (F5)
+    "sen_wards_diff",     # поставлено сентри R−D (F5)
+    "runes_diff",         # подобрано рун R−D (F5)
+    "neutral_tier_diff",  # сумма тиров нейтралок R−D (F6)
+    "levels_diff",        # сумма уровней героев R−D (F6)
+    "draft_prior",        # P(win) по составам, Draft Prior Model (F3)
 ]
 
 # Фичи, меняющие знак при зеркалировании сторон Radiant↔Dire (все
 # разностные и территориальные). game_time и kills_total симметричны.
 MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
-                 "alive_diff", "towers_diff", "rax_diff", "networth_rel"}
+                 "alive_diff", "towers_diff", "rax_diff", "networth_rel",
+                 # Трек F: все разностные и знаковые фичи меняют знак.
+                 "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
+                 "item_value_diff", "key_items_diff", "obs_wards_diff",
+                 "sen_wards_diff", "runes_diff", "neutral_tier_diff",
+                 "levels_diff"}
+
+# draft_prior — вероятность, а не разность: при зеркалировании сторон
+# она переходит в 1 − p, а не в −p. Обрабатывается отдельно в mirror_xy.
+MIRROR_COMPLEMENT = {"draft_prior"}
 
 
 PRO_TIER = "Professional"
@@ -51,6 +74,8 @@ def mirror_xy(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     for i, f in enumerate(FEATURES):
         if f in MIRROR_NEGATE:
             Xm[:, i] = -Xm[:, i]
+        elif f in MIRROR_COMPLEMENT:
+            Xm[:, i] = 1.0 - Xm[:, i]
     return np.vstack([X, Xm]), np.concatenate([y, 1 - y])
 
 
@@ -169,6 +194,18 @@ def row_to_features(row: dict) -> list[float]:
         _f("towers_diff"),
         _f("rax_diff"),
         rel,
+        _f("roshan_diff"),
+        _f("aegis_alive"),
+        _f("buybacks_diff"),
+        _f("first_blood"),
+        _f("item_value_diff"),
+        _f("key_items_diff"),
+        _f("obs_wards_diff"),
+        _f("sen_wards_diff"),
+        _f("runes_diff"),
+        _f("neutral_tier_diff"),
+        _f("levels_diff"),
+        _f("draft_prior"),
     ]
 
 
@@ -177,11 +214,19 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
     resp = requests.post(
         url,
         params={"database": database, "default_format": "JSONEachRow"},
-        data="SELECT match_id, game_time, networth_diff, networth_total,"
-             "       xp_diff, kills_radiant, kills_dire, position_advance,"
-             "       alive_diff, towers_diff, rax_diff,"
-             "       radiant_win, tier, patch"
-             "  FROM MatchTimelineFeatures FINAL ORDER BY match_id, game_time",
+        data="SELECT t.*, d.prior AS draft_prior"
+             "  FROM (SELECT match_id, game_time, networth_diff,"
+             "               networth_total, xp_diff, kills_radiant,"
+             "               kills_dire, position_advance, alive_diff,"
+             "               towers_diff, rax_diff, radiant_win, tier, patch,"
+             "               roshan_diff, aegis_alive, buybacks_diff,"
+             "               first_blood, item_value_diff, key_items_diff,"
+             "               obs_wards_diff, sen_wards_diff, runes_diff,"
+             "               neutral_tier_diff, levels_diff"
+             "          FROM MatchTimelineFeatures FINAL) AS t"
+             "  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
+             "    USING (match_id)"
+             " ORDER BY match_id, game_time",
         headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
         timeout=120,
     )
@@ -233,8 +278,13 @@ def synth_matches(n: int, seed: int = 7) -> Dataset:
             towers = float(int(max(-11, min(11, nw / 9000.0 + rng.normal(0, 0.7)))))
             rax = float(int(max(-6, min(6, nw / 20000.0 + rng.normal(0, 0.3)))))
             total = 12000.0 + t * 18.0   # рост суммарной экономики
-            Xs.append([t, nw, xp, kills_r - kills_d, kills_r + kills_d, adv,
-                       alive, towers, rax, nw / total])
+            row = [t, nw, xp, kills_r - kills_d, kills_r + kills_d, adv,
+                   alive, towers, rax, nw / total]
+            # Фичи трека F синтетика не моделирует — NaN, как у реальных
+            # матчей, собранных до их появления. Длина строки обязана
+            # совпадать с FEATURES, иначе LightGBM падает на несоответствии.
+            row += [math.nan] * (len(FEATURES) - len(row))
+            Xs.append(row)
             gs.append(match_id)
         p_radiant = 1.0 / (1.0 + math.exp(-nw / 8000.0))
         radiant_win = 1 if rng.random() < p_radiant else 0

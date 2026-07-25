@@ -125,6 +125,12 @@ ml-train-risk: ## Обучить Death-Risk модель на реплейных
 ml-train-laning: ## Обучить Laning-модель на combat-логе первых 5 минут (C5)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.laning $(LANING_ARGS)
 
+ml-train-draft: ## Draft Prior: P(win|составы) + OOF-прайоры в MatchDraft (F3)
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.draft_prior $(DRAFT_ARGS)
+
+ml-tune:       ## Подбор гиперпараметров WP через Optuna (F7): ARGS="--trials 60 --apply"
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.tune $(ARGS)
+
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
 

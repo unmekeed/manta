@@ -28,10 +28,11 @@ def channel(tmp_path_factory):
 
 
 def fv(**overrides):
-    values = {"game_time": 1800.0, "networth_diff": 0.0, "xp_diff": 0.0,
-              "kills_diff": 0.0, "kills_total": 20.0, "position_advance": 0.0,
-              "alive_diff": 0.0, "towers_diff": 0.0, "rax_diff": 0.0,
-              "networth_rel": 0.0}
+    """Вектор со ВСЕМИ фичами модели: сервис требует полный набор, а
+    список растёт (трек F), поэтому строим его из dataset.FEATURES."""
+    from training.dataset import FEATURES
+    values = {f: 0.0 for f in FEATURES}
+    values.update({"game_time": 1800.0, "kills_total": 20.0})
     values.update(overrides)
     return services_pb2.FeatureVector(values=values)
 

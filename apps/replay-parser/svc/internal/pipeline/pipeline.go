@@ -226,6 +226,13 @@ var eventTypeMap = map[string]string{
 	"DEATH":    "KILL",
 	"ABILITY":  "ABILITY_CAST",
 	"PURCHASE": "ITEM_PURCHASE",
+	// Трек F: бэйбек — сильный сигнал поздней игры (сторона потратила
+	// золото на выкуп). Ядро его парсило и раньше, но при записи в
+	// ClickHouse тип отбрасывался. Схема ReplayEvents перечисляет
+	// WARD_PLACE=6, свободного значения под бэйбек в Enum8 нет —
+	// пишем как ABILITY_CAST с inflictor="buyback", чтобы не менять
+	// enum миграцией (событий мало, разбор по inflictor однозначен).
+	"BUYBACK": "ABILITY_CAST",
 }
 
 const ticksPerSecond = 30

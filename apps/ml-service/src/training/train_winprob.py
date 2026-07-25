@@ -35,7 +35,7 @@ from .drift import compute_reference
 
 logger = logging.getLogger("train_winprob")
 
-MODEL_VERSION = "0.7.0"  # 0.7.0: networth_rel + фазовые Brier
+MODEL_VERSION = "0.8.0"  # 0.8.0: трек F — объективы, предметы, вижн, драфт-прайор
 
 # Монотонные ограничения — доменное знание (Гл. 6.2.2): вероятность
 # победы Radiant не убывает по преимуществу в золоте/опыте/убийствах и
@@ -52,8 +52,27 @@ MONOTONE = {
     "towers_diff": 1,    # снесено больше зданий Dire → WP не убывает
     "rax_diff": 1,
     "networth_rel": 1,   # доля преимущества — та же монотонность, что у diff
+    # Трек F. Монотонность ставим только там, где направление бесспорно:
+    # больше Рошанов/аегис/предметов/уровней у Radiant → WP не убывает.
+    "roshan_diff": 1,
+    "aegis_alive": 1,
+    "first_blood": 1,
+    "item_value_diff": 1,
+    "key_items_diff": 1,
+    "levels_diff": 1,
+    "neutral_tier_diff": 1,
+    "draft_prior": 1,    # выше прайор по составам → выше WP
+    # Без ограничения: бэйбек — признак И силы (есть деньги), И беды
+    # (пришлось выкупаться); варды и руны — контроль, но знак вклада
+    # зависит от фазы. Пусть модель решает сама.
+    "buybacks_diff": 0,
+    "obs_wards_diff": 0,
+    "sen_wards_diff": 0,
+    "runes_diff": 0,
 }
 
+# Базовые (ручные) параметры. Если training.tune нашёл лучшие и записал
+# models/lgb_params.json — они накладываются поверх (см. ниже).
 LGB_PARAMS = {
     "objective": "binary",
     "metric": "binary_logloss",
@@ -69,6 +88,26 @@ LGB_PARAMS = {
     "verbose": -1,
     "seed": 42,
 }
+
+def _apply_tuned_params() -> None:
+    """Наложить подобранные Optuna параметры, если они есть на диске.
+    Монотонные ограничения и objective не переопределяются — это
+    доменное знание, а не предмет подбора."""
+    try:
+        from .tune import load_overrides
+        tuned = load_overrides()
+    except Exception:  # noqa: BLE001
+        return
+    safe = {k: v for k, v in tuned.items()
+            if k not in ("objective", "metric", "monotone_constraints")}
+    if safe:
+        LGB_PARAMS.update(safe)
+        logger.info("гиперпараметры из models/lgb_params.json: %s",
+                    ", ".join(sorted(safe)))
+
+
+_apply_tuned_params()
+
 
 # Порог перехода изотоника → Platt: изотоника на «ступеньках» малой выборки
 # переобучается, логистическая калибровка устойчивее.

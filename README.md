@@ -19,12 +19,12 @@ ClickHouse → фичи → модели (Win Probability, Death-Risk) → от�
 разбором ошибок → веб-UI** — на реальных матчах, включая про-эталон.
 
 - `deployments/docker-compose.yml` — PostgreSQL 16, ClickHouse 24.8, Kafka 3.8 (KRaft), Redis 7, MinIO, MLflow (backend в postgres); все с healthcheck.
-- `infra/migrations/` — реляционная схема Гл. 4.2, аналитический слой Гл. 4.4 (ReplayEvents, EconomyTimeline, PositionSnapshots) и витрины фич (PlayerMatchFeatures, MatchTimelineFeatures).
+- `infra/migrations/` — реляционная схема Гл. 4.2, аналитический слой Гл. 4.4 (ReplayEvents, EconomyTimeline, PositionSnapshots) пер-матчевые MatchDraft/MatchEvents и витрины фич (PlayerMatchFeatures, MatchTimelineFeatures).
 - `apps/api-gateway` — Go: upload → MinIO + outbox → Kafka; статусы AnalysisJob по `replay.parsed`/`dlq.parser`; REST `/matches`, `/timeline`, `/analysis`, `/heroes`, `/draft/simulate`; RFC 7807, trace_id, rate limit.
-- `apps/data-collector` — Python, 4 источника (реплейный OpenDota + гибридный JSON-путь `opendota-timeline`/`-pro`): дедуп/курсор в PG, 429-бэкoff до сброса квоты, авто-reconnect к Postgres. **Шардирование между машинами** (`COLLECTOR_SHARD_COUNT`/`COLLECTOR_SHARD_ID`) — см. ниже.
+- `apps/data-collector` — Python, 4 источника (реплейный OpenDota + гибридный JSON-путь `opendota-timeline`/`-pro`): дедуп/курсор в PG, 429-бэкoff до сброса квоты, авто-reconnect к Postgres. **Шардирование между машинами** (`COLLECTOR_SHARD_COUNT`/`COLLECTOR_SHARD_ID`) — см. ниже. Из скачанного JSON извлекаются драфт, события (Рошан/аегис/FB/бэйбеки/руны/варды) и 12 поминутных фич (`collector/signals.py`), сам JSON складывается в MinIO (`collector/rawstore.py`) — чтобы будущие фичи бэкфиллились без квоты.
 - `apps/replay-parser` — C++17-ядро (битово-совместимый с `dotabuff/manta` декодер сущностей: позиции, экономика, combat log; 110 МиБ за ~4 с) + Go-сервис `svc/` (Kafka → ядро → ClickHouse → `replay.parsed`, DLQ).
 - `apps/feature-extractor` — Python: `replay.parsed` → point-in-time фичи (GPM/XPM, LH/DN, alive/towers/rax diff, networth_rel) → витрины + `features.calculated`; пушит срез в Feature Store.
-- `apps/ml-service` — gRPC :50051 (Predict/PredictStream); Win Probability (LightGBM + OOF-изотоника, Brier ≈ 0.14), Death-Risk (P смерти за 30с, AUC 0.79) и Laning (P выиграть линию по игре первых 5 минут, AUC 0.89) из общего реестра моделей (S3/MLflow).
+- `apps/ml-service` — gRPC :50051 (Predict/PredictStream); Win Probability (LightGBM + OOF-изотоника, 22 фичи, Brier ≈ 0.14), Death-Risk (P смерти за 30с, AUC 0.79), Laning (P выиграть линию по игре первых 5 минут, AUC 0.89) и Draft Prior (P(win\|составы), AUC 0.585) из общего реестра моделей (S3/MLflow).
 - `apps/report-generator` — WP-кривая, SHAP-атрибуция ошибок, модельный Safety Index, позиции смертей → MatchReports.
 - `apps/similarity`, `apps/draft`, `apps/coach`, `apps/feature-store` — gRPC-сервисы (:50052–:50055) поверх витрин/эмбеддингов.
 - `apps/frontend` (React+TS+Vite) — список матчей, страница матча (WP-бейдж, SHAP-чипы, карта смертей, риск-бейджи), драфт-симулятор.
@@ -196,7 +196,19 @@ Redis `6379`, MinIO `9500` (S3) / `9501` (веб-консоль).
 Полный план и обоснование — `docs/ROADMAP.md`, живой контекст с историей
 инцидентов — `docs/HANDOFF.md`. Актуальный порядок:
 
-1. **A9/A10**: даунвейт старого патча, Roshan/aegis/buyback/hero-фичи + Optuna (после 5000+ матчей).
-2. **B4**: публичный релиз Win Probability — критерии выполнены, решение за владельцем.
-3. **D5/D6**: нагрузочные тесты и security review — гейты Фазы 4.
-4. **E1**: автозапуск стека на Windows (Планировщик задач + `wsl … make recover`) и ежедневный `dataset-export` как бэкап.
+Треки A, C, D, E закрыты (спринты 1–58); трек F (усиление модели,
+`docs/ML-PLAN.md`) реализован в спринтах 60–66.
+
+1. **Ревизия трека F — нужны данные, не код.** 12 новых фич (объективы,
+   предметы, варды, руны, нейтралки, уровни) извлекаются в момент сбора,
+   поэтому на 2635 исторических матчах они NaN и эффект пока не измерим.
+   Нужно ~2–3 тысячи новых матчей, затем переобучение и фазовое
+   сравнение; фичи без эффекта — выкинуть (правило ML-PLAN §6). Честные
+   результаты на сегодня — ML-PLAN §8: draft prior выигрыша не дал,
+   Optuna ниже порога значимости.
+2. **F8** (hero-эмбеддинги) — гейт 20 000 матчей, сейчас 2635.
+3. **B4**: публичный релиз Win Probability — технические критерии B1+B2
+   выполнены, часть гейтов безопасности снята в спринте 58; остаются
+   mTLS, сертификат от CA, входы Steam/email, псевдонимизация PII
+   (`docs/security-review.md` §4–6). Решение за владельцем.
+4. Обновить тулчейн Go до 1.25.12+ (stdlib-уязвимости, S2 обзора).

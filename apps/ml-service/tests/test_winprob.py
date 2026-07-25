@@ -36,8 +36,10 @@ def test_prediction_monotone_in_networth():
     cal = art["calibrator"]
     t = 1800.0
     diffs = np.linspace(-30000, 30000, 13)
-    X = np.array([[t, d, d * 1.2, d / 3000, 20, d / 30000,
-                   d / 10000, d / 6000, d / 15000, d / 40000] for d in diffs])
+    # Фичи трека F не задаём — NaN, как у матчей, собранных до них.
+    X = np.array([_pad([t, d, d * 1.2, d / 3000, 20, d / 30000,
+                        d / 10000, d / 6000, d / 15000, d / 40000])
+                  for d in diffs])
     wp = cal.predict(booster.predict(X))
     # Допускаем плато (изотоника), но не убывание.
     assert all(b - a >= -1e-9 for a, b in zip(wp, wp[1:]))
@@ -131,6 +133,13 @@ def test_autotrain_thresholds(monkeypatch, tmp_path):
     считаются по дельте датасета относительно ПОСЛЕДНЕГО обучения в процессе
     (а не относительно production) — устойчиво к сбросу витрины."""
     from training import auto
+from training.dataset import FEATURES as _FEATURES
+
+
+def _pad(row: list[float]) -> list[float]:
+    """Дополнить вектор до текущего числа фич NaN'ами: тесты перечисляют
+    только базовые 10, остальные (трек F) для них не заданы."""
+    return row + [float("nan")] * (len(_FEATURES) - len(row))
 
     # Триггер держит состояние последнего обучения в модульной переменной.
     monkeypatch.setattr(auto, "_last_trained_n", None)
@@ -282,19 +291,26 @@ def test_mirror_xy_symmetry():
 
     # одна строка: Radiant ведёт (+nw, +xp, +kills_diff, +pos, +alive,
     # +towers, +rax), метка 1
-    X = np.array([[1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5, 2.0, 3.0, 1.0,
-                   0.12]])
+    X = np.array([_pad([1800.0, 5000.0, 6000.0, 4.0, 20.0, 0.5, 2.0, 3.0,
+                        1.0, 0.12])])
     y = np.array([1])
     Xm, ym = mirror_xy(X, y)
     assert len(ym) == 2
-    # зеркало: разностные фичи меняют знак, kills_total и time — нет, метка 0
-    neg = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
-           "alive_diff", "towers_diff", "rax_diff", "networth_rel"}
+    # Зеркало: разностные фичи меняют знак; draft_prior — вероятность,
+    # поэтому переходит в 1−p; game_time/kills_total симметричны. Метка
+    # инвертируется. Незаданные фичи остаются NaN (NaN != NaN, поэтому
+    # сравниваем через isnan).
+    from training.dataset import MIRROR_COMPLEMENT, MIRROR_NEGATE
     for i, f in enumerate(FEATURES):
-        if f in neg:
-            assert Xm[1, i] == -X[0, i]
+        src, got = X[0, i], Xm[1, i]
+        if np.isnan(src):
+            assert np.isnan(got), f"{f}: NaN должен остаться NaN"
+        elif f in MIRROR_NEGATE:
+            assert got == -src, f"{f} обязана менять знак"
+        elif f in MIRROR_COMPLEMENT:
+            assert got == 1.0 - src, f"{f} обязана переходить в 1−p"
         else:
-            assert Xm[1, i] == X[0, i]
+            assert got == src, f"{f} обязана остаться прежней"
     assert ym[1] == 0
     # приор становится ровно сбалансированным
     assert ym.mean() == 0.5

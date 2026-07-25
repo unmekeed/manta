@@ -27,6 +27,7 @@ from typing import Iterable
 
 import requests
 
+from ..signals import all_minute_features
 from . import Shard, with_api_key
 
 logger = logging.getLogger("collector.opendota_timeline")
@@ -46,6 +47,7 @@ class TimelineMatch:
     rows: list[dict] = field(default_factory=list)   # схема MTF
     source_cursor: str = ""
     patch: int = 0            # id патча OpenDota; 0 — неизвестен (A9)
+    raw: dict = field(default_factory=dict)  # исходный JSON матча (трек F)
 
 
 def timeline_rows(m: dict) -> list[dict]:
@@ -107,6 +109,10 @@ def timeline_rows(m: dict) -> list[dict]:
         vals = [gt[i] for gt in gold_t if len(gt) > i]
         return float(sum(vals)) if len(vals) == len(gold_t) and vals else math.nan
 
+    # Трек F: объективы, предметы, вижн, нейтралки — из того же JSON.
+    minutes = [i * 60 for i in range(1, n)]
+    extra = all_minute_features(m, minutes)
+
     rows = []
     for i in range(1, n):
         t = i * 60
@@ -123,6 +129,7 @@ def timeline_rows(m: dict) -> list[dict]:
             "towers_diff": float(_cum_delta(tower_events, t)),
             "rax_diff": float(_cum_delta(rax_events, t)),
             "radiant_win": radiant_win,
+            **{k: v[i - 1] for k, v in extra.items() if len(v) >= i},
         })
     return rows
 
@@ -272,6 +279,7 @@ class OpenDotaTimelineSource:
                 yielded += 1
                 yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
                                     source_cursor=str(mid),
-                                    patch=int(m.get("patch") or 0))
+                                    patch=int(m.get("patch") or 0),
+                                    raw=m)
                 if yielded >= self._limit:
                     return
