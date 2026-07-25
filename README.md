@@ -99,7 +99,31 @@ make dataset-import IN=manta-dataset-….tar  # идемпотентно, пов
 ```
 
 Множества собранных матчей не пересекаются, поэтому слияние баз через
-`dataset-import` конфликт-фри. Замечание: `dataset-export` НЕ переносит
+`dataset-import` конфликт-фри.
+
+### Бэкапы и автозапуск (Windows)
+
+docker-volume — единственная копия датасета, и он уже терялся. Слепок с
+ротацией (по умолчанию 7 дней, каталог `~/manta-backups`):
+
+```bash
+make backup                                  # разово
+MANTA_BACKUP_DIR=/mnt/d/manta-backups make backup   # на диск Windows
+```
+
+Каталог на `/mnt/c`|`/mnt/d` переживает `wsl --unregister`. Сбой бэкапа
+шлёт сообщение в Telegram (молча сломавшийся бэкап хуже отсутствующего);
+старые слепки удаляются только после успешного нового.
+
+Автозапуск: из PowerShell **от администратора** (пути — свои):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\wsl$\Ubuntu\home\<user>\manta\scripts\autostart-install.ps1
+```
+
+Создаст две задачи Планировщика: `Manta-Recover` (при входе в систему —
+Docker Desktop, ожидание демона, `make recover`) и `Manta-Backup`
+(ежедневно). Удалить: тот же скрипт с `-Uninstall`. Замечание: `dataset-export` НЕ переносит
 `ReplayEvents` (combat-лог, под TTL) — для Death-Risk на объединённом
 датасете нужно, чтобы реплеи парсились на той же машине, где потом
 обучаешь, либо расширить экспорт.

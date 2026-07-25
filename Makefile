@@ -149,6 +149,9 @@ dataset-export: ## Слепок датасета для переноса на д
 dataset-import: ## Идемпотентно влить слепок: make dataset-import IN=файл.tar
 	./scripts/dataset-sync.sh import $(IN)
 
+backup:        ## Слепок датасета в MANTA_BACKUP_DIR с ротацией KEEP_DAYS (E1)
+	./scripts/backup.sh
+
 stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
 	$(COMPOSE) --profile apps up -d --build
 

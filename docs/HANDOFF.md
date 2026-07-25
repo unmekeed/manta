@@ -1,9 +1,9 @@
-# Manta — сводка для нового чата (обновлено 2026-07-23, после спринта 54)
+# Manta — сводка для нового чата (обновлено 2026-07-23, после спринта 55)
 
 Manta — платформа аналитики Dota 2: сбор матчей → парсинг реплеев →
 фичи → ML-модели (Win Probability, Death-Risk) → отчёты с разбором
 ошибок → веб-UI. Монорепо `unmekeed/manta`, ветка `main`, всё в
-коммитах по спринтам (1–52). Спецификация — `docs/specification/`,
+коммитах по спринтам (1–55). Спецификация — `docs/specification/`,
 роадмап — `docs/ROADMAP.md`, инциденты — `docs/runbooks.md`.
 
 **Ключевой операционный факт**: облачный сбор ОСТАНОВЛЕН (решение
@@ -217,10 +217,13 @@ dota_dev_password. Метрики Prometheus: 9101–9114; живой дашбо
 - **B4**: публичный релиз WP — технические критерии выполнены,
   решение за владельцем.
 - **D5/D6**: нагрузочные тесты и security review — гейты Фазы 4.
-- **E1**: автозапуск на Windows — Планировщик задач: автозапуск Docker
-  Desktop + `wsl -d Ubuntu -- make -C ~/manta recover`; туда же —
-  ежедневный `make dataset-export` как бэкап (потеря volume = максимум
-  день данных).
+- ~~E1~~ ✅ спринт 55: scripts/autostart-install.ps1 ставит задачи
+  Планировщика Manta-Recover (при входе: Docker Desktop → ожидание
+  демона до 5 мин → make recover) и Manta-Backup (ежедневно);
+  scripts/backup.sh (`make backup`) — слепок в MANTA_BACKUP_DIR
+  (дефолт ~/manta-backups; держать на /mnt/c|/mnt/d — переживёт
+  wsl --unregister), ротация KEEP_DAYS=7 ПОСЛЕ успешного слепка,
+  Telegram-алерт сбоя и сообщение о восстановлении.
 - Мелочь: LLM-слой Coach включается ANTHROPIC_API_KEY (каркас готов).
   Спринт 51: gateway (:8080), frontend (vite :5173) и дашборд (:9107)
   входят в recover — вся платформа поднимается одной командой.
