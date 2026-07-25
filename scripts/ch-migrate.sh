@@ -20,11 +20,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CH_DB="${CLICKHOUSE_DB:-manta}"
-CLI=(docker exec -i manta-clickhouse-1 clickhouse-client
+# ВАЖНО: без -i. С проброшенным stdin clickhouse-client на запросе INSERT
+# начинает читать секцию данных из stdin и висит вечно, если stdin — не
+# закрытый терминал (ровно так recover замирал на записи в журнал).
+# Файлы миграций подаются отдельным вызовом с -i, где stdin нужен по делу.
+CLI=(docker exec manta-clickhouse-1 clickhouse-client
      --user "${CLICKHOUSE_USER:-dota}"
-     --password "${CLICKHOUSE_PASSWORD:-dota_dev_password}")
+     --password "${CLICKHOUSE_PASSWORD:-dota_dev_password}"
+     --connect_timeout 10 --receive_timeout 300)
 
-q() { "${CLI[@]}" --database "$CH_DB" --query "$1"; }
+q() { "${CLI[@]}" --database "$CH_DB" --query "$1" </dev/null; }
 
 q "CREATE TABLE IF NOT EXISTS SchemaMigrations (
      filename String, applied_at DateTime DEFAULT now())
@@ -51,6 +56,9 @@ for f in infra/migrations/clickhouse/*.sql; do
         continue
     fi
     echo ">> $b"
-    "${CLI[@]}" --multiquery < "$f"
+    docker exec -i manta-clickhouse-1 clickhouse-client \
+        --user "${CLICKHOUSE_USER:-dota}" \
+        --password "${CLICKHOUSE_PASSWORD:-dota_dev_password}" \
+        --multiquery < "$f"
     q "INSERT INTO SchemaMigrations (filename) VALUES ('$b')"
 done
