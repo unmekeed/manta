@@ -20,7 +20,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
-	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
@@ -29,6 +29,7 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.9.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
@@ -39,6 +40,8 @@ require (
 )
 
 require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/unmekeed/manta/proto v0.0.0
 	google.golang.org/grpc v1.67.1
 )

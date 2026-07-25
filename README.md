@@ -10,7 +10,7 @@
 | **Фаза 1: Инфраструктура** | ✅ завершена (спринты 1–4) | compose-инфраструктура, миграции PG/CH, Kafka-топики, API Gateway (S3+outbox), Data Collector |
 | **Фаза 2: Парсинг и ETL** | ✅ завершена (спринты 5–9) | Replay Parser (C++, полный декодер сущностей) + Go-обвязка, ClickHouse-слой сырых событий, Feature Extractor |
 | **Фаза 3: Аналитика и ML** | ✅ завершена (спринты 10–48) | Win Probability (релизные критерии B1+B2 пройдены), Death-Risk модель, Similarity/Draft/Coach/Feature Store; Laning-модель — единственный открытый пункт (спринт 50) |
-| **Фаза 4: UI, MLOps, Релиз** | 🟡 почти завершена | Frontend, gRPC-инференс, MLflow (постгрес-бэкенд), PSI-дрейф — готовы; публичный релиз WP (B4) ждёт решения владельца, нагрузочные тесты и security review (D5/D6) — гейты финализации |
+| **Фаза 4: UI, MLOps, Релиз** | 🟡 почти завершена | Frontend, gRPC-инференс, MLflow (постгрес-бэкенд), PSI-дрейф — готовы; нагрузочные тесты и security review (D5/D6) пройдены, JWT/RBAC+TLS+GDPR реализованы (спринт 58); публичный релиз WP (B4) ждёт решения владельца |
 
 ### Что уже работает (проверено против живой инфраструктуры)
 
@@ -70,6 +70,35 @@ similarity/draft/coach/feature-store, report-generator, auto-train →
 ```bash
 make doctor
 ```
+
+## Безопасность: JWT, TLS, GDPR
+
+По умолчанию на локальном стенде gateway слушает HTTP и пускает без
+токенов (в логе — WARN `auth_disabled`/`tls_disabled`). Включить:
+
+```bash
+./scripts/gen-dev-keys.sh            # ключи RS256 + самоподписанный TLS
+# прописать выведенные пути в ~/manta-train.env, затем make recover
+```
+
+После этого API работает по HTTPS (TLS 1.3, версии ниже отвергаются), а
+закрытые эндпоинты требуют Bearer-токен. Роли Гл. 9.3: `anonymous` —
+матчи/разборы/герои/драфт, `free` — загрузка реплеев, `premium` —
+GDPR-экспорт, `admin` — выпуск токенов и стирание данных.
+
+```bash
+./scripts/issue-token.sh admin       # первый токен (локально, ключом)
+curl -sk https://localhost:8080/.well-known/jwks.json
+curl -sk -X POST https://localhost:8080/api/v1/auth/token \
+     -H "Authorization: Bearer $ADMIN" \
+     -d '{"sub":"user-1","role":"premium"}'
+```
+
+GDPR (Гл. 9.7): `GET /api/v1/players/{ник}/export` — все данные субъекта
+одним JSON; `DELETE /api/v1/players/{ник}/data` — стирание никнейма из
+витрины и отчётов (игровая статистика остаётся обезличенной). Субъект
+идентифицируется никнеймом: account_id платформа не хранит. Подробности
+и открытые пункты — `docs/security-review.md`.
 
 ## Синхронизация датасета между машинами
 

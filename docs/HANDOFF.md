@@ -1,9 +1,9 @@
-# Manta — сводка для нового чата (обновлено 2026-07-23, после спринта 57)
+# Manta — сводка для нового чата (обновлено 2026-07-23, после спринта 58)
 
 Manta — платформа аналитики Dota 2: сбор матчей → парсинг реплеев →
 фичи → ML-модели (Win Probability, Death-Risk) → отчёты с разбором
 ошибок → веб-UI. Монорепо `unmekeed/manta`, ветка `main`, всё в
-коммитах по спринтам (1–57). Спецификация — `docs/specification/`,
+коммитах по спринтам (1–58). Спецификация — `docs/specification/`,
 роадмап — `docs/ROADMAP.md`, инциденты — `docs/runbooks.md`.
 
 **Ключевой операционный факт**: облачный сбор ОСТАНОВЛЕН (решение
@@ -215,7 +215,16 @@ dota_dev_password. Метрики Prometheus: 9101–9114; живой дашбо
 - **A10**: Roshan/aegis/buyback/hero-фичи + Optuna (порог 5000+
   матчей — близко).
 - **B4**: публичный релиз WP — технические критерии выполнены,
-  решение за владельцем.
+  решение за владельцем. Спринт 58 снял часть гейтов: JWT/RBAC
+  (internal/auth: RS256, sub/role/plan/jti, TTL 15м, denylist в Redis,
+  JWKS; матрица ролей в router.go), TLS 1.3 (TLS_CERT_FILE/TLS_KEY_FILE,
+  MinVersion 1.3), GDPR export/erasure (/api/v1/players/{ник}/export и
+  /data). **На стенде всё это ВЫКЛЮЧЕНО по умолчанию** — без ключей
+  gateway открыт и пишет WARN auth_disabled/tls_disabled; включение —
+  scripts/gen-dev-keys.sh + пути в env-файл. Первый admin-токен —
+  scripts/issue-token.sh (эндпоинт выпуска сам требует admin).
+  Осталось до публикации: mTLS, сертификат от CA, входы Steam/email с
+  refresh-ротацией, псевдонимизация PII, проверка владения ресурсом.
 - ~~D5~~ ✅ спринт 56: `make loadtest` (scripts/loadtest.py) — профиль под
   пороги Гл. 1. Замеры на облачном стенде: PERF-01 3.5с/40-мин реплей
   (порог 10), PERF-02 p95 8мс (2с), PERF-03 p95 10мс/p99 17мс (300/800),

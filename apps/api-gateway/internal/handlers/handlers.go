@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/unmekeed/manta/api-gateway/internal/auth"
 	"github.com/unmekeed/manta/api-gateway/internal/events"
 	"github.com/unmekeed/manta/api-gateway/internal/middleware"
 	"github.com/unmekeed/manta/api-gateway/internal/storage"
@@ -21,6 +22,7 @@ type Handlers struct {
 	Replays *storage.ReplayStore
 	Draft   corev1.DraftServiceClient // nil — драфт-эндпоинты вернут 503
 	Heroes  []Hero
+	Auth    *auth.Authenticator // аутентификация (Гл. 9.2); nil-safe методы
 }
 
 // problem — тело ошибки в формате RFC 7807 (Гл. 7.5).

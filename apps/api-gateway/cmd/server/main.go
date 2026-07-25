@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/unmekeed/manta/api-gateway/internal/auth"
 	"github.com/unmekeed/manta/api-gateway/internal/config"
 	"github.com/unmekeed/manta/api-gateway/internal/events"
 	"github.com/unmekeed/manta/api-gateway/internal/handlers"
@@ -62,7 +64,30 @@ func main() {
 	defer jobStatus.Close()
 	go jobStatus.Run(ctx)
 
-	h := &handlers.Handlers{DB: pool, Replays: replays}
+	// Аутентификация (Гл. 9.2): ключи из окружения. Без ключей шлюз
+	// работает открыто — это режим локального стенда, и он громко
+	// логируется, чтобы не уехать в прод незамеченным.
+	var deny auth.Denylist
+	if d := auth.NewRedisDenylist(cfg.RedisAddr); d != nil {
+		defer d.Close()
+		deny = d
+	}
+	authn, err := auth.New(deny)
+	if err != nil {
+		logger.Error("auth_init_failed", "error", err)
+		os.Exit(1)
+	}
+	switch {
+	case !authn.Enabled():
+		logger.Warn("auth_disabled",
+			"detail", "JWT_PUBLIC_KEY_FILE/JWT_PRIVATE_KEY_FILE не заданы — API открыт без токенов")
+	case !authn.CanIssue():
+		logger.Info("auth_enabled", "mode", "verify-only")
+	default:
+		logger.Info("auth_enabled", "mode", "issue+verify")
+	}
+
+	h := &handlers.Handlers{DB: pool, Replays: replays, Auth: authn}
 
 	// Драфт-симулятор (C6): gRPC-клиент Draft Engine + словарь героев.
 	// Ленивое соединение — недоступный движок даёт 503 на эндпоинтах
@@ -84,12 +109,28 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:    cfg.ListenAddr,
-		Handler: router.New(h, logger, cfg.RateLimitRPS, cfg.RateLimitBurst),
+		Handler: router.New(h, authn, logger, cfg.RateLimitRPS, cfg.RateLimitBurst),
+	}
+
+	// TLS (NFR-SEC-01): минимум 1.3 — понижение версии не допускается,
+	// поэтому MinVersion, а не список шифров. Сертификаты задаются
+	// TLS_CERT_FILE/TLS_KEY_FILE; без них слушаем HTTP (dev-стенд).
+	tlsOn := cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""
+	if tlsOn {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 	}
 
 	go func() {
-		logger.Info("listening", "addr", cfg.ListenAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Info("listening", "addr", cfg.ListenAddr, "tls", tlsOn)
+		var err error
+		if tlsOn {
+			err = srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		} else {
+			logger.Warn("tls_disabled",
+				"detail", "TLS_CERT_FILE/TLS_KEY_FILE не заданы — трафик в открытом виде (NFR-SEC-01)")
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server_failed", "error", err)
 			stop()
 		}

@@ -25,6 +25,12 @@ type Config struct {
 
 	DraftGRPCAddr string // Draft Engine (пусто — эндпоинты драфта отдают 503)
 	HeroesPath    string // libs/data/heroes.json; пусто — путь по умолчанию
+
+	// TLS (NFR-SEC-01). Пусто — слушаем HTTP (локальный стенд).
+	TLSCertFile string
+	TLSKeyFile  string
+	// Redis для denylist отозванных токенов (Гл. 9.2.2).
+	RedisAddr string
 }
 
 func Load() Config {
@@ -45,6 +51,10 @@ func Load() Config {
 
 		DraftGRPCAddr: getEnv("DRAFT_GRPC_ADDR", "localhost:50053"),
 		HeroesPath:    getEnv("HEROES_PATH", ""),
+
+		TLSCertFile: getEnv("TLS_CERT_FILE", ""),
+		TLSKeyFile:  getEnv("TLS_KEY_FILE", ""),
+		RedisAddr:   getEnv("REDIS_ADDR", "localhost:6379"),
 	}
 }
 
