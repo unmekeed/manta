@@ -110,6 +110,36 @@ elif [ "${q#-}" != "$q" ] || [ "$q" -lt 100 ]; then
 else ok "remaining-day=$q"
 fi
 
+# Вердикт этого скрипта — по ДАННЫМ (мета-урок HANDOFF), и это не
+# меняется: живой pgrep ничего не доказывает. Но обратное показание
+# полезно как ПОДСКАЗКА: когда витрина стоит, а квота цела, ответ на
+# вопрос «квота или коллекторы?» — ровно в этом списке. На вердикт и код
+# возврата секция не влияет.
+echo "== Хостовые процессы (подсказка к диагнозу; вердикт — по данным)"
+down=0
+proc() {
+    if pgrep -f "$2" >/dev/null; then
+        printf '        %-18s %s\n' "$1" "up"
+    else
+        printf '   \033[33m  ?\033[0m %-18s %s\n' "$1" "DOWN"
+        down=$((down + 1))
+    fi
+}
+proc data-collector   "collector --source opendota-public"
+proc timeline-coll.   "collector --source opendota-timeline --interval"
+proc pro-timeline     "collector --source opendota-timeline-pro"
+proc pro-replay       "collector --source opendota --interval"
+proc parser-svc       "^/tmp/parser-svc"
+proc feature-extractor "python3 -u -m extractor"
+proc ml-service       "python3 -u -m app"
+proc report-generator "python3 -u -m reportgen"
+proc auto-train       "python3 -u -m training.auto"
+if [ "$down" -gt 0 ]; then
+    warn "$down процесс(ов) не запущено — если данные стоят, начинать отсюда: make recover"
+else
+    ok "все ключевые процессы запущены"
+fi
+
 echo "== Часы хоста vs ClickHouse (WSL2 дрейфует после сна)"
 ch_now=$(ch "SELECT toUnixTimestamp(now())")
 if [[ "$ch_now" =~ ^[0-9]+$ ]]; then
