@@ -15,6 +15,7 @@ import lightgbm as lgb
 import numpy as np
 import requests
 
+from calibration import register_legacy_aliases
 from training.dataset import row_to_features
 
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "win_probability.pkl"
@@ -22,6 +23,10 @@ DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "win_probabilit
 
 class WinProbability:
     def __init__(self, artifact_path: str | os.PathLike = DEFAULT_MODEL):
+        # Артефакты, обученные до выделения calibration.py, ссылаются на
+        # __main__._PlattCalibrator — без алиаса распаковка падает
+        # AttributeError (см. calibration.register_legacy_aliases).
+        register_legacy_aliases()
         art = joblib.load(artifact_path)
         self.booster = lgb.Booster(model_str=art["booster"])
         self.calibrator = art["calibrator"]

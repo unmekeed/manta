@@ -27,6 +27,8 @@ import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss, log_loss
 
+from calibration import PlattCalibrator
+
 from .dataset import (FEATURES, PRO_TIER, Dataset, dataset_hash,
                       load_from_clickhouse, merge, mirror_xy, synth_matches)
 from .drift import compute_reference
@@ -74,23 +76,11 @@ PLATT_MAX_MATCHES = 50
 N_FOLDS = 5
 
 
-class _PlattCalibrator:
-    """Platt scaling: логистическая регрессия на сыром скоре бустера.
-
-    Интерфейс совместим с IsotonicRegression (predict → вероятности),
-    сериализуется joblib'ом как часть артефакта.
-    """
-
-    def __init__(self):
-        from sklearn.linear_model import LogisticRegression
-        self._lr = LogisticRegression()
-
-    def fit(self, raw: np.ndarray, y: np.ndarray) -> "_PlattCalibrator":
-        self._lr.fit(np.asarray(raw).reshape(-1, 1), y)
-        return self
-
-    def predict(self, raw: np.ndarray) -> np.ndarray:
-        return self._lr.predict_proba(np.asarray(raw).reshape(-1, 1))[:, 1]
+# Калибратор живёт в отдельном модуле: pickle пишет в артефакт путь к
+# классу, и при обучении через `python -m training.train_winprob` этот
+# модуль становится __main__ — артефакт получал ссылку на
+# __main__._PlattCalibrator и не грузился в ml-service (см. calibration.py).
+_PlattCalibrator = PlattCalibrator
 
 
 def _match_weights(groups: np.ndarray) -> np.ndarray:
