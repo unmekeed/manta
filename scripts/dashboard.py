@@ -15,12 +15,18 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
+import shlex
+import subprocess
+import threading
 import time
 import urllib.request
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 # -- Конфигурация целей --------------------------------------------------------
 # port из окружения, если сервис поднят с нестандартным METRICS_PORT.
@@ -159,13 +165,179 @@ def collect() -> dict:
     return payload
 
 
+
+# -- Панель управления (спринт 74) ---------------------------------------------
+#
+# Дашборд живёт на хосте и потому МОЖЕТ запускать процессы конвейера — это
+# единственное место, где такая кнопка вообще реализуема без отдельного
+# демона. Отсюда же весь риск: страница, умеющая выполнять команды, — это
+# удалённое выполнение кода, и защищать её надо соответственно.
+#
+# Три меры, каждая закрывает свой вектор:
+#
+# 1. БИНД НА LOOPBACK (DASHBOARD_BIND, дефолт 127.0.0.1). Раньше сервер
+#    слушал 0.0.0.0; пока он только показывал метрики, это было терпимо, но
+#    с кнопкой «стоп» любой в локальной сети остановил бы сбор. Если бинд
+#    всё же не петлевой, действия ОТКЛЮЧАЮТСЯ — панель остаётся смотровой,
+#    пока владелец явно не выставит DASHBOARD_ALLOW_REMOTE_ACTIONS=1.
+#
+# 2. ЗАГОЛОВОК X-Manta-Action. Без него любая посещённая владельцем
+#    страница могла бы отправить форму POST на localhost:9107 и остановить
+#    коллекторы (классический CSRF: браузер сам приложит запрос к
+#    локальному порту). Нестандартный заголовок заставляет браузер сделать
+#    CORS-preflight, который мы не разрешаем, — кросс-доменный запрос
+#    просто не уходит.
+#
+# 3. БЕЛЫЙ СПИСОК ДЕЙСТВИЙ. Никакого поля «введите команду»: клиент
+#    присылает только ключ из ACTIONS, аргументы зашиты в коде.
+ROOT = Path(__file__).resolve().parent.parent
+ACTION_HEADER = "X-Manta-Action"
+
+ACTIONS = {
+    "recover":  {"label": "Поднять всё", "argv": ["make", "recover"],
+                 "danger": False,
+                 "hint": "идемпотентно: живые процессы не трогает"},
+    "doctor":   {"label": "Проверить (doctor)", "argv": ["make", "doctor"],
+                 "danger": False,
+                 "hint": "health-check по данным, ничего не меняет"},
+    "stop":     {"label": "Остановить сервисы", "argv": ["make", "stop"],
+                 "danger": True,
+                 "hint": "хостовые процессы; контейнеры и данные не трогает"},
+    "train":    {"label": "Переобучить WP", "argv": ["make", "ml-train"],
+                 "danger": False,
+                 "hint": "обучение + гейт; продвижение решает гейт"},
+    "ablation": {"label": "Ablation фич", "argv": ["make", "ml-ablation"],
+                 "danger": False,
+                 "hint": "переобучение без каждой группы фич, долго"},
+    "status":   {"label": "Статус обучения", "argv": ["make", "ml-status"],
+                 "danger": False, "hint": "версия в проде, разрыв датасета"},
+}
+
+LOG_MAX = 4000        # строк вывода в памяти на задание
+
+# doctor и recover раскрашивают вывод; в <pre> escape-последовательности
+# превращаются в мусор вида "[31mFAIL[0m". Цвет тут не нужен — статус
+# задания панель показывает своими средствами.
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+class Job:
+    """Одно фоновое действие. Слот РОВНО ОДИН: одновременный recover и stop
+    гарантированно закончились бы гонкой за одни и те же процессы."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.name = ""
+        self.started = 0.0
+        self.finished = 0.0
+        self.code = None
+        self.lines: deque[str] = deque(maxlen=LOG_MAX)
+        self._proc = None
+
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def start(self, name: str) -> tuple[bool, str]:
+        with self._lock:
+            if self.running():
+                return False, f"уже выполняется: {self.name}"
+            spec = ACTIONS.get(name)
+            if spec is None:
+                return False, "неизвестное действие"
+            self.name, self.started, self.finished, self.code = (
+                name, time.time(), 0.0, None)
+            self.lines.clear()
+            self.lines.append(f"$ {shlex.join(spec['argv'])}")
+            # Дашборд не должен умереть вместе с действием и наоборот:
+            # отдельная группа процессов, вывод — в трубу.
+            self._proc = subprocess.Popen(
+                spec["argv"], cwd=str(ROOT), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True)
+            threading.Thread(target=self._pump, daemon=True).start()
+            return True, "запущено"
+
+    def _pump(self) -> None:
+        proc = self._proc
+        try:
+            for line in proc.stdout:
+                self.lines.append(ANSI_RE.sub("", line.rstrip("\n")))
+        except Exception as e:  # noqa: BLE001 — чтение лога не критично
+            self.lines.append(f"[ошибка чтения вывода: {e}]")
+        finally:
+            self.code = proc.wait()
+            self.finished = time.time()
+            self.lines.append(f"[завершено, код {self.code}]")
+
+    def snapshot(self) -> dict:
+        return {
+            "name": self.name,
+            "label": ACTIONS.get(self.name, {}).get("label", self.name),
+            "running": self.running(),
+            "code": self.code,
+            "started": self.started,
+            "elapsed": round((self.finished or time.time()) - self.started, 1)
+                       if self.started else 0,
+            "lines": list(self.lines),
+        }
+
+
+JOB = Job()
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost",)
+
+
+def actions_enabled() -> bool:
+    """Действия доступны только когда панель не торчит в сеть."""
+    bind = os.getenv("DASHBOARD_BIND", "127.0.0.1")
+    if _is_loopback(bind):
+        return True
+    return os.getenv("DASHBOARD_ALLOW_REMOTE_ACTIONS", "") == "1"
+
+
 # -- HTTP ----------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # тихий лог
         pass
 
+    def _json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if not self.path.startswith("/api/action/"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        # CSRF: браузер не отправит нестандартный заголовок кросс-доменно
+        # без preflight, а preflight мы не разрешаем. Без этой проверки
+        # любая открытая владельцем страница могла бы остановить сбор.
+        if self.headers.get(ACTION_HEADER) != "1":
+            self._json(403, {"error": f"нужен заголовок {ACTION_HEADER}: 1"})
+            return
+        if not actions_enabled():
+            self._json(403, {"error": "панель слушает не loopback — действия "
+                                      "выключены (DASHBOARD_ALLOW_REMOTE_ACTIONS=1 "
+                                      "включает осознанно)"})
+            return
+        name = self.path.rsplit("/", 1)[-1]
+        ok, msg = JOB.start(name)
+        self._json(200 if ok else 409, {"ok": ok, "message": msg})
+
     def do_GET(self):
-        if self.path.startswith("/api/metrics"):
+        if self.path.startswith("/api/job"):
+            self._json(200, {"actions_enabled": actions_enabled(),
+                             "job": JOB.snapshot()})
+        elif self.path.startswith("/api/metrics"):
             body = json.dumps(collect()).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -191,6 +363,26 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Manta · телеметрия</title>
 <style>
+  .panel { margin: 18px 0; padding: 14px; background: var(--surface-1);
+           border: 1px solid var(--border); border-radius: 10px; }
+  .panel h2 { margin: 0 0 10px; font-size: 15px; color: var(--text-2);
+              font-weight: 600; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button.act { background: var(--surface-2); color: var(--text-1);
+               border: 1px solid var(--border); border-radius: 7px;
+               padding: 7px 13px; font-size: 13px; cursor: pointer; }
+  button.act:hover:not(:disabled) { border-color: var(--accent); }
+  button.act:disabled { opacity: .45; cursor: not-allowed; }
+  button.act.danger { border-color: #5a3230; color: #ffb4b0; }
+  .note { color: var(--warning); font-size: 12px; }
+  .job-head { margin-top: 12px; font-size: 13px; color: var(--text-2); }
+  .job-head.running { color: var(--warning); }
+  .job-head.ok { color: var(--good); }
+  .job-head.fail { color: var(--critical); }
+  .job-log { margin: 8px 0 0; max-height: 260px; overflow: auto;
+             background: var(--surface-0); border: 1px solid var(--border);
+             border-radius: 7px; padding: 10px; font-size: 12px;
+             line-height: 1.45; white-space: pre-wrap; color: var(--text-2); }
   :root {
     color-scheme: dark;
     --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232322;
@@ -279,6 +471,12 @@ PAGE = r"""<!doctype html>
   <div class="grid" id="grid-flow"></div>
 </main>
 
+<section class="panel">
+  <h2>Управление</h2>
+  <div id="controls" class="controls"></div>
+  <div id="job-head" class="job-head">действий пока не было</div>
+  <pre id="job-log" class="job-log"></pre>
+</section>
 <script>
 const ACCENT = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
 const nfmt = (v, d=0) => v == null ? "—" :
@@ -377,6 +575,69 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 5000);
+
+// -- Панель управления --------------------------------------------------------
+const ACTIONS = [
+  {key:"recover",  label:"Поднять всё",        hint:"идемпотентно"},
+  {key:"doctor",   label:"Проверить",          hint:"health-check по данным"},
+  {key:"status",   label:"Статус обучения",    hint:"версия в проде"},
+  {key:"train",    label:"Переобучить WP",     hint:"обучение + гейт"},
+  {key:"ablation", label:"Ablation фич",       hint:"долго"},
+  {key:"stop",     label:"Остановить сервисы", hint:"контейнеры не трогает",
+   danger:true},
+];
+
+function renderControls(state) {
+  const box = document.getElementById("controls");
+  const job = state.job;
+  const busy = job.running;
+  box.innerHTML = ACTIONS.map(a =>
+    `<button class="act${a.danger ? " danger" : ""}" data-k="${a.key}"` +
+    `${busy || !state.actions_enabled ? " disabled" : ""}` +
+    ` title="${a.hint}">${a.label}</button>`).join("");
+  for (const b of box.querySelectorAll("button")) {
+    b.onclick = () => runAction(b.dataset.k);
+  }
+  if (!state.actions_enabled) {
+    box.insertAdjacentHTML("beforeend",
+      '<span class="note">действия выключены: панель слушает не loopback</span>');
+  }
+  const head = document.getElementById("job-head");
+  const log = document.getElementById("job-log");
+  if (!job.name) { head.textContent = "действий пока не было"; return; }
+  const st = job.running ? "выполняется"
+           : (job.code === 0 ? "успех" : `код ${job.code}`);
+  head.textContent = `${job.label} — ${st}, ${job.elapsed}с`;
+  head.className = job.running ? "running"
+                 : (job.code === 0 ? "ok" : "fail");
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+  log.textContent = job.lines.join("\n");
+  if (atBottom) log.scrollTop = log.scrollHeight;   // не мешаем читать выше
+}
+
+async function runAction(key) {
+  const spec = ACTIONS.find(a => a.key === key);
+  // Подтверждение только на разрушительное: на каждый чих спрашивать —
+  // приучить нажимать «да» не глядя.
+  if (spec.danger && !confirm(
+        `${spec.label}?\n\nОстановит хостовые процессы Manta. ` +
+        `Контейнеры, тома и данные не затрагиваются.`)) return;
+  const r = await fetch("/api/action/" + key,
+                        {method:"POST", headers:{"X-Manta-Action":"1"}});
+  const j = await r.json();
+  if (!r.ok) alert(j.error || j.message || "не удалось запустить");
+  pollJob();
+}
+
+async function pollJob() {
+  try {
+    const r = await fetch("/api/job");
+    renderControls(await r.json());
+  } catch (e) { /* панель перезапускается — молча ждём */ }
+}
+
+pollJob();
+setInterval(pollJob, 1500);
 </script>
 </body>
 </html>
@@ -385,8 +646,15 @@ setInterval(refresh, 5000);
 
 def main() -> int:
     port = int(os.getenv("DASHBOARD_PORT", "9107"))
-    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    # Дефолт — loopback (спринт 74): страница умеет запускать процессы,
+    # поэтому в сеть она по умолчанию не смотрит. Из Windows WSL2 всё равно
+    # доступна по localhost — проброс работает и для 127.0.0.1.
+    bind = os.getenv("DASHBOARD_BIND", "127.0.0.1")
+    srv = ThreadingHTTPServer((bind, port), Handler)
     print(f"Manta dashboard → http://localhost:{port}  (Ctrl+C для выхода)")
+    if not _is_loopback(bind):
+        print(f"   ВНИМАНИЕ: слушаю {bind} — панель видна из сети; "
+              f"действия {'РАЗРЕШЕНЫ' if actions_enabled() else 'выключены'}")
     print(f"опрашивает: {', '.join(f'{n}:{p}' for n, p in SERVICES)}")
     try:
         srv.serve_forever()

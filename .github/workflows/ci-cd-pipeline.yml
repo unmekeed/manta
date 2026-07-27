@@ -47,6 +47,21 @@ jobs:
           PYTHONPATH=apps/${{ matrix.service }}/src:libs \
             pytest apps/${{ matrix.service }}/tests -q
 
+  scripts-test:
+    # Панель управления дашборда: она умеет запускать процессы, поэтому её
+    # защита (CSRF-заголовок, loopback-биндинг, белый список) проверяется в
+    # CI наравне с кодом сервисов.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test
+        run: |
+          pip install pytest
+          pytest scripts/tests -q
+
   libs-test:
     # Общие библиотеки (libs/manta_grpc — mTLS-обвязка внутренних gRPC).
     # Отдельной джобой, а не в матрице сервисов: у них свои requirements,
