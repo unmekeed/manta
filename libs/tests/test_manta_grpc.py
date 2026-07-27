@@ -168,3 +168,36 @@ def test_insecure_mode_still_works(monkeypatch):
         assert _probe(chan) == grpc.StatusCode.UNIMPLEMENTED
     finally:
         server.stop(0)
+
+
+# -- Метрики не роняют сервис (инцидент 2026-07-27) ----------------------------
+
+def test_metrics_port_busy_does_not_raise():
+    """Ключевая проверка: занятый порт метрик обязан вернуть False, а не
+    выбросить OSError. На локалке владельца ровно это положило семь
+    сервисов разом — коллекторы неделю не собирали данные из-за
+    Prometheus-эндпоинта, который к сбору отношения не имеет."""
+    import socket
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.listen(1)
+    try:
+        assert manta_grpc.serve_metrics(port, "test") is False
+    finally:
+        s.close()
+
+
+def test_metrics_disabled_when_port_zero():
+    """port=0 — осознанное выключение метрик, а не сбой."""
+    assert manta_grpc.serve_metrics(0, "test") is False
+
+
+def test_metrics_started_on_free_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    assert manta_grpc.serve_metrics(port, "test") is True

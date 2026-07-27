@@ -18,7 +18,7 @@ import grpc
 
 import manta_grpc
 import redis
-from prometheus_client import Counter, start_http_server
+from prometheus_client import Counter
 
 from gen import services_pb2, services_pb2_grpc
 from store.redis_store import RedisFeatureStore
@@ -75,7 +75,7 @@ def main() -> int:
 
     metrics_port = int(os.getenv("METRICS_PORT", "9114"))
     if metrics_port:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "feature-store")
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     services_pb2_grpc.add_FeatureStoreServicer_to_server(

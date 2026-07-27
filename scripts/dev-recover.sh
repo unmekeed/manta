@@ -105,6 +105,13 @@ for req in apps/*/requirements.txt; do
     pip3 install --break-system-packages -q -r "$req" && echo "$hash" > "$stamp"
 done
 
+# ВАЖНО: каждому сервису METRICS_PORT задаётся ЯВНО (инцидент 2026-07-27).
+# В коде у каждого свой дефолт (9102-9114), столкнуться они не могли, но
+# env-файл читается через `set -a`, и одна строка `export METRICS_PORT=9106`
+# раздавалась ВСЕМ: первый стартовавший занимал порт, остальные умирали с
+# OSError: Address already in use ещё до начала работы. Коллекторы стояли
+# неделю из-за Prometheus-эндпоинта. Явное присваивание перекрывает
+# унаследованную переменную и делает конфигурацию env-файла безопасной.
 # 4. Хост-сервисы конвейера ----------------------------------------------------
 if ! pgrep -f "^/tmp/parser-svc" >/dev/null; then
     say "запускаю parser-svc (лог: $LOG_DIR/parser-svc.log)"
@@ -117,7 +124,7 @@ fi
 
 if ! pgrep -f "python3 -u -m serve_features" >/dev/null; then
     say "запускаю feature-store (gRPC :50055, лог: $LOG_DIR/feature-store.log)"
-    (cd apps/feature-store && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/feature-store && METRICS_PORT=9114 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m serve_features >"$LOG_DIR/feature-store.log" 2>&1 &)
 else
     skip "feature-store"
@@ -125,7 +132,7 @@ fi
 
 if ! pgrep -f "python3 -u -m extractor" >/dev/null; then
     say "запускаю feature-extractor (лог: $LOG_DIR/extractor.log)"
-    (cd apps/feature-extractor && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/feature-extractor && METRICS_PORT=9102 PYTHONPATH=src:$ROOT/libs \
         FEATURE_STORE_ADDR="${FEATURE_STORE_ADDR:-localhost:50055}" \
         nohup python3 -u -m extractor >"$LOG_DIR/extractor.log" 2>&1 &)
 else
@@ -151,7 +158,7 @@ fi
 # бюджета — docs/HANDOFF.md, «Темп сбора и бюджет квоты».
 if ! pgrep -f "collector --source opendota-public" >/dev/null; then
     say "запускаю data-collector (лог: $LOG_DIR/collector.log)"
-    (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-1}" PYTHONPATH=src:$ROOT/libs \
+    (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-1}" METRICS_PORT=9105 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m collector --source opendota-public \
             --interval "${PUBLIC_REPLAY_INTERVAL:-3600}" \
             >"$LOG_DIR/collector.log" 2>&1 &)
@@ -161,7 +168,7 @@ fi
 
 if ! pgrep -f "collector --source opendota-timeline --interval" >/dev/null; then
     say "запускаю timeline-collector (лог: $LOG_DIR/timeline.log)"
-    (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-10}" PYTHONPATH=src:$ROOT/libs \
+    (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-10}" METRICS_PORT=9108 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m collector --source opendota-timeline \
             --interval "${TIMELINE_INTERVAL:-1800}" \
             >"$LOG_DIR/timeline.log" 2>&1 &)
@@ -171,7 +178,7 @@ fi
 
 if ! pgrep -f "collector --source opendota-timeline-pro" >/dev/null; then
     say "запускаю pro-timeline-collector (лог: $LOG_DIR/timeline-pro.log)"
-    (cd apps/data-collector && TIMELINE_LIMIT="${PRO_TIMELINE_LIMIT:-5}" PYTHONPATH=src:$ROOT/libs \
+    (cd apps/data-collector && TIMELINE_LIMIT="${PRO_TIMELINE_LIMIT:-5}" METRICS_PORT=9110 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m collector --source opendota-timeline-pro \
             --interval "${PRO_TIMELINE_INTERVAL:-3600}" \
             >"$LOG_DIR/timeline-pro.log" 2>&1 &)
@@ -202,7 +209,7 @@ fi
 # serve_features, и similarity молча не поднимался бы, пока жив любой из них.
 if ! pgrep -f "python3 -u -m serve$" >/dev/null; then
     say "запускаю similarity (gRPC :50052, лог: $LOG_DIR/similarity.log)"
-    (cd apps/similarity && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/similarity && METRICS_PORT=9111 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m serve >"$LOG_DIR/similarity.log" 2>&1 &)
 else
     skip "similarity"
@@ -210,7 +217,7 @@ fi
 
 if ! pgrep -f "python3 -u -m serve_draft" >/dev/null; then
     say "запускаю draft (gRPC :50053, лог: $LOG_DIR/draft.log)"
-    (cd apps/draft && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/draft && METRICS_PORT=9112 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m serve_draft >"$LOG_DIR/draft.log" 2>&1 &)
 else
     skip "draft"
@@ -218,7 +225,7 @@ fi
 
 if ! pgrep -f "python3 -u -m serve_coach" >/dev/null; then
     say "запускаю coach (gRPC :50054, лог: $LOG_DIR/coach.log)"
-    (cd apps/coach && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/coach && METRICS_PORT=9113 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m serve_coach >"$LOG_DIR/coach.log" 2>&1 &)
 else
     skip "coach"
@@ -226,7 +233,7 @@ fi
 
 if ! pgrep -f "python3 -u -m reportgen" >/dev/null; then
     say "запускаю report-generator (лог: $LOG_DIR/report-gen.log)"
-    (cd apps/report-generator && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/report-generator && METRICS_PORT=9103 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m reportgen >"$LOG_DIR/report-gen.log" 2>&1 &)
 else
     skip "report-generator"
@@ -235,7 +242,7 @@ fi
 # 5. Авто-обучение (+ Telegram-уведомления из env-файла) -----------------------
 if ! pgrep -f "python3 -u -m training.auto" >/dev/null; then
     say "запускаю auto-train (лог: $LOG_DIR/wp-auto.log)"
-    (cd apps/ml-service && PYTHONPATH=src:$ROOT/libs \
+    (cd apps/ml-service && METRICS_PORT=9106 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m training.auto >"$LOG_DIR/wp-auto.log" 2>&1 &)
 else
     skip "auto-train"

@@ -90,3 +90,35 @@ def channel(target: str, service: str = "") -> grpc.Channel:
                                          certificate_chain=_read(cert))
     logger.info("mtls_client target=%s service=%s", target, service or target)
     return grpc.secure_channel(target, creds)
+
+
+# -- Метрики: наблюдаемость не должна ронять сервис -----------------------------
+#
+# Инцидент 2026-07-27 (локалка владельца): семь сервисов разом не поднялись
+# с OSError: [Errno 98] Address already in use на start_http_server. Порт
+# метрик был занят, и каждый сервис умирал ДО начала полезной работы —
+# коллекторы неделю не собирали данные из-за Prometheus-эндпоинта.
+#
+# Это неверная расстановка приоритетов: метрики нужны, чтобы наблюдать за
+# конвейером, а не чтобы быть условием его работы. Занятый порт теперь
+# даёт WARNING и сервис продолжает — но молча это не проходит: без метрик
+# дашборд покажет сервис как DOWN, и оператор должен понимать почему.
+def serve_metrics(port: int, service: str) -> bool:
+    """Поднять Prometheus-эндпоинт. Вернуть True, если удалось.
+
+    port=0 — метрики намеренно выключены (используется в тестах).
+    """
+    if not port:
+        return False
+    from prometheus_client import start_http_server
+    try:
+        start_http_server(port)
+        return True
+    except OSError as e:
+        logger.warning(
+            "metrics_unavailable service=%s port=%d (%s) — сервис работает "
+            "БЕЗ метрик, дашборд покажет его как DOWN. Порт занят другим "
+            "процессом или зарезервирован системой "
+            "(WSL2: netsh interface ipv4 show excludedportrange protocol=tcp)",
+            service, port, e)
+        return False

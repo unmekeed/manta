@@ -24,7 +24,7 @@ import grpc
 
 import manta_grpc
 import psycopg
-from prometheus_client import Counter, start_http_server
+from prometheus_client import Counter
 
 from engine.llm import llm_from_env
 from engine.plan import analyze_player, render_plan
@@ -123,7 +123,7 @@ def main() -> int:
                '"service":"coach","msg":"%(message)s"}')
     metrics_port = int(os.getenv("METRICS_PORT", "9113"))
     if metrics_port:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "coach")
     port = int(os.getenv("GRPC_PORT", "50054"))
     server, bound, _ = build_server(
         os.getenv("POSTGRES_DSN",

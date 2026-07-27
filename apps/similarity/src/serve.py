@@ -22,7 +22,7 @@ from concurrent import futures
 import grpc
 
 import manta_grpc
-from prometheus_client import Counter, Gauge, start_http_server
+from prometheus_client import Counter, Gauge
 
 from engine.index import MatchIndex
 from gen import services_pb2, services_pb2_grpc
@@ -105,7 +105,7 @@ def main() -> int:
 
     metrics_port = int(os.getenv("METRICS_PORT", "9111"))
     if metrics_port:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "similarity")
     port = int(os.getenv("GRPC_PORT", "50052"))
     server, bound = build_server(index, port)
     server.start()

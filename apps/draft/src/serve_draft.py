@@ -24,7 +24,7 @@ import grpc
 
 import manta_grpc
 import requests
-from prometheus_client import Counter, Gauge, start_http_server
+from prometheus_client import Counter, Gauge
 
 from engine.recommend import suggest
 from engine.stats import DraftStats, build_stats
@@ -136,7 +136,7 @@ def main() -> int:
 
     metrics_port = int(os.getenv("METRICS_PORT", "9112"))
     if metrics_port:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "draft")
     port = int(os.getenv("GRPC_PORT", "50053"))
     server, bound = build_server(holder, port)
     server.start()

@@ -33,7 +33,8 @@ from pathlib import Path
 
 import joblib
 import requests
-from prometheus_client import Counter, Gauge, start_http_server
+import manta_grpc
+from prometheus_client import Counter, Gauge
 
 from registry import registry_from_env
 
@@ -268,7 +269,7 @@ def main() -> int:
 
     metrics_port = int(os.getenv("METRICS_PORT", "9106"))
     if metrics_port and not args.once:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "auto-train")
     logger.info("auto-train started: interval=%ds min_new=%d min_total=%d "
                 "metrics=:%d", interval, min_new, min_total, metrics_port)
     if _notifier.enabled:

@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from confluent_kafka import Consumer, Producer
-from prometheus_client import Counter, Histogram, start_http_server
+import manta_grpc
+from prometheus_client import Counter, Histogram
 
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
@@ -89,7 +90,6 @@ class Extractor:
         if not self.cfg.feature_store_addr or not trows:
             return
         try:
-            import manta_grpc
             from gen import services_pb2, services_pb2_grpc
             if self._fs_stub is None:
                 chan = manta_grpc.channel(self.cfg.feature_store_addr, "feature-store")
@@ -236,7 +236,7 @@ class Extractor:
         consumer.subscribe([TOPIC_IN])
         metrics_port = int(os.getenv("METRICS_PORT", "9102"))
         if metrics_port:
-            start_http_server(metrics_port)
+            manta_grpc.serve_metrics(metrics_port, "feature-extractor")
         logger.info("feature-extractor started: brokers=%s topic=%s metrics=:%s",
                     self.cfg.kafka_brokers, TOPIC_IN, metrics_port)
         try:

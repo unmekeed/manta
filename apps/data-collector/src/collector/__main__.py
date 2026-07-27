@@ -11,7 +11,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-from prometheus_client import Counter, start_http_server
+import manta_grpc
+from prometheus_client import Counter
 
 from .runner import Collector, CollectorConfig
 
@@ -121,7 +122,7 @@ def main() -> None:
 
     metrics_port = int(os.getenv("METRICS_PORT", default_metrics_port))
     if metrics_port and not args.once:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "data-collector")
     log = logging.getLogger("collector")
     try:
         while True:

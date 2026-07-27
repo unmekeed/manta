@@ -22,7 +22,7 @@ import grpc
 
 import manta_grpc
 import numpy as np
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Histogram
 
 from explain.winprob_shap import explain_matrix
 from gen import services_pb2, services_pb2_grpc
@@ -169,7 +169,7 @@ def main() -> None:
 
     metrics_port = int(os.getenv("METRICS_PORT", "9104"))
     if metrics_port:
-        start_http_server(metrics_port)
+        manta_grpc.serve_metrics(metrics_port, "ml-service")
     server, port = build_server(args.model, args.port)
     server.start()
     logger.info("ml-service gRPC listening on :%d (model %s)", port, args.model)

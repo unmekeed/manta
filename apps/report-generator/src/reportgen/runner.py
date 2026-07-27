@@ -23,7 +23,7 @@ import manta_grpc
 import psycopg
 import requests
 from confluent_kafka import Consumer, Producer
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Histogram
 
 from . import retention
 from .builder import build_analysis, build_timeline
@@ -361,7 +361,7 @@ class ReportGenerator:
         consumer.subscribe([TOPIC_IN])
         metrics_port = int(os.getenv("METRICS_PORT", "9103"))
         if metrics_port:
-            start_http_server(metrics_port)
+            manta_grpc.serve_metrics(metrics_port, "report-generator")
         logger.info("report-generator started: brokers=%s topic=%s ml=%s metrics=:%s",
                     self.cfg.kafka_brokers, TOPIC_IN, self.cfg.ml_grpc_addr,
                     metrics_port)
