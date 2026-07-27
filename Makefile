@@ -138,6 +138,9 @@ ml-auto-train: ## Автономное переобучение (порог но
 ml-status:     ## Статус обучения: production-версия, разрыв датасета, кандидаты
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.status
 
+ml-ablation:   ## Ablation фич WP: какая заслужила место (ARGS="--each")
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.ablation $(ARGS)
+
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
 	cd apps/ml-service && PYTHONPATH=src python3 -m training.audit
 
