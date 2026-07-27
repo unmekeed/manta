@@ -27,7 +27,12 @@ CH_PASS="${CLICKHOUSE_PASSWORD:-dota_dev_password}"
 PG_USER="${POSTGRES_USER:-dota}"
 PG_DB="${POSTGRES_DB:-manta}"
 
-REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures)
+# MatchDraft и MatchEvents добавлены в спринте 76: они появились с треком F
+# (миграция 011), но в список переноса их тогда не внесли — слепок молча
+# терял драфты, OOF-прайоры и события матчей. Обе — ReplacingMergeTree, то
+# есть повторная вставка дедуплицируется движком, как у витрин.
+REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures
+                  MatchDraft MatchEvents)
 RAW_TABLES=(EconomyTimeline PositionSnapshots)
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }
