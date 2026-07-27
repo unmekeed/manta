@@ -13,7 +13,7 @@ RUN cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)" \
     && ctest --test-dir build --output-on-failure
 
-FROM golang:1.24 AS go-build
+FROM golang:1.25 AS go-build
 WORKDIR /src
 COPY svc/go.mod svc/go.sum ./
 RUN go mod download
