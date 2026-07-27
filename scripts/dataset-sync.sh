@@ -42,6 +42,28 @@ usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,15p'; exit 1; }
 
 export_dataset() {
     local out="${1:-manta-dataset-$(date -u +%Y%m%dT%H%M).tar}"
+
+    # Проверяем цель ДО дампов, а не после. Иначе выгрузка шести таблиц
+    # ClickHouse и двух Postgres отрабатывает минуты, и только финальный
+    # tar падает «No such file or directory» — вся работа выброшена.
+    # Реальный случай: каталог на внешнем диске не был создан перед
+    # переустановкой системы, когда слепок и был нужнее всего.
+    local outdir; outdir=$(dirname "$out")
+    mkdir -p "$outdir" 2>/dev/null || true
+    if [ ! -d "$outdir" ] || [ ! -w "$outdir" ]; then
+        echo "ОШИБКА: каталог '$outdir' недоступен для записи." >&2
+        echo "  Внешний диск может быть не примонтирован в WSL:" >&2
+        echo "    ls /mnt/            # какие диски видны" >&2
+        echo "    sudo mkdir -p /mnt/d && sudo mount -t drvfs D: /mnt/d" >&2
+        exit 1
+    fi
+    # Пустой файл в цели: ловим переполненный диск и права до того, как
+    # потратим минуты на дампы.
+    if ! : >"$out" 2>/dev/null; then
+        echo "ОШИБКА: не могу создать '$out' (нет прав или диск полон)" >&2
+        exit 1
+    fi
+
     local dir; dir=$(mktemp -d)
     trap "rm -rf '$dir'" EXIT
 
