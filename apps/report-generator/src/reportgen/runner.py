@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ import requests
 from confluent_kafka import Consumer, Producer
 from prometheus_client import Counter, Histogram, start_http_server
 
+from . import retention
 from .builder import build_analysis, build_timeline
 from .gen import services_pb2, services_pb2_grpc
 
@@ -33,6 +35,8 @@ REPORTS_GENERATED = Counter(
     "reports_generated_total", "Сгенерированные отчёты")
 REPORTS_FAILED = Counter(
     "reports_failed_total", "Сбои генерации отчётов")
+REPORTS_PURGED = Counter(
+    "reports_purged_total", "Отчёты, удалённые по retention-политике")
 REPORT_DURATION = Histogram(
     "report_duration_seconds", "Время генерации отчёта",
     buckets=(0.25, 0.5, 1, 2.5, 5, 10, 20))
@@ -91,6 +95,10 @@ class ReportGenerator:
         self.producer = Producer({"bootstrap.servers": cfg.kafka_brokers})
         self.ml = services_pb2_grpc.MLServiceStub(
             manta_grpc.channel(cfg.ml_grpc_addr, "ml-service"))
+        # Retention: 0 — выключено (дефолт). Первая чистка — сразу после
+        # старта, дальше раз в сутки.
+        self._retention_days = retention.configured_days()
+        self._last_purge = -86400.0
 
     # -- источники данных -------------------------------------------------------
 
@@ -317,6 +325,29 @@ class ReportGenerator:
 
     # -- Kafka-петля ---------------------------------------------------------------
 
+    def _maybe_purge(self) -> None:
+        """Retention отчётов раз в сутки (Гл. 9.7, спринт 72).
+
+        Живёт в петле report-generator, а не в cron: сервис и так
+        единственный писатель MatchReports, отдельный планировщик — лишняя
+        точка отказа. Выключено, пока не задан REPORTS_RETENTION_DAYS.
+        Сбой чистки НЕ должен ронять генерацию отчётов — это гигиена
+        хранилища, а не путь данных.
+        """
+        days = self._retention_days
+        if days <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_purge < 86400:
+            return
+        self._last_purge = now
+        try:
+            n = retention.purge(self.db, days, apply=True)
+            if n:
+                REPORTS_PURGED.inc(n)
+        except Exception as e:  # noqa: BLE001 — гигиена не роняет конвейер
+            logger.warning("retention: чистка не удалась (%s)", e)
+
     def run(self) -> None:
         consumer = Consumer({
             "bootstrap.servers": self.cfg.kafka_brokers,
@@ -336,6 +367,7 @@ class ReportGenerator:
                     metrics_port)
         try:
             while True:
+                self._maybe_purge()
                 msg = consumer.poll(1.0)
                 if msg is None:
                     continue
