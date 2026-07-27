@@ -473,6 +473,10 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
             "lane": p.get("lane", ""),
             "hero": p.get("hero", ""),
             "player_name": p.get("player_name", ""),
+            # Псевдоним субъекта (Гл. 9.7): в режиме pseudonymize ник
+            # пуст, и без хеша GDPR-экспорт молча не нашёл бы отчёты
+            # с данными этого игрока.
+            "player_hash": p.get("player_hash", ""),
             "laning_score": model_ls if model_ls is not None
             else _laning_score(p),
             "laning_model": model_ls is not None,

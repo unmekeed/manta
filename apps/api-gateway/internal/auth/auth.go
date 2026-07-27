@@ -74,11 +74,11 @@ type Denylist interface {
 }
 
 type Authenticator struct {
-	priv     *rsa.PrivateKey
-	pub      *rsa.PublicKey
-	kid      string
+	priv      *rsa.PrivateKey
+	pub       *rsa.PublicKey
+	kid       string
 	accessTTL time.Duration
-	deny     Denylist
+	deny      Denylist
 }
 
 // Enabled=false — ключей нет, проверка токенов отключена (dev-стенд).
@@ -208,8 +208,8 @@ func (a *Authenticator) Issue(sub, role, plan string) (string, *Claims, error) {
 }
 
 var (
-	ErrNoToken  = errors.New("нет токена")
-	ErrRevoked  = errors.New("токен отозван")
+	ErrNoToken = errors.New("нет токена")
+	ErrRevoked = errors.New("токен отозван")
 )
 
 // Verify проверяет подпись, срок и denylist. Алгоритм жёстко зафиксирован

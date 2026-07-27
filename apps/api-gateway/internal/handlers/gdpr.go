@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/unmekeed/manta/api-gateway/internal/pii"
 )
 
 // GDPR-эндпоинты (Гл. 9.7): право на экспорт и право на удаление.
@@ -92,6 +94,18 @@ func playerFromPath(r *http.Request) string {
 	return strings.TrimSpace(id)
 }
 
+// subjectWhere — условие «эта строка принадлежит субъекту» для ClickHouse.
+//
+// Ищем по ОБОИМ идентификаторам, потому что витрина смешанная: строки,
+// записанные до спринта 70 (и любые в режиме plain), несут ник; строки в
+// режиме pseudonymize — только псевдоним. Искать по чему-то одному значило
+// бы молча не найти часть данных субъекта, а для GDPR неполный экспорт или
+// неполное стирание — это невыполненное требование, а не мелкая недоделка.
+func subjectWhere(player string) string {
+	return fmt.Sprintf("(player_name = %s OR player_hash = %s)",
+		chQuote(player), chQuote(pii.PseudonymEnv(player)))
+}
+
 // ExportPlayerData — GET /api/v1/players/{playerId}/export (Гл. 9.7,
 // право на переносимость). Отдаёт JSON со всеми записями субъекта.
 func (h *Handlers) ExportPlayerData(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +123,7 @@ func (h *Handlers) ExportPlayerData(w http.ResponseWriter, r *http.Request) {
 		`SELECT match_id, team, hero, player_name, won, gpm, xpm,
 		        lh_at_10, dn_at_10, lane, tier
 		   FROM PlayerMatchFeatures FINAL
-		  WHERE player_name = %s ORDER BY match_id`, chQuote(player)),
+		  WHERE %s ORDER BY match_id`, subjectWhere(player)),
 		"JSONEachRow")
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "internal-error",
@@ -123,14 +137,19 @@ func (h *Handlers) ExportPlayerData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Отчёты, в которых субъект упомянут (jsonb-путь players[].player_name).
+	// Отчёты, в которых субъект упомянут: по нику (режим plain и всё,
+	// сгенерированное до спринта 70) ИЛИ по псевдониму (в режиме
+	// pseudonymize ник в отчёте пуст, и поиск только по нему вернул бы
+	// ноль отчётов при живых данных субъекта).
 	var reports []map[string]any
 	rows, err := h.DB.Query(ctx, `
 		SELECT match_id, generated_at
 		  FROM MatchReports
 		 WHERE analysis->'players' @> $1::jsonb
+		    OR analysis->'players' @> $2::jsonb
 		 ORDER BY generated_at DESC`,
-		fmt.Sprintf(`[{"player_name": %q}]`, player))
+		fmt.Sprintf(`[{"player_name": %q}]`, player),
+		fmt.Sprintf(`[{"player_hash": %q}]`, pii.PseudonymEnv(player)))
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -174,30 +193,41 @@ func (h *Handlers) ErasePlayerData(w http.ResponseWriter, r *http.Request) {
 
 	ch := newCHClient()
 	before, err := ch.do(ctx, fmt.Sprintf(
-		`SELECT count() FROM PlayerMatchFeatures FINAL WHERE player_name = %s`,
-		chQuote(player)), "TabSeparated")
+		`SELECT count() FROM PlayerMatchFeatures FINAL WHERE %s`,
+		subjectWhere(player)), "TabSeparated")
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "internal-error",
 			"Erasure failed", err.Error())
 		return
 	}
+	// Стираются ОБА идентификатора. Оставить player_hash значило бы
+	// оставить субъекта находимым по псевдониму — то есть не выполнить
+	// удаление, а только спрятать его от поиска по имени.
 	if _, err := ch.do(ctx, fmt.Sprintf(
-		`ALTER TABLE PlayerMatchFeatures UPDATE player_name = '' WHERE player_name = %s`,
-		chQuote(player)), ""); err != nil {
+		`ALTER TABLE PlayerMatchFeatures UPDATE player_name = '', player_hash = ''
+		  WHERE %s`, subjectWhere(player)), ""); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "internal-error",
 			"Erasure failed", err.Error())
 		return
 	}
 
-	// jsonb_set по каждому элементу players[] с этим никнеймом.
+	// jsonb_set по каждому элементу players[] этого субъекта. Сопоставление
+	// и очистка — по ОБОИМ идентификаторам: оставить player_hash значило бы
+	// оставить субъекта находимым по псевдониму.
 	tag, err := h.DB.Exec(ctx, `
 		UPDATE MatchReports SET analysis = jsonb_set(analysis, '{players}', (
 		    SELECT jsonb_agg(CASE WHEN p->>'player_name' = $1
-		                          THEN jsonb_set(p, '{player_name}', '""'::jsonb)
+		                            OR (p->>'player_hash' = $2 AND $2 <> '')
+		                          THEN jsonb_set(
+		                                 jsonb_set(p, '{player_name}', '""'::jsonb),
+		                                 '{player_hash}', '""'::jsonb)
 		                          ELSE p END)
 		      FROM jsonb_array_elements(analysis->'players') p))
-		 WHERE analysis->'players' @> $2::jsonb`,
-		player, fmt.Sprintf(`[{"player_name": %q}]`, player))
+		 WHERE analysis->'players' @> $3::jsonb
+		    OR analysis->'players' @> $4::jsonb`,
+		player, pii.PseudonymEnv(player),
+		fmt.Sprintf(`[{"player_name": %q}]`, player),
+		fmt.Sprintf(`[{"player_hash": %q}]`, pii.PseudonymEnv(player)))
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "internal-error",
 			"Erasure failed (postgres)", err.Error())
@@ -205,11 +235,11 @@ func (h *Handlers) ErasePlayerData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"subject":            player,
-		"accepted_at":        time.Now().UTC(),
-		"match_records":      strings.TrimSpace(string(before)),
-		"reports_updated":    tag.RowsAffected(),
+		"subject":             player,
+		"accepted_at":         time.Now().UTC(),
+		"match_records":       strings.TrimSpace(string(before)),
+		"reports_updated":     tag.RowsAffected(),
 		"clickhouse_mutation": "асинхронная: SELECT * FROM system.mutations WHERE table='PlayerMatchFeatures' AND is_done=0",
-		"note":               "никнейм стёрт; обезличенная игровая статистика сохранена (принцип минимизации, Гл. 9.7)",
+		"note":                "никнейм стёрт; обезличенная игровая статистика сохранена (принцип минимизации, Гл. 9.7)",
 	})
 }

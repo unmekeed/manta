@@ -31,7 +31,13 @@ migrate-ch:    ## Миграции ClickHouse (только новые; журн
 
 ## Код -------------------------------------------------------------------------
 
-lint:          ## Статический анализ Go-сервисов
+lint:          ## Статический анализ Go-сервисов (gofmt + vet)
+	@for s in $(GO_SERVICES); do \
+		echo ">> gofmt $$s"; \
+		out=$$(gofmt -l $$s); \
+		if [ -n "$$out" ]; then echo "не отформатировано:"; echo "$$out"; \
+			echo "лечение: gofmt -w $$s"; exit 1; fi; \
+	done
 	@for s in $(GO_SERVICES); do \
 		echo ">> vet $$s"; (cd $$s && go vet ./...) || exit 1; \
 	done

@@ -40,7 +40,7 @@ type matchDownloaded struct {
 	JobID     string `json:"job_id"`
 	ReplayURL string `json:"replay_url"`
 	Source    string `json:"source"`
-	Tier      string `json:"tier"` // Premium | Professional | ... (Гл. 4.2)
+	Tier      string `json:"tier"`  // Premium | Professional | ... (Гл. 4.2)
 	Patch     int    `json:"patch"` // id патча OpenDota; 0 — неизвестен (A9)
 }
 

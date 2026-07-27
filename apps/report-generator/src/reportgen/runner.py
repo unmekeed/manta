@@ -163,7 +163,8 @@ class ReportGenerator:
 
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
-            "SELECT player_id, team, hero, player_name, won, gpm, xpm,"
+            "SELECT player_id, team, hero, player_name, player_hash,"
+            "       won, gpm, xpm,"
             "       lh_at_5, dn_at_5, lh_at_10, dn_at_10, lane,"
             "       lane_nw_diff_at_10, gold_share"
             "  FROM PlayerMatchFeatures FINAL"

@@ -20,6 +20,7 @@ from prometheus_client import Counter, Histogram, start_http_server
 
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
+from .pseudonym import apply as pseudonymize
 
 logger = logging.getLogger("extractor")
 
@@ -146,6 +147,10 @@ class Extractor:
         for r in prows:
             r["match_id"] = match_id
             r["tier"] = tier
+            # Гл. 9.7: псевдоним пишется всегда, ник — только в режиме
+            # plain. Так витрина готова к переключению MANTA_PII_MODE без
+            # перезаливки, а GDPR-поиск по хешу единообразен.
+            pseudonymize(r)
         for r in trows:
             r["match_id"] = match_id
             r["tier"] = tier
