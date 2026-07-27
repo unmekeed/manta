@@ -140,3 +140,52 @@ def test_every_action_is_argv_not_shell():
     for name, spec in dashboard.ACTIONS.items():
         assert isinstance(spec["argv"], list), name
         assert all(isinstance(a, str) for a in spec["argv"]), name
+
+
+# -- Виды обучения (спринт 75) -------------------------------------------------
+
+def test_training_endpoint_degrades_gracefully(server, monkeypatch, tmp_path):
+    """Когда auto-train и ClickHouse не подняты, раздел обучения обязан
+    вернуть пустые поля, а не упасть: дашборд — то, что смотрят ИМЕННО
+    когда всё лежит."""
+    monkeypatch.setattr(dashboard, "ABLATION_JSON", tmp_path / "нет.json")
+    monkeypatch.setattr(dashboard, "_growth_cache", {"ts": 0.0, "rows": []})
+    code, body = _get(server, "/api/training")
+    assert code == 200
+    assert body["autotrain_up"] is False
+    assert body["phases"] == {"early": None, "mid": None, "late": None}
+    assert body["ablation"]["rows"] == []
+
+
+def test_ablation_report_is_read_when_present(monkeypatch, tmp_path):
+    path = tmp_path / "ablation.json"
+    path.write_text(json.dumps({
+        "base_brier": 0.1484,
+        "rows": [{"target": "F3_драфт_прайор", "coverage": 1.0,
+                  "delta": 0.00034, "verdict": "эффект ничтожен"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "ABLATION_JSON", path)
+    a = dashboard._ablation()
+    assert a["base_brier"] == 0.1484
+    assert a["rows"][0]["target"] == "F3_драфт_прайор"
+
+
+def test_psi_top_sorted_desc(monkeypatch):
+    """PSI показываем худшими вперёд: именно большие значения означают,
+    что модель обучена не на том, что сейчас приходит."""
+    fake = {("wp_feature_psi", (("feature", "a"),)): 0.05,
+            ("wp_feature_psi", (("feature", "b"),)): 0.9,
+            ("wp_feature_psi", (("feature", "c"),)): 0.4,
+            ("wp_psi_max", ()): 0.9}
+    monkeypatch.setattr(dashboard, "_scrape", lambda port: fake)
+    monkeypatch.setattr(dashboard, "_clickhouse_growth", lambda: [])
+    t = dashboard.training_snapshot()
+    assert [r["feature"] for r in t["psi_top"]] == ["b", "c", "a"]
+    assert t["psi_max"] == 0.9
+
+
+def test_ablation_action_writes_json():
+    """Кнопка обязана запускать ablation с --json: иначе результат остался
+    бы только в консоли задания, и таблице нечего показывать."""
+    argv = dashboard.ACTIONS["ablation"]["argv"]
+    assert any("--json" in a for a in argv), argv

@@ -8,3 +8,7 @@ apps/replay-parser/build/
 .env
 *.env
 deployments/.env
+
+# Артефакты моделей и отчёты обучения: бинарные, воспроизводимые
+# обучением, место им в реестре (MinIO/MLflow), а не в git.
+apps/*/models/

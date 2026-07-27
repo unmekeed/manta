@@ -38,6 +38,11 @@ SERVICES = [
     ("data-collector",    int(os.getenv("COLLECTOR_METRICS_PORT", "9105"))),
     ("ml-autotrain",      int(os.getenv("AUTOTRAIN_METRICS_PORT", "9106"))),
 ]
+# Корень монорепо: отсюда запускаются make-цели панели управления и
+# читается отчёт ablation. Определяется ДО первого использования —
+# модульный уровень исполняется сверху вниз.
+ROOT = Path(__file__).resolve().parent.parent
+
 CH_URL = os.getenv("CLICKHOUSE_URL", "http://localhost:8123")
 CH_DB = os.getenv("CLICKHOUSE_DB", "manta")
 CH_USER = os.getenv("CLICKHOUSE_USER", "dota")
@@ -166,6 +171,84 @@ def collect() -> dict:
 
 
 
+# -- Виды обучения (спринт 75) -------------------------------------------------
+#
+# Всё берётся из уже опрашиваемых источников — никаких новых зависимостей:
+#   * фазовые Brier, PSI, размер датасета — Prometheus ml-autotrain (:9106);
+#   * рост датасета по дням — ClickHouse (тот же HTTP-запрос, что и матчи);
+#   * ablation — JSON, который пишет `make ml-ablation`.
+#
+# Читать артефакт модели напрямую было бы честнее по свежести, но потянуло
+# бы lightgbm/sklearn в дашборд, который намеренно живёт на голой
+# стандартной библиотеке и обязан подниматься, когда всё остальное лежит.
+ABLATION_JSON = ROOT / "apps" / "ml-service" / "models" / "ablation.json"
+GROWTH_DAYS = 30
+_growth_cache: dict = {"ts": 0.0, "rows": []}
+GROWTH_TTL_S = 300        # рост по дням меняется медленно, дёргать CH чаще незачем
+
+
+def _clickhouse_growth() -> list[dict]:
+    """Матчей в витрине по дням: видно, идёт сбор или встал."""
+    now = time.time()
+    if _growth_cache["rows"] and now - _growth_cache["ts"] < GROWTH_TTL_S:
+        return _growth_cache["rows"]
+    q = (f"SELECT toDate(computed_at) AS d, uniqExact(match_id) AS n "
+         f"FROM {CH_DB}.MatchTimelineFeatures "
+         f"WHERE computed_at >= now() - INTERVAL {GROWTH_DAYS} DAY "
+         f"GROUP BY d ORDER BY d FORMAT TSV")
+    try:
+        req = urllib.request.Request(
+            f"{CH_URL}/?database={CH_DB}", data=q.encode(),
+            headers={"X-ClickHouse-User": CH_USER,
+                     "X-ClickHouse-Key": CH_PASSWORD})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            rows = []
+            for line in r.read().decode().splitlines():
+                day, n = line.split("\t")
+                rows.append({"day": day, "n": int(n)})
+    except Exception:  # noqa: BLE001 — CH может быть не поднят
+        return _growth_cache["rows"]
+    _growth_cache.update(ts=now, rows=rows)
+    return rows
+
+
+def _ablation() -> dict:
+    """Последний отчёт ablation, если его запускали."""
+    try:
+        data = json.loads(ABLATION_JSON.read_text(encoding="utf-8"))
+        return {"base_brier": data.get("base_brier"),
+                "rows": data.get("rows", []),
+                "mtime": ABLATION_JSON.stat().st_mtime}
+    except Exception:  # noqa: BLE001 — файла может не быть, это норма
+        return {"base_brier": None, "rows": [], "mtime": None}
+
+
+def training_snapshot() -> dict:
+    auto = _scrape(int(os.getenv("AUTOTRAIN_METRICS_PORT", "9106"))) or {}
+    phases = {ph: _pick(auto, "wp_brier_phase", phase=ph)
+              for ph in ("early", "mid", "late")}
+    # PSI по фичам: показываем худшие — именно они означают, что модель
+    # обучена не на том, что сейчас приходит.
+    psi = sorted(
+        ((lbls[0][1] if lbls else "?", val)
+         for (name, lbls), val in auto.items() if name == "wp_feature_psi"),
+        key=lambda kv: -kv[1])[:8]
+    return {
+        "autotrain_up": bool(auto),
+        "phases": phases,
+        "psi_max": _pick(auto, "wp_psi_max"),
+        "psi_top": [{"feature": f, "psi": round(v, 3)} for f, v in psi],
+        "brier_valid": _pick(auto, "wp_brier_valid"),
+        "brier_benchmark": _pick(auto, "wp_brier_benchmark_pro"),
+        "dataset": _pick(auto, "training_dataset_matches"),
+        "prod": _pick(auto, "training_production_matches"),
+        "promoted": _pick(auto, "retrains_total", outcome="promoted"),
+        "rejected": _pick(auto, "retrains_total", outcome="rejected"),
+        "growth": _clickhouse_growth(),
+        "ablation": _ablation(),
+    }
+
+
 # -- Панель управления (спринт 74) ---------------------------------------------
 #
 # Дашборд живёт на хосте и потому МОЖЕТ запускать процессы конвейера — это
@@ -190,7 +273,6 @@ def collect() -> dict:
 #
 # 3. БЕЛЫЙ СПИСОК ДЕЙСТВИЙ. Никакого поля «введите команду»: клиент
 #    присылает только ключ из ACTIONS, аргументы зашиты в коде.
-ROOT = Path(__file__).resolve().parent.parent
 ACTION_HEADER = "X-Manta-Action"
 
 ACTIONS = {
@@ -206,7 +288,11 @@ ACTIONS = {
     "train":    {"label": "Переобучить WP", "argv": ["make", "ml-train"],
                  "danger": False,
                  "hint": "обучение + гейт; продвижение решает гейт"},
-    "ablation": {"label": "Ablation фич", "argv": ["make", "ml-ablation"],
+    "ablation": {"label": "Ablation фич",
+                 # --json обязателен: без него панели нечего показать,
+                 # результат остался бы только в консоли задания.
+                 "argv": ["make", "ml-ablation",
+                          "ARGS=--json models/ablation.json"],
                  "danger": False,
                  "hint": "переобучение без каждой группы фич, долго"},
     "status":   {"label": "Статус обучения", "argv": ["make", "ml-status"],
@@ -334,7 +420,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200 if ok else 409, {"ok": ok, "message": msg})
 
     def do_GET(self):
-        if self.path.startswith("/api/job"):
+        if self.path.startswith("/api/training"):
+            self._json(200, training_snapshot())
+        elif self.path.startswith("/api/job"):
             self._json(200, {"actions_enabled": actions_enabled(),
                              "job": JOB.snapshot()})
         elif self.path.startswith("/api/metrics"):
@@ -375,6 +463,27 @@ PAGE = r"""<!doctype html>
   button.act:disabled { opacity: .45; cursor: not-allowed; }
   button.act.danger { border-color: #5a3230; color: #ffb4b0; }
   .note { color: var(--warning); font-size: 12px; }
+  .kv { display: inline-flex; flex-direction: column; gap: 2px;
+        background: var(--surface-2); border: 1px solid var(--border);
+        border-radius: 7px; padding: 7px 11px; min-width: 96px; }
+  .kv .k { font-size: 11px; color: var(--text-3); }
+  .kv .v { font-size: 17px; font-weight: 600; }
+  .kv .v.warn { color: var(--warning); }
+  .kv .v.bad { color: var(--critical); }
+  .sub { margin: 14px 0 6px; font-size: 12px; color: var(--text-3);
+         text-transform: uppercase; letter-spacing: .04em; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 72px;
+          padding: 6px; background: var(--surface-0);
+          border: 1px solid var(--border); border-radius: 7px; }
+  .bars i { flex: 1 1 0; background: var(--accent); border-radius: 2px 2px 0 0;
+            min-height: 2px; display: block; }
+  .bars i.zero { background: var(--surface-2); }
+  table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.tbl th { text-align: left; color: var(--text-3); font-weight: 500;
+                 padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  table.tbl td { padding: 5px 8px; border-bottom: 1px solid var(--surface-2);
+                 color: var(--text-2); }
+  table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .job-head { margin-top: 12px; font-size: 13px; color: var(--text-2); }
   .job-head.running { color: var(--warning); }
   .job-head.ok { color: var(--good); }
@@ -470,6 +579,15 @@ PAGE = r"""<!doctype html>
   <h2>Поток данных</h2>
   <div class="grid" id="grid-flow"></div>
 </main>
+
+<section class="panel">
+  <h2>Обучение модели</h2>
+  <div id="tr-head" class="job-head">загрузка…</div>
+  <div id="tr-phases" class="controls"></div>
+  <div id="tr-growth"></div>
+  <div id="tr-psi"></div>
+  <div id="tr-abl"></div>
+</section>
 
 <section class="panel">
   <h2>Управление</h2>
@@ -638,6 +756,79 @@ async function pollJob() {
 
 pollJob();
 setInterval(pollJob, 1500);
+
+// -- Виды обучения ------------------------------------------------------------
+const esc = t => String(t).replace(/[&<>]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const num = (v, d=4) => v === null || v === undefined ? "—" : Number(v).toFixed(d);
+
+function kv(k, v, cls="") {
+  return `<div class="kv"><span class="k">${esc(k)}</span>` +
+         `<span class="v ${cls}">${esc(v)}</span></div>`;
+}
+
+function renderTraining(t) {
+  const head = document.getElementById("tr-head");
+  if (!t.autotrain_up) {
+    head.textContent = "auto-train не запущен — метрики обучения недоступны";
+    head.className = "job-head fail";
+  } else {
+    head.textContent = `датасет ${t.dataset ?? "—"} матчей, ` +
+      `в проде ${t.prod ?? "—"} · продвижений ${t.promoted ?? 0}, ` +
+      `отклонено ${t.rejected ?? 0}`;
+    head.className = "job-head";
+  }
+
+  // Фазовые Brier: агрегат маскирует, что поздняя игра тривиальна, а
+  // ранняя — там, где модель реально слаба.
+  document.getElementById("tr-phases").innerHTML =
+    kv("early", num(t.phases.early)) + kv("mid", num(t.phases.mid)) +
+    kv("late", num(t.phases.late)) +
+    kv("valid", num(t.brier_valid)) +
+    kv("про-эталон", num(t.brier_benchmark));
+
+  // Рост датасета по дням: пустой столбец = день без сбора.
+  const g = t.growth || [];
+  const max = Math.max(1, ...g.map(r => r.n));
+  document.getElementById("tr-growth").innerHTML = !g.length ? "" :
+    `<div class="sub">Матчей в день (${g.length} дн., максимум ${max})</div>` +
+    `<div class="bars">` + g.map(r =>
+      `<i class="${r.n ? "" : "zero"}" style="height:${Math.max(2, 100*r.n/max)}%"` +
+      ` title="${esc(r.day)}: ${r.n}"></i>`).join("") + `</div>`;
+
+  // PSI: >0.25 принято считать «распределения разошлись».
+  const psi = t.psi_top || [];
+  document.getElementById("tr-psi").innerHTML = !psi.length ? "" :
+    `<div class="sub">Дрейф фич (PSI, максимум ${num(t.psi_max, 2)})</div>` +
+    `<table class="tbl"><tr><th>фича</th><th class="num">PSI</th></tr>` +
+    psi.map(r => `<tr><td>${esc(r.feature)}</td>` +
+      `<td class="num" style="color:${r.psi > 0.25 ? "var(--critical)" :
+        r.psi > 0.1 ? "var(--warning)" : "inherit"}">${num(r.psi, 3)}</td></tr>`
+    ).join("") + `</table>`;
+
+  // Ablation: Δ = Brier(без фичи) − Brier(со всеми); Δ>0 → фича полезна.
+  const a = t.ablation || {};
+  document.getElementById("tr-abl").innerHTML = !(a.rows || []).length ? "" :
+    `<div class="sub">Ablation фич (база ${num(a.base_brier)}; ` +
+    `Δ&gt;0 — без фичи хуже)</div>` +
+    `<table class="tbl"><tr><th>группа</th><th class="num">покрытие</th>` +
+    `<th class="num">Δ Brier</th><th>вердикт</th></tr>` +
+    a.rows.map(r => `<tr><td>${esc(r.target)}</td>` +
+      `<td class="num">${(100*(r.coverage ?? 0)).toFixed(0)}%</td>` +
+      `<td class="num">${r.delta === null || r.delta === undefined ? "—" :
+        (r.delta > 0 ? "+" : "") + Number(r.delta).toFixed(5)}</td>` +
+      `<td>${esc(r.verdict)}</td></tr>`).join("") + `</table>`;
+}
+
+async function pollTraining() {
+  try {
+    const r = await fetch("/api/training");
+    renderTraining(await r.json());
+  } catch (e) { /* панель перезапускается — молча ждём */ }
+}
+
+pollTraining();
+setInterval(pollTraining, 15000);
 </script>
 </body>
 </html>
