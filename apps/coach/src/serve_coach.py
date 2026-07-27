@@ -21,6 +21,8 @@ import threading
 from concurrent import futures
 
 import grpc
+
+import manta_grpc
 import psycopg
 from prometheus_client import Counter, start_http_server
 
@@ -67,7 +69,7 @@ class CoachService(services_pb2_grpc.RecommendationServiceServicer):
         if not match_ids:
             return []
         try:
-            chan = grpc.insecure_channel(self._sim_addr)
+            chan = manta_grpc.channel(self._sim_addr, "similarity")
             stub = services_pb2_grpc.SimilarityServiceStub(chan)
             res = stub.FindSimilar(services_pb2.SimilarityQuery(
                 entity="match", reference_id=match_ids[0], top_k=3),
@@ -110,7 +112,7 @@ def build_server(pg_dsn: str, similarity_addr: str, port: int
                          options=[("grpc.so_reuseport", 0)])
     svc = CoachService(pg_dsn, similarity_addr)
     services_pb2_grpc.add_RecommendationServiceServicer_to_server(svc, server)
-    bound = server.add_insecure_port(f"[::]:{port}")
+    bound = manta_grpc.add_port(server, port, "coach")
     return server, bound, svc
 
 

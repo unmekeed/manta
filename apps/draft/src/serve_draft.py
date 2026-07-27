@@ -21,6 +21,8 @@ from concurrent import futures
 from pathlib import Path
 
 import grpc
+
+import manta_grpc
 import requests
 from prometheus_client import Counter, Gauge, start_http_server
 
@@ -103,7 +105,7 @@ def build_server(holder: StatsHolder, port: int) -> tuple[grpc.Server, int]:
                          options=[("grpc.so_reuseport", 0)])
     services_pb2_grpc.add_DraftServiceServicer_to_server(
         DraftService(holder), server)
-    bound = server.add_insecure_port(f"[::]:{port}")
+    bound = manta_grpc.add_port(server, port, "draft")
     return server, bound
 
 

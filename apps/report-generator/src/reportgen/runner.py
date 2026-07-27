@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import grpc
+
+import manta_grpc
 import psycopg
 import requests
 from confluent_kafka import Consumer, Producer
@@ -88,7 +90,7 @@ class ReportGenerator:
         self.db = psycopg.connect(cfg.postgres_dsn, autocommit=True)
         self.producer = Producer({"bootstrap.servers": cfg.kafka_brokers})
         self.ml = services_pb2_grpc.MLServiceStub(
-            grpc.insecure_channel(cfg.ml_grpc_addr))
+            manta_grpc.channel(cfg.ml_grpc_addr, "ml-service"))
 
     # -- источники данных -------------------------------------------------------
 

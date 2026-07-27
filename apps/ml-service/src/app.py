@@ -19,6 +19,8 @@ import os
 from concurrent import futures
 
 import grpc
+
+import manta_grpc
 import numpy as np
 from prometheus_client import Counter, Histogram, start_http_server
 
@@ -154,7 +156,7 @@ def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server,
                          options=[("grpc.so_reuseport", 0)])
     services_pb2_grpc.add_MLServiceServicer_to_server(
         MLService(model, extra), server)
-    bound = server.add_insecure_port(f"[::]:{port}")
+    bound = manta_grpc.add_port(server, port, "ml-service")
     return server, bound
 
 

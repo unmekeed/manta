@@ -45,6 +45,32 @@ else
     chmod 644 "$DIR/tls-cert.pem"
 fi
 
+# mTLS внутренних gRPC-сервисов (Гл. 9.1, спринт 71). Свой мини-CA:
+# им подписывается один сертификат на все сервисы стенда. Для прода —
+# сертификаты от настоящего CA и по одному на сервис, чтобы отзывать
+# доступ поштучно; здесь цель другая — чтобы посторонний процесс не мог
+# подключиться к :50051 и спрашивать модель.
+if [ -f "$DIR/mtls-ca.pem" ]; then
+    echo ">> $DIR/mtls-ca.pem уже существует — пропуск"
+else
+    echo ">> CA и сертификат для mTLS (localhost, 365 дней)"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+        -keyout "$DIR/mtls-ca-key.pem" -out "$DIR/mtls-ca.pem" \
+        -subj "/CN=Manta dev CA/O=Manta dev" 2>/dev/null
+    openssl req -newkey rsa:2048 -nodes \
+        -keyout "$DIR/mtls-key.pem" -out "$DIR/mtls.csr" \
+        -subj "/CN=manta-service/O=Manta dev" 2>/dev/null
+    # SAN обязателен: gRPC проверяет имя хоста, и без него клиент
+    # отвергнет собственный сертификат сервера.
+    openssl x509 -req -in "$DIR/mtls.csr" -days 365 \
+        -CA "$DIR/mtls-ca.pem" -CAkey "$DIR/mtls-ca-key.pem" -CAcreateserial \
+        -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n') \
+        -out "$DIR/mtls-cert.pem" 2>/dev/null
+    rm -f "$DIR/mtls.csr" "$DIR/mtls-ca.srl"
+    chmod 600 "$DIR/mtls-key.pem" "$DIR/mtls-ca-key.pem"
+    chmod 644 "$DIR/mtls-cert.pem" "$DIR/mtls-ca.pem"
+fi
+
 # Соль псевдонимизации никнеймов (Гл. 9.7, спринт 70). Секрет: без неё
 # псевдоним подбирается перебором по публичному списку ников, то есть
 # псевдонимизацией быть перестаёт. Меняя соль, вы теряете связь со всеми
@@ -68,6 +94,13 @@ cat <<EOF
   JWT_PUBLIC_KEY_FILE=$DIR/jwt-public.pem
   TLS_CERT_FILE=$DIR/tls-cert.pem
   TLS_KEY_FILE=$DIR/tls-key.pem
+
+mTLS между внутренними gRPC-сервисами (Гл. 9.1) — по умолчанию ВЫКЛЮЧЕН.
+Включить (все три переменные, иначе режим остаётся insecure):
+
+  MANTA_MTLS_CA_FILE=$DIR/mtls-ca.pem
+  MANTA_MTLS_CERT_FILE=$DIR/mtls-cert.pem
+  MANTA_MTLS_KEY_FILE=$DIR/mtls-key.pem
 
 Псевдонимизация никнеймов (Гл. 9.7) — по умолчанию ВЫКЛЮЧЕНА, стенд
 работает как раньше. Для прода включить:

@@ -15,6 +15,8 @@ import os
 from concurrent import futures
 
 import grpc
+
+import manta_grpc
 import redis
 from prometheus_client import Counter, start_http_server
 
@@ -79,7 +81,7 @@ def main() -> int:
     services_pb2_grpc.add_FeatureStoreServicer_to_server(
         FeatureStoreServicer(store), server)
     port = int(os.getenv("GRPC_PORT", "50055"))
-    server.add_insecure_port(f"[::]:{port}")
+    manta_grpc.add_port(server, port, "feature-store")
     server.start()
     logger.info("feature-store gRPC на :%d (метрики :%d)", port, metrics_port)
     server.wait_for_termination()

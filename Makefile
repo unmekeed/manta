@@ -106,49 +106,49 @@ proto-gen:     ## Сгенерировать Python-стабы gRPC из proto/ 
 		proto/services.proto
 
 ml-serve:      ## Запустить gRPC-сервер ML Service
-	cd apps/ml-service && PYTHONPATH=src python3 -m app
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m app
 
 ml-train:      ## Обучить Win Probability (реальные матчи из ClickHouse)
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.train_winprob $(TRAIN_ARGS)
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.train_winprob $(TRAIN_ARGS)
 
 report-gen:    ## Запустить Report Generator (Kafka-петля)
-	cd apps/report-generator && PYTHONPATH=src python3 -m reportgen
+	cd apps/report-generator && PYTHONPATH=src:$(CURDIR)/libs python3 -m reportgen
 
 sim-serve:     ## Similarity Engine: gRPC-поиск похожих матчей (:50052)
-	cd apps/similarity && PYTHONPATH=src python3 -m serve
+	cd apps/similarity && PYTHONPATH=src:$(CURDIR)/libs python3 -m serve
 
 draft-serve:   ## Draft Engine: рекомендации пиков (:50053)
-	cd apps/draft && PYTHONPATH=src python3 -m serve_draft
+	cd apps/draft && PYTHONPATH=src:$(CURDIR)/libs python3 -m serve_draft
 
 coach-serve:   ## AI Coach: план тренировки из отчётов + RAG (:50054)
-	cd apps/coach && PYTHONPATH=src python3 -m serve_coach
+	cd apps/coach && PYTHONPATH=src:$(CURDIR)/libs python3 -m serve_coach
 
 fs-serve:      ## Feature Store: онлайн-фичи поверх Redis (:50055)
-	cd apps/feature-store && PYTHONPATH=src python3 -m serve_features
+	cd apps/feature-store && PYTHONPATH=src:$(CURDIR)/libs python3 -m serve_features
 
 ml-train-risk: ## Обучить Death-Risk модель на реплейных позициях (C5)
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.risk $(RISK_ARGS)
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.risk $(RISK_ARGS)
 
 ml-train-laning: ## Обучить Laning-модель на combat-логе первых 5 минут (C5)
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.laning $(LANING_ARGS)
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.laning $(LANING_ARGS)
 
 ml-train-draft: ## Draft Prior: P(win|составы) + OOF-прайоры в MatchDraft (F3)
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.draft_prior $(DRAFT_ARGS)
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.draft_prior $(DRAFT_ARGS)
 
 ml-tune:       ## Подбор гиперпараметров WP через Optuna (F7): ARGS="--trials 60 --apply"
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.tune $(ARGS)
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.tune $(ARGS)
 
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.auto
 
 ml-status:     ## Статус обучения: production-версия, разрыв датасета, кандидаты
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.status
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.status
 
 ml-ablation:   ## Ablation фич WP: какая заслужила место (ARGS="--each")
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.ablation $(ARGS)
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.ablation $(ARGS)
 
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
-	cd apps/ml-service && PYTHONPATH=src python3 -m training.audit
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.audit
 
 recover:       ## Восстановить dev-стек после перезапуска среды (идемпотентно)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/dev-recover.sh

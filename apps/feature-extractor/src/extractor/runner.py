@@ -89,11 +89,10 @@ class Extractor:
         if not self.cfg.feature_store_addr or not trows:
             return
         try:
-            import grpc
-
+            import manta_grpc
             from gen import services_pb2, services_pb2_grpc
             if self._fs_stub is None:
-                chan = grpc.insecure_channel(self.cfg.feature_store_addr)
+                chan = manta_grpc.channel(self.cfg.feature_store_addr, "feature-store")
                 self._fs_stub = services_pb2_grpc.FeatureStoreStub(chan)
             last = trows[-1]
             vec = services_pb2.FeatureVector()

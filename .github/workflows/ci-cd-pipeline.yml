@@ -44,7 +44,23 @@ jobs:
       - name: Test
         run: |
           pip install pytest -r apps/${{ matrix.service }}/requirements.txt
-          pytest apps/${{ matrix.service }}/tests -q
+          PYTHONPATH=apps/${{ matrix.service }}/src:libs \
+            pytest apps/${{ matrix.service }}/tests -q
+
+  libs-test:
+    # Общие библиотеки (libs/manta_grpc — mTLS-обвязка внутренних gRPC).
+    # Отдельной джобой, а не в матрице сервисов: у них свои requirements,
+    # а тесты handshake поднимают настоящий сервер и требуют только grpcio.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test
+        run: |
+          pip install pytest grpcio
+          pytest libs/tests -q
 
   cpp-parser:
     runs-on: ubuntu-latest

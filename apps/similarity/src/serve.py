@@ -20,6 +20,8 @@ import time
 from concurrent import futures
 
 import grpc
+
+import manta_grpc
 from prometheus_client import Counter, Gauge, start_http_server
 
 from engine.index import MatchIndex
@@ -72,7 +74,7 @@ def build_server(index: MatchIndex, port: int) -> tuple[grpc.Server, int]:
                          options=[("grpc.so_reuseport", 0)])
     services_pb2_grpc.add_SimilarityServiceServicer_to_server(
         SimilarityService(index), server)
-    bound = server.add_insecure_port(f"[::]:{port}")
+    bound = manta_grpc.add_port(server, port, "similarity")
     return server, bound
 
 
