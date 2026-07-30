@@ -484,6 +484,18 @@ make doctor | grep remaining-day
   `apps/*/models/` добавлен в .gitignore: там .pkl и отчёты, место им в
   реестре, а `git add -A` утащил бы их в историю.
 
+- **Спринт 77 — `manta up`, единая команда**: scripts/manta (симлинк в
+  /usr/local/bin) — up|down|doctor|backup|restore. `manta up` = git pull
+  --ff-only (best effort) → make recover → УСЛОВНОЕ восстановление
+  бэкапа: только если витрина почти пуста (< MANTA_RESTORE_THRESHOLD=100).
+  Мотив условности: на рабочей машине локальные данные новее бэкапа, и
+  тянуть его на каждом up — подмешивать старое; порог отделяет свежую
+  машину (0) от только что стартовавших коллекторов (единицы). Источник
+  бэкапа: локальный каталог в приоритете (всегда новее облачного),
+  иначе rclone из облака. dev-recover.sh/autostart НЕ трогал — manta up
+  это ручная надстройка над recover. Тесты: scripts/tests/
+  test_manta_cli.py (5).
+
 - **Спринт 76 — оффсайт-бэкап в облако**: backup.sh после локального
   слепка заливает тот же tar через rclone (MANTA_CLOUD_REMOTE, по
   умолчанию выключено). Провайдер-агностик — Google Drive/S3/Dropbox,

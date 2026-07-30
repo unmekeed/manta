@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# manta — единая точка входа в локальный стек (спринт 77).
+#
+#   manta up       git pull → поднять весь стек → ВОССТАНОВИТЬ бэкап, если
+#                  датасет пуст → дашборд (:9107) уже поднят recover'ом
+#   manta down     остановить хостовые процессы (контейнеры и данные целы)
+#   manta doctor   health-check конвейера по ДАННЫМ
+#   manta backup   слепок датасета (+ оффсайт в облако, если настроен)
+#   manta restore  принудительно влить последний бэкап (локальный/из облака)
+#
+# Ставится на PATH один раз:
+#   sudo ln -s "$HOME/manta/scripts/manta" /usr/local/bin/manta
+#
+# Почему восстановление УСЛОВНОЕ. На рабочей машине локальные данные новее
+# бэкапа — тянуть его на каждом `up` значило бы регулярно подмешивать
+# старое. Поэтому restore срабатывает, только когда датасет практически
+# пуст (свежая машина после переустановки, аварийное восстановление). На
+# машине с данными шаг пропускается. Порог — MANTA_RESTORE_THRESHOLD.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+ROOT=$(pwd)
+
+TRAIN_ENV="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
+[ -f "$TRAIN_ENV" ] && { set -a; . "$TRAIN_ENV"; set +a; }
+
+# Ниже этого числа матчей витрина считается «пустой» и подлежит
+# восстановлению. 100 отделяет свежую машину (0) от только что стартовавших
+# коллекторов (единицы) — те не должны сорвать восстановление.
+RESTORE_THRESHOLD="${MANTA_RESTORE_THRESHOLD:-100}"
+
+ch_matches() {
+    echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL" |
+        curl -s --max-time 10 "http://localhost:8123/?database=manta" \
+            -H "X-ClickHouse-User: ${CLICKHOUSE_USER:-dota}" \
+            -H "X-ClickHouse-Key: ${CLICKHOUSE_PASSWORD:-dota_dev_password}" \
+            --data-binary @- 2>/dev/null || echo 0
+}
+
+# Свежайший бэкап. Локальный каталог в приоритете (быстро, без сети); если
+# там пусто — качаем последний из облака через rclone. Печатает путь к tar
+# или ничего. Порядок важен: локальная копия всегда новее облачной (в облако
+# она уезжает ПОСЛЕ локального слепка).
+find_backup() {
+    local dir="${MANTA_BACKUP_DIR:-$HOME/manta-backups}"
+    local newest
+    newest=$(ls -t "$dir"/manta-dataset-*.tar 2>/dev/null | head -1 || true)
+    if [ -n "$newest" ]; then echo "$newest"; return 0; fi
+
+    [ -n "${MANTA_CLOUD_REMOTE:-}" ] && command -v rclone >/dev/null 2>&1 || return 0
+    local name
+    name=$(rclone lsf --files-only "$MANTA_CLOUD_REMOTE" 2>/dev/null \
+             | grep '^manta-dataset-.*\.tar$' | sort | tail -1 || true)
+    [ -n "$name" ] || return 0
+    local tmp; tmp=$(mktemp -d)
+    rclone copy "$MANTA_CLOUD_REMOTE/$name" "$tmp" 2>/dev/null || return 0
+    echo "$tmp/$name"
+}
+
+restore_if_empty() {
+    local n; n=$(ch_matches)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -ge "$RESTORE_THRESHOLD" ]; then
+        echo ">> датасет не пуст ($n матчей) — восстановление не требуется"
+        return 0
+    fi
+    echo ">> датасет почти пуст ($n матчей) — ищу бэкап"
+    local tar; tar=$(find_backup)
+    if [ -z "$tar" ] || [ ! -s "$tar" ]; then
+        echo ">> бэкапа не найдено — стартуем с чистого датасета (сбор наполнит)"
+        return 0
+    fi
+    echo ">> восстанавливаю из $tar"
+    if ./scripts/dataset-sync.sh import "$tar"; then
+        echo ">> восстановлено, матчей теперь: $(ch_matches)"
+    else
+        echo ">> ВНИМАНИЕ: импорт бэкапа не удался — стек поднят, данных нет" >&2
+    fi
+}
+
+cmd_up() {
+    echo ">> git pull (--ff-only, best effort)"
+    # ff-only не затирает локальные правки: при расхождении просто откажет,
+    # и мы продолжим на текущем коде. `up` обязан поднять стек даже когда
+    # pull невозможен.
+    git pull --ff-only origin main 2>&1 | sed 's/^/   /' \
+        || echo "   pull не прошёл (расхождение/грязное дерево) — продолжаю на текущем коде"
+    MANTA_TRAIN_ENV="$TRAIN_ENV" ./scripts/dev-recover.sh
+    restore_if_empty
+    echo
+    echo ">> готово. Дашборд: http://localhost:9107  ·  UI: http://localhost:5173"
+}
+
+case "${1:-}" in
+    up)      cmd_up ;;
+    down)    exec make stop ;;
+    doctor)  exec ./scripts/doctor.sh ;;
+    backup)  exec ./scripts/backup.sh ;;
+    # restore без порога: сливает бэкап поверх текущих данных. Безопасно —
+    # ReplacingMergeTree оставляет строку с бОльшим computed_at, поэтому
+    # свежие локальные версии побеждают, а недостающие матчи добавляются.
+    restore) RESTORE_THRESHOLD=999999999 restore_if_empty ;;
+    ""|-h|--help|help)
+        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "неизвестная команда: $1" >&2
+       echo "manta up | down | doctor | backup | restore" >&2; exit 1 ;;
+esac
