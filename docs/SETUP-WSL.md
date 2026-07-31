@@ -40,13 +40,17 @@ wsl --set-version Ubuntu-24.04 2
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y \
     build-essential cmake pkg-config git curl wget unzip \
+    libsnappy-dev libgomp1 \
     python3 python3-pip python3-venv \
     postgresql-client
 ```
 
-`unzip` нужен установщику rclone (без него он падает), `cmake` и
-`build-essential` — сборке C++ ядра парсера, `postgresql-client` — для
-`psql` из инструкций по диагностике.
+`libsnappy-dev` обязателен: реплеи Valve сжаты snappy покадрово, и
+`CMakeLists.txt` ищет библиотеку через `find_library(... REQUIRED)` —
+без неё сборка ядра падает на `Could not find SNAPPY_LIB`. `libgomp1`
+нужен LightGBM (OpenMP), `unzip` — установщику rclone, `cmake` и
+`build-essential` — сборке C++ ядра, `postgresql-client` даёт `psql`
+для диагностических запросов из runbooks.
 
 ---
 
