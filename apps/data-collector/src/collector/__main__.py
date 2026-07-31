@@ -27,6 +27,7 @@ from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
 from .sources.opendota_timeline import OpenDotaTimelineSource
+from .sources.stratz import StratzTimelineSource
 
 
 def seconds_until_utc_midnight(now: datetime | None = None,
@@ -80,6 +81,20 @@ def build_source(name: str):
             detail_budget=int(detail_budget) if detail_budget else None,
             shard=shard,
         )
+    if name in ("stratz-timeline", "stratz-timeline-pro"):
+        # Кандидаты — дешёвый листинг OpenDota, детали — GraphQL STRATZ.
+        # Суточный потолок здесь свой (10000 у Default-токена), поэтому
+        # лимит цикла задаётся отдельной переменной, а не OPENDOTA_LIMIT.
+        min_patch = os.getenv("STRATZ_MIN_PATCH")
+        return StratzTimelineSource(
+            token=os.getenv("STRATZ_API_TOKEN", ""),
+            limit_per_cycle=int(os.getenv("STRATZ_LIMIT", "40")),
+            min_patch=int(min_patch) if min_patch else None,
+            mode="pro" if name.endswith("-pro") else "public",
+            opendota_key=api_key,
+            kills_cumulative=os.getenv("STRATZ_KILLS_CUMULATIVE") == "1",
+            shard=shard,
+        )
     raise ValueError(f"unknown source {name!r}")
 
 
@@ -92,7 +107,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
                         choices=["fixture", "opendota", "opendota-public",
-                                 "opendota-timeline", "opendota-timeline-pro"])
+                                 "opendota-timeline", "opendota-timeline-pro",
+                                 "stratz-timeline", "stratz-timeline-pro"])
     parser.add_argument("--interval", type=int,
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
     parser.add_argument("--once", action="store_true",
@@ -100,12 +116,16 @@ def main() -> None:
     args = parser.parse_args()
 
     source = build_source(args.source)
-    if args.source.startswith("opendota-timeline"):
+    if args.source.startswith(("opendota-timeline", "stratz-timeline")):
         # JSON-путь: без S3/Kafka — витрина пишется напрямую.
         from .timeline_runner import TimelineCollector, TimelineConfig
         collector = TimelineCollector(TimelineConfig(), source)
-        default_metrics_port = ("9108" if args.source == "opendota-timeline"
-                                else "9110")
+        default_metrics_port = {
+            "opendota-timeline": "9108",
+            "opendota-timeline-pro": "9110",
+            "stratz-timeline": "9115",
+            "stratz-timeline-pro": "9116",
+        }[args.source]
     else:
         cfg = CollectorConfig(
             postgres_dsn=os.getenv(
@@ -141,7 +161,28 @@ def main() -> None:
                 if args.once:
                     raise
                 CYCLES_FAILED.inc()
-                if e.response is not None and e.response.status_code == 429:
+                status = (e.response.status_code
+                          if e.response is not None else None)
+                if status == 429 and args.source.startswith("stratz"):
+                    RATE_LIMITED.inc()
+                    # У STRATZ лимиты почасовые (2000/ч) и суточные
+                    # (10000/сут), полночь UTC к ним отношения не имеет —
+                    # ждать до неё значило бы простаивать зря.
+                    sleep_s = max(sleep_s, int(os.getenv(
+                        "STRATZ_RATE_SLEEP_S", "3600")))
+                    log.warning(
+                        "429: лимит STRATZ исчерпан; жду %ss вместо обычных "
+                        "%ss — при регулярных 429 снижать STRATZ_LIMIT",
+                        sleep_s, args.interval)
+                elif status in (401, 403) and args.source.startswith("stratz"):
+                    # Токен протух или отозван: повтор через interval ничего
+                    # не изменит, но и падать демону незачем — так проблема
+                    # видна в логе и на дашборде, а не превращается в
+                    # молчаливо мёртвый процесс.
+                    log.error(
+                        "%s от STRATZ: токен недействителен — проверить "
+                        "STRATZ_API_TOKEN в ~/manta-train.env", status)
+                elif status == 429:
                     RATE_LIMITED.inc()
                     remaining = e.response.headers.get(
                         "x-rate-limit-remaining-day", "?")

@@ -129,6 +129,12 @@ proc data-collector   "collector --source opendota-public"
 proc timeline-coll.   "collector --source opendota-timeline --interval"
 proc pro-timeline     "collector --source opendota-timeline-pro"
 proc pro-replay       "collector --source opendota --interval"
+# STRATZ опционален: без токена этих коллекторов быть и не должно, и
+# отмечать их DOWN было бы ложной тревогой.
+if [ -n "${STRATZ_API_TOKEN:-}" ]; then
+    proc stratz-coll. "collector --source stratz-timeline --interval"
+    proc stratz-pro   "collector --source stratz-timeline-pro"
+fi
 proc parser-svc       "^/tmp/parser-svc"
 proc feature-extractor "python3 -u -m extractor"
 proc ml-service       "python3 -u -m app"

@@ -29,6 +29,12 @@ logger = logging.getLogger("collector.timeline")
 
 FEATURE_VERSION = "opendota-json@3"
 
+# Источник может объявить свою версию фич (`feature_version`) — у STRATZ
+# другой набор заполненных колонок, и сваливать его в одну строку с
+# opendota-json значило бы потерять возможность разделить их в анализе.
+def _feature_version(source) -> str:
+    return getattr(source, "feature_version", None) or FEATURE_VERSION
+
 MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
                "xp_diff",
                "kills_radiant", "kills_dire", "position_advance",
@@ -106,7 +112,7 @@ class TimelineCollector:
             cur.execute(
                 """INSERT INTO CollectedMatches (match_id, source_name, replay_url)
                    VALUES (%s, %s, %s) ON CONFLICT (match_id) DO NOTHING""",
-                (match_id, self._source.name, "json:opendota"))
+                (match_id, self._source.name, f"json:{self._source.name}"))
             cur.execute(
                 """INSERT INTO CollectorCursor (source_name, cursor_value, updated_at)
                    VALUES (%s, %s, NOW())
@@ -128,7 +134,7 @@ class TimelineCollector:
         for r in rows:
             full = {c: float("nan") for c in F_TRACK_COLUMNS}
             full.update({**r, "tier": tier, "patch": patch,
-                         "feature_version": FEATURE_VERSION})
+                         "feature_version": _feature_version(self._source)})
             lines.append("\t".join(fmt(full[c]) for c in MTF_COLUMNS))
         query = (f"INSERT INTO MatchTimelineFeatures ({', '.join(MTF_COLUMNS)}) "
                  f"FORMAT TabSeparated")

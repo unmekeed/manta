@@ -186,6 +186,33 @@ else
     skip "pro-timeline-collector"
 fi
 
+# STRATZ-коллектор поднимается ТОЛЬКО при заданном токене: без него
+# источник падает на старте, и recover плодил бы мёртвый процесс на
+# машине, где STRATZ не настроен.
+if [ -n "${STRATZ_API_TOKEN:-}" ]; then
+    if ! pgrep -f "collector --source stratz-timeline --interval" >/dev/null; then
+        say "запускаю stratz-collector (лог: $LOG_DIR/stratz.log)"
+        (cd apps/data-collector && STRATZ_LIMIT="${STRATZ_LIMIT:-40}" METRICS_PORT=9115 PYTHONPATH=src:$ROOT/libs \
+            nohup python3 -u -m collector --source stratz-timeline \
+                --interval "${STRATZ_INTERVAL:-1800}" \
+                >"$LOG_DIR/stratz.log" 2>&1 &)
+    else
+        skip "stratz-collector"
+    fi
+
+    if ! pgrep -f "collector --source stratz-timeline-pro" >/dev/null; then
+        say "запускаю stratz-pro-collector (лог: $LOG_DIR/stratz-pro.log)"
+        (cd apps/data-collector && STRATZ_LIMIT="${STRATZ_PRO_LIMIT:-10}" METRICS_PORT=9116 PYTHONPATH=src:$ROOT/libs \
+            nohup python3 -u -m collector --source stratz-timeline-pro \
+                --interval "${STRATZ_PRO_INTERVAL:-3600}" \
+                >"$LOG_DIR/stratz-pro.log" 2>&1 &)
+    else
+        skip "stratz-pro-collector"
+    fi
+else
+    skip "stratz-collector (STRATZ_API_TOKEN не задан)"
+fi
+
 if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
     say "запускаю pro-replay-collector (лог: $LOG_DIR/pro-collector.log)"
     (cd apps/data-collector && OPENDOTA_LIMIT=1 METRICS_PORT=9109 PYTHONPATH=src:$ROOT/libs \
@@ -292,6 +319,10 @@ check data-collector "collector --source opendota-public"
 check timeline-coll. "collector --source opendota-timeline --interval"
 check pro-timeline "collector --source opendota-timeline-pro"
 check pro-replay "collector --source opendota --interval"
+if [ -n "${STRATZ_API_TOKEN:-}" ]; then
+    check stratz-coll. "collector --source stratz-timeline --interval"
+    check stratz-pro "collector --source stratz-timeline-pro"
+fi
 check ml-service "python3 -u -m app"
 check similarity "python3 -u -m serve$"
 check draft "python3 -u -m serve_draft"

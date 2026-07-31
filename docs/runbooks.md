@@ -77,6 +77,24 @@ curl -s localhost:9108/metrics | grep opendota_rate_limited_total
    `docker restart manta-clickhouse-1` в тихое окно.
 4. **Код обновился, миграция — нет** (реальный случай: similarity падал
    404 на `networth_total`, отсутствующей в схеме). → `make migrate-ch`.
+5. **STRATZ-коллекторы молчат** (спринт 79). Смотреть
+   `~/manta-logs/stratz.log` и `stratz-pro.log`:
+   - `401`/`403` — токен недействителен или отозван; проверить
+     `STRATZ_API_TOKEN` в env-файле. Демон не падает, но и не собирает.
+   - `429` — исчерпан почасовой (2000) или суточный (10000) лимит;
+     коллектор сам ждёт час (`STRATZ_RATE_SLEEP_S`). Регулярные 429 —
+     снижать `STRATZ_LIMIT`.
+   - `STRATZ GraphQL: ... — обрываю цикл` — схема STRATZ разошлась с
+     запросом; в тексте ошибки названо конкретное поле, править
+     `MATCH_FIELDS` в `collector/sources/stratz.py`.
+   - в логе `выставить STRATZ_KILLS_CUMULATIVE=1` — ряд убийств приходит
+     уже накопительным, и он накапливается второй раз; выставить
+     переменную и перезапустить, иначе `kills_*` в датасете завышены.
+   Проверить вклад источника в витрину:
+   ```sql
+   SELECT feature_version, count(DISTINCT match_id)
+   FROM MatchTimelineFeatures GROUP BY feature_version;
+   ```
 
 ## 2. Гейт всё отклоняет
 

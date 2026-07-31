@@ -21,7 +21,7 @@ ClickHouse → фичи → модели (Win Probability, Death-Risk) → от�
 - `deployments/docker-compose.yml` — PostgreSQL 16, ClickHouse 24.8, Kafka 3.8 (KRaft), Redis 7, MinIO, MLflow (backend в postgres); все с healthcheck.
 - `infra/migrations/` — реляционная схема Гл. 4.2, аналитический слой Гл. 4.4 (ReplayEvents, EconomyTimeline, PositionSnapshots) пер-матчевые MatchDraft/MatchEvents и витрины фич (PlayerMatchFeatures, MatchTimelineFeatures).
 - `apps/api-gateway` — Go: upload → MinIO + outbox → Kafka; статусы AnalysisJob по `replay.parsed`/`dlq.parser`; REST `/matches`, `/timeline`, `/analysis`, `/heroes`, `/draft/simulate`; RFC 7807, trace_id, rate limit.
-- `apps/data-collector` — Python, 4 источника (реплейный OpenDota + гибридный JSON-путь `opendota-timeline`/`-pro`): дедуп/курсор в PG, 429-бэкoff до сброса квоты, авто-reconnect к Postgres. **Шардирование между машинами** (`COLLECTOR_SHARD_COUNT`/`COLLECTOR_SHARD_ID`) — см. ниже. Из скачанного JSON извлекаются драфт, события (Рошан/аегис/FB/бэйбеки/руны/варды) и 12 поминутных фич (`collector/signals.py`), сам JSON складывается в MinIO (`collector/rawstore.py`) — чтобы будущие фичи бэкфиллились без квоты.
+- `apps/data-collector` — Python, 6 источников (реплейный OpenDota + гибридный JSON-путь `opendota-timeline`/`-pro` + GraphQL STRATZ `stratz-timeline`/`-pro`): дедуп/курсор в PG, 429-бэкoff до сброса квоты, авто-reconnect к Postgres. **Шардирование между машинами** (`COLLECTOR_SHARD_COUNT`/`COLLECTOR_SHARD_ID`) — см. ниже. Из скачанного JSON извлекаются драфт, события (Рошан/аегис/FB/бэйбеки/руны/варды) и 12 поминутных фич (`collector/signals.py`), сам JSON складывается в MinIO (`collector/rawstore.py`) — чтобы будущие фичи бэкфиллились без квоты.
 - `apps/replay-parser` — C++17-ядро (битово-совместимый с `dotabuff/manta` декодер сущностей: позиции, экономика, combat log; 110 МиБ за ~4 с) + Go-сервис `svc/` (Kafka → ядро → ClickHouse → `replay.parsed`, DLQ).
 - `apps/feature-extractor` — Python: `replay.parsed` → point-in-time фичи (GPM/XPM, LH/DN, alive/towers/rax diff, networth_rel) → витрины + `features.calculated`; пушит срез в Feature Store.
 - `apps/ml-service` — gRPC :50051 (Predict/PredictStream); Win Probability (LightGBM + OOF-изотоника, 22 фичи, Brier ≈ 0.14), Death-Risk (P смерти за 30с, AUC 0.79), Laning (P выиграть линию по игре первых 5 минут, AUC 0.89) и Draft Prior (P(win\|составы), AUC 0.585) из общего реестра моделей (S3/MLflow).
@@ -279,6 +279,45 @@ make dataset-import IN=manta-dataset-….tar  # идемпотентно, пов
 
 Множества собранных матчей не пересекаются, поэтому слияние баз через
 `dataset-import` конфликт-фри.
+
+### STRATZ как второй источник деталей (спринт 79)
+
+Узкое место сбора — не список матчей, а **детали**: `/matches/{id}` у
+OpenDota стоит вызов на матч и упирается в ~2000/сутки с IP, тогда как
+одна страница листинга отдаёт до 100 кандидатов за вызов. STRATZ снимает
+ровно этот потолок: кандидаты по-прежнему берутся дешёвым листингом
+OpenDota, а поминутные ряды приходят из GraphQL STRATZ (Default-токен —
+20/сек, 250/мин, 2000/час, **10000/сутки**).
+
+Токен берётся на stratz.com (раздел API) и кладётся в env-файл — **не в
+git**:
+
+```bash
+# ~/manta-train.env
+STRATZ_API_TOKEN=...        # без него stratz-коллекторы не поднимаются
+STRATZ_LIMIT=40             # матчей за цикл (public), интервал 1800с
+STRATZ_PRO_LIMIT=10         # матчей за цикл (pro), интервал 3600с
+```
+
+`make recover` поднимает `stratz-timeline` и `stratz-timeline-pro` только
+при заданном токене — на машине без STRATZ ничего не меняется.
+
+Что STRATZ даёт и чего не даёт. Ядро витрины (`networth_diff`, `xp_diff`,
+`kills_*`, `radiant_win`) — из полей `radiantNetworthLeads` /
+`radiantExperienceLeads` / `radiantKills` / `direKills`. Позиционные фичи
+и фичи трека F остаются **NaN**: первые существуют только в реплее, вторые
+собираются из JSON OpenDota. Строки помечаются `feature_version =
+stratz-graphql@1`, поэтому источники всегда различимы в датасете:
+
+```sql
+SELECT feature_version, count(DISTINCT match_id)
+FROM MatchTimelineFeatures GROUP BY feature_version;
+```
+
+Патчи переводятся по **имени** версии ("7.39"): `gameVersionId` у STRATZ —
+свой идентификатор, и запись его в колонку `patch` молча испортила бы
+даунвейт старых патчей при обучении. Не удалось перевести — пишется 0
+(«неизвестен»).
 
 ### Бэкапы и автозапуск (Windows)
 
