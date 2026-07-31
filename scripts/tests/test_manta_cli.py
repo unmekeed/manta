@@ -9,6 +9,7 @@ ch_matches / dataset-sync / rclone — проверяется настоящий
 """
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 MANTA = Path(__file__).resolve().parents[1] / "manta"
@@ -25,14 +26,23 @@ def _functions(*names: str) -> str:
 
 
 def _run(body: str, setup: str = ""):
+    """Прогнать фрагмент scripts/manta в ИЗОЛИРОВАННОЙ директории.
+
+    Изоляция здесь не гигиена, а необходимость: тесты создают стаб
+    `./scripts/dataset-sync.sh`, и без своего cwd эта строка перезаписывала
+    НАСТОЯЩИЙ скрипт проекта — он уходил в коммит обнулённым, а пустой
+    bash-скрипт возвращает 0, поэтому импорт бэкапа «успешно» не делал
+    ничего (инцидент 2026-07-31).
+    """
     harness = f"""
 set -uo pipefail
 {_functions("find_backup", "restore_if_empty")}
 {setup}
 {body}
 """
-    return subprocess.run(["bash", "-c", harness], capture_output=True,
-                          text=True)
+    with tempfile.TemporaryDirectory() as sandbox:
+        return subprocess.run(["bash", "-c", harness], capture_output=True,
+                              text=True, cwd=sandbox)
 
 
 def test_populated_dataset_skips_restore():
