@@ -9,6 +9,15 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Тот же env-файл, что читает dev-recover.sh. Без него doctor не знает,
+# какие опциональные коллекторы вообще должны работать на этой машине
+# (STRATZ поднимается только при токене) — и молча их не проверял.
+# Отсутствие файла не ошибка: проверки по данным работают и без него.
+TRAIN_ENV="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
+if [ -f "$TRAIN_ENV" ]; then
+    set -a; . "$TRAIN_ENV"; set +a
+fi
+
 CH_URL="${CLICKHOUSE_URL:-http://localhost:8123}"
 CH_DB="${CLICKHOUSE_DB:-manta}"
 CH_AUTH=(-H "X-ClickHouse-User: ${CLICKHOUSE_USER:-dota}"
