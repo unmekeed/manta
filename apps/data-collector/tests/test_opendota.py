@@ -128,7 +128,8 @@ def test_non_bz2_body_is_permanent(monkeypatch):
     url = "http://replay1.valve.net/570/14_1.dem.bz2"
     src = make_source(monkeypatch, pro_matches=[], details={},
                       downloads={url: b"<html>503 Service Unavailable</html>"})
-    with pytest.raises(opendota.PermanentDownloadError, match="не bz2"):
+    with pytest.raises(opendota.PermanentDownloadError,
+                       match="неизвестный формат"):
         src.download_replay(opendota.MatchRef(14, url, "Professional", "14"))
 
 
@@ -142,3 +143,48 @@ def test_complete_download_still_works(monkeypatch):
                       headers={url: {"Content-Length": str(len(blob))}})
     assert src.download_replay(
         opendota.MatchRef(15, url, "Professional", "15")) == dem
+
+
+def test_zstd_replay_decompresses(monkeypatch):
+    """Valve перешли на zstd, оставив расширение .dem.bz2 (2026-07-31).
+    Формат определяется по магии, а не по имени файла — иначе весь
+    реплейный путь встаёт с «битый bz2» на исправных архивах."""
+    import zstandard
+    dem = b"PBDEMS2" + b"\0" * 4096
+    url = "http://replay1.valve.net/570/16_1.dem.bz2"
+    blob = zstandard.ZstdCompressor().compress(dem)
+    assert blob.startswith(b"\x28\xb5\x2f\xfd")
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: blob})
+    assert src.download_replay(
+        opendota.MatchRef(16, url, "Professional", "16")) == dem
+
+
+def test_bz2_replay_still_decompresses(monkeypatch):
+    """Старый формат обязан продолжать работать: у Valve на разных
+    серверах пока и то, и другое."""
+    dem = b"PBDEMS2" + b"\0" * 512
+    url = "http://replay1.valve.net/570/17_1.dem.bz2"
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: bz2.compress(dem)})
+    assert src.download_replay(
+        opendota.MatchRef(17, url, "Professional", "17")) == dem
+
+
+def test_already_uncompressed_replay_passes_through(monkeypatch):
+    dem = b"PBDEMS2" + b"\0" * 128
+    url = "http://replay1.valve.net/570/18_1.dem"
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: dem})
+    assert src.download_replay(
+        opendota.MatchRef(18, url, "Professional", "18")) == dem
+
+
+def test_unknown_compression_reports_first_bytes(monkeypatch):
+    """Диагностика следующей смены формата: первые байты в сообщении.
+    Именно они позволили опознать zstd за минуту."""
+    url = "http://replay1.valve.net/570/19_1.dem.bz2"
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: b"\x99\x88\x77\x66 whatever"})
+    with pytest.raises(opendota.PermanentDownloadError, match=r"\\x99"):
+        src.download_replay(opendota.MatchRef(19, url, "Professional", "19"))

@@ -3,3 +3,6 @@ minio>=7.2
 psycopg[binary]>=3.2
 requests>=2.32
 prometheus-client>=0.20
+# Valve перешли на zstd для реплеев (обнаружено 2026-07-31, патч 7.41),
+# расширение в URL при этом осталось .dem.bz2 — формат определяется по магии.
+zstandard>=0.22

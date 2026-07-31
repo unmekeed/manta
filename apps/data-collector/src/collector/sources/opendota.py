@@ -13,6 +13,7 @@ OpenDota (60 запросов/мин), и трафик с реплей-серв�
 from __future__ import annotations
 
 import bz2
+import io
 import logging
 import time
 from typing import Iterable
@@ -26,6 +27,41 @@ logger = logging.getLogger("collector.opendota")
 
 DEM_MAGIC = b"PBDEMS2"
 BZ2_MAGIC = b"BZh"
+# Valve перешли на Zstandard (обнаружено 2026-07-31, вместе с патчем
+# 7.41), но расширение в URL оставили .dem.bz2. Определять формат по
+# имени файла нельзя — только по магии.
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def decompress(data: bytes, match_id: int) -> bytes:
+    """Распаковать тело реплея, определив формат по магическим байтам.
+
+    Расширение URL не показатель: Valve сменили bz2 на zstd, не тронув
+    имена файлов, и весь реплейный путь встал с «битый bz2», хотя архивы
+    были исправными. Незнакомая сигнатура — постоянная ошибка: гадать
+    бессмысленно, но первые байты попадают в лог, чтобы следующая смена
+    формата диагностировалась за минуту, а не за день.
+    """
+    if data.startswith(DEM_MAGIC):
+        return data                       # уже распакован
+    if data.startswith(ZSTD_MAGIC):
+        import zstandard
+        try:
+            dctx = zstandard.ZstdDecompressor()
+            with dctx.stream_reader(io.BytesIO(data)) as r:
+                return r.read()
+        except zstandard.ZstdError as exc:
+            raise PermanentDownloadError(
+                f"match {match_id}: битый zstd ({exc})") from exc
+    if data.startswith(BZ2_MAGIC):
+        try:
+            return bz2.decompress(data)
+        except (OSError, EOFError, ValueError) as exc:
+            raise PermanentDownloadError(
+                f"match {match_id}: битый bz2 ({exc})") from exc
+    raise PermanentDownloadError(
+        f"match {match_id}: неизвестный формат сжатия "
+        f"(первые байты {data[:16]!r})")
 
 
 class OpenDotaSource:
@@ -118,23 +154,10 @@ class OpenDotaSource:
                 f"match {ref.match_id}: скачано {len(data)} из {expected} "
                 f"байт — обрыв, повторю позже")
 
-        if ref.replay_url.endswith(".bz2"):
-            # Пустое тело или не-bz2 в начале: сервер отдал заглушку или
-            # HTML с кодом 200 — это тоже не «битый архив».
-            if not data:
-                raise IncompleteDownloadError(
-                    f"match {ref.match_id}: пустой ответ — повторю позже")
-            if not data.startswith(BZ2_MAGIC):
-                raise PermanentDownloadError(
-                    f"match {ref.match_id}: тело не bz2 "
-                    f"(первые байты {data[:16]!r})")
-            try:
-                data = bz2.decompress(data)
-            except (OSError, EOFError, ValueError) as exc:
-                # Магия на месте, длина сошлась, а поток всё равно не
-                # читается — вот теперь это действительно битый архив.
-                raise PermanentDownloadError(
-                    f"match {ref.match_id}: битый bz2 ({exc})") from exc
+        if not data:
+            raise IncompleteDownloadError(
+                f"match {ref.match_id}: пустой ответ — повторю позже")
+        data = decompress(data, ref.match_id)
         if not data.startswith(DEM_MAGIC):
             raise PermanentDownloadError(
                 f"match {ref.match_id}: not a Source 2 demo "
