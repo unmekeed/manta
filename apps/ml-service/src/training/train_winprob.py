@@ -181,6 +181,9 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
     rng.shuffle(matches)
     folds = np.array_split(matches, min(N_FOLDS, max(2, len(matches))))
     oof_raw = np.full(len(y_tr_all), np.nan)
+    # Предсказания на ЗЕРКАЛЬНЫХ копиях тех же валидационных строк —
+    # материал для симметричной калибровки, см. ниже.
+    oof_mir = np.full(len(y_tr_all), np.nan)
     best_iters = []
     for fold_matches in folds:
         va_f = np.isin(g_tr_all, fold_matches)
@@ -191,6 +194,11 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
                          num_rounds, pw=pw_tr_all[tr_f],
                          valid=(X_tr_all[va_f], y_tr_all[va_f]))
         oof_raw[va_f] = b.predict(X_tr_all[va_f])
+        if mirror:
+            # mirror_xy возвращает [оригиналы; отражения] — нужен хвост.
+            n_va = int(va_f.sum())
+            Xm, _ = mirror_xy(X_tr_all[va_f], y_tr_all[va_f])
+            oof_mir[va_f] = b.predict(Xm[n_va:])
         best_iters.append(int(b.best_iteration or num_rounds))
     seen = ~np.isnan(oof_raw)
 
@@ -202,7 +210,20 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
         calibrator = IsotonicRegression(y_min=0.0, y_max=1.0,
                                         out_of_bounds="clip")
         calibrator_kind = "isotonic"
-    calibrator.fit(oof_raw[seen], y_tr_all[seen])
+    # Калибратор тоже обязан быть симметричен по сторонам. Бустер учится
+    # на зеркалированных строках и стороны не различает, а калибратор
+    # раньше видел только НЕзеркалированные пары (oof_raw, y) — и впитывал
+    # приор пабликов (Radiant WR ≈ 0.57), возвращая асимметрию, которую
+    # аугментация только что убрала. Замер 2026-07-31: на про-эталоне
+    # средний прогноз был выше факта на +0.035 при +0.012 на пабликах.
+    # Добавляя пары (oof_mir, 1−y), делаем калибровку side-agnostic:
+    # cal(p) + cal(1−p) ≈ 1.
+    if mirror and not np.isnan(oof_mir[seen]).any():
+        cal_x = np.concatenate([oof_raw[seen], oof_mir[seen]])
+        cal_y = np.concatenate([y_tr_all[seen], 1.0 - y_tr_all[seen]])
+    else:
+        cal_x, cal_y = oof_raw[seen], y_tr_all[seen]
+    calibrator.fit(cal_x, cal_y)
     oof_cal = calibrator.predict(oof_raw[seen])
 
     # -- Финальный бустер на всей train-части ---------------------------------
@@ -253,7 +274,10 @@ def train(ds: Dataset, num_rounds: int = 300, mirror: bool = True) -> dict:
 
     return {
         "model_version": MODEL_VERSION,
-        "algo": f"lightgbm+oof-{calibrator_kind}+mirror",
+        # Версии до 2026-07-31 калибровались несимметрично при том же
+        # теге — суффикс отличает их в реестре.
+        "algo": f"lightgbm+oof-{calibrator_kind}+mirror"
+                + ("+symcal" if mirror else ""),
         "features": FEATURES,
         "booster": booster.model_to_string(),
         "calibrator": calibrator,

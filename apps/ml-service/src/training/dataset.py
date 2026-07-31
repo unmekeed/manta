@@ -86,8 +86,8 @@ class Dataset:
     groups: np.ndarray       # (n,) match_id — для group split
     n_matches: int
     n_synthetic: int = 0
-    # tier строки ('' для старых/синтетических данных). Матчи
-    # PRO_TIER — эталонный holdout: НИКОГДА не попадают в train/valid.
+    # tier строки ('' для старых/синтетических данных). Про-матчи делятся
+    # между train и эталоном (PRO_TRAIN_FRAC) — см. _bench_mask.
     tiers: np.ndarray | None = None
     # id патча OpenDota по строкам (0 — неизвестен: старые строки до
     # миграции 010). Используется patch_weights().
@@ -120,16 +120,48 @@ class Dataset:
             return np.zeros(len(self.y), dtype=bool)
         return self.tiers == tier
 
+    def _bench_mask(self, seed: int = 42) -> np.ndarray:
+        """Про-матчи, отведённые в ЭТАЛОН (остальные идут в обучение).
+
+        Раньше весь про-tier был holdout'ом, и модель не видела про-домен
+        вообще — а гейт мерил именно на нём. Замер 2026-07-31: skill 0.58
+        на пабликах против 0.27 на про при почти равной неопределённости,
+        то есть разрыв Brier давал не приор (смещение всего +0.035), а
+        чистый перенос на невиданное распределение. При этом про-строк в
+        датасете больше, чем паблик-строк, и все они не участвовали в
+        обучении.
+
+        PRO_TRAIN_FRAC (доля про В ОБУЧЕНИЕ, дефолт 0.5) режет выборку
+        ПО МАТЧАМ и детерминированно по seed: строки одного матча целиком
+        попадают либо в train, либо в эталон, а train и гейт с одним seed
+        получают одно и то же разбиение — иначе кандидат мерился бы на
+        матчах, которые видел.
+
+        PRO_TRAIN_FRAC=0 возвращает прежнее поведение (весь про — эталон).
+        """
+        pro = self._tier_mask(PRO_TIER)
+        frac = float(os.getenv("PRO_TRAIN_FRAC", "0.5"))
+        if not pro.any() or frac <= 0:
+            return pro
+        matches = sorted(set(self.groups[pro].tolist()))
+        # Своя перестановка, независимая от valid-сплита: общий seed на
+        # обеих выборках сцепил бы разбиения.
+        rng = random.Random(seed + 7919)
+        rng.shuffle(matches)
+        n_train = min(int(len(matches) * frac), len(matches) - 1)
+        to_train = set(matches[:max(n_train, 0)])
+        return pro & np.array([g not in to_train for g in self.groups])
+
     def benchmark(self) -> tuple[np.ndarray, np.ndarray]:
-        """Эталонная выборка (матчи про-команд)."""
-        m = self._tier_mask(PRO_TIER)
+        """Эталонная выборка (про-матчи, отведённые в holdout)."""
+        m = self._bench_mask()
         return self.X[m], self.y[m]
 
     def _valid_mask(self, valid_frac: float = 0.2, seed: int = 42):
         """Маска валидационных строк (group split по НЕэталонным матчам)
         и маска эталона. Детерминирована по seed — один и тот же holdout
         воспроизводится и в train, и в гейте."""
-        pro = self._tier_mask(PRO_TIER)
+        pro = self._bench_mask(seed)
         rng = random.Random(seed)
         matches = sorted(set(self.groups[~pro].tolist()))
         rng.shuffle(matches)
@@ -157,7 +189,7 @@ class Dataset:
 
         Возвращает (X, y, groups, kind), kind ∈ {"benchmark_pro", "valid"}.
         """
-        pro = self._tier_mask(PRO_TIER)
+        pro = self._bench_mask(seed)
         pro_matches = sorted(set(self.groups[pro].tolist()))
         if len(pro_matches) >= min_bench_matches:
             return self.X[pro], self.y[pro], self.groups[pro], "benchmark_pro"

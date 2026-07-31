@@ -92,12 +92,19 @@ def test_eval_holdout_prefers_pro_then_valid():
     (X_tr, _), _ = ds.split_by_match()
     assert len(X_tr) + len(y) == len(ds.y)
 
-    # если помечаем достаточно матчей как Professional → берётся эталон
+    # если помечаем достаточно матчей как Professional → берётся эталон.
+    # С 2026-07-31 эталон — ПОДМНОЖЕСТВО про-матчей: половина уходит в
+    # обучение (PRO_TRAIN_FRAC), иначе модель не видит про-домен вовсе.
     ds2 = synth_matches(40)
     ds2.tiers = np.array([PRO_TIER if g % 2 == 0 else "" for g in ds2.groups])
     X2, y2, g2, kind2 = ds2.eval_holdout(min_bench_matches=5)
     assert kind2 == "benchmark_pro"
-    assert set(np.unique(g2).tolist()) == {g for g in set(ds2.groups.tolist()) if g % 2 == 0}
+    all_pro = {g for g in set(ds2.groups.tolist()) if g % 2 == 0}
+    bench = set(np.unique(g2).tolist())
+    assert bench and bench < all_pro          # непустое строгое подмножество
+    # и ни один эталонный матч не попал в обучение
+    in_valid, pro = ds2._valid_mask()
+    assert bench & set(ds2.groups[~in_valid & ~pro].tolist()) == set()
 
 
 def test_evaluate_gate_fair_head_to_head():
