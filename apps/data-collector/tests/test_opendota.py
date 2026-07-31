@@ -12,10 +12,12 @@ from collector.sources.opendota import OpenDotaSource
 
 
 class FakeResp:
-    def __init__(self, payload=None, status=200, content=b""):
+    def __init__(self, payload=None, status=200, content=b"", headers=None):
         self._payload = payload
         self.status_code = status
         self.content = content
+        # Content-Length нужен, чтобы отличить обрыв от порчи файла.
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -25,7 +27,8 @@ class FakeResp:
         return self._payload
 
 
-def make_source(monkeypatch, pro_matches, details, downloads=None):
+def make_source(monkeypatch, pro_matches, details, downloads=None,
+                headers=None):
     def fake_get(url, **kwargs):
         if url.endswith("/proMatches"):
             return FakeResp(pro_matches)
@@ -34,7 +37,8 @@ def make_source(monkeypatch, pro_matches, details, downloads=None):
                 return FakeResp(d) if d is not None else FakeResp(status=404)
         for u, body in (downloads or {}).items():
             if url == u:
-                return FakeResp(content=body)
+                return FakeResp(content=body,
+                                headers=(headers or {}).get(u))
         raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setattr(opendota.requests, "get", fake_get)
@@ -103,3 +107,38 @@ def test_download_of_corrupt_bz2_is_permanent(monkeypatch):
                       downloads={url: b"BZh9 truncated garbage"})
     with pytest.raises(opendota.PermanentDownloadError, match="битый bz2"):
         src.download_replay(opendota.MatchRef(12, url, "Professional", "12"))
+
+
+def test_truncated_download_is_retryable_not_permanent(monkeypatch):
+    """Обрыв на большом файле выглядит как битый bz2, но это НЕ порча:
+    инцидент 2026-07-31 — каждый обрыв выбрасывал исправный матч
+    навсегда, и реплейный путь стоял с processed=0."""
+    url = "http://replay1.valve.net/570/13_1.dem.bz2"
+    full = bz2.compress(b"PBDEMS2" + b"\0" * 4096)
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: full[: len(full) // 2]},
+                      headers={url: {"Content-Length": str(len(full))}})
+    with pytest.raises(opendota.IncompleteDownloadError, match="обрыв"):
+        src.download_replay(opendota.MatchRef(13, url, "Professional", "13"))
+
+
+def test_non_bz2_body_is_permanent(monkeypatch):
+    """Заглушка или HTML с кодом 200 — не «битый архив», а мусор:
+    повторять бессмысленно."""
+    url = "http://replay1.valve.net/570/14_1.dem.bz2"
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: b"<html>503 Service Unavailable</html>"})
+    with pytest.raises(opendota.PermanentDownloadError, match="не bz2"):
+        src.download_replay(opendota.MatchRef(14, url, "Professional", "14"))
+
+
+def test_complete_download_still_works(monkeypatch):
+    """Целый файл с корректным Content-Length проходит как раньше."""
+    dem = b"PBDEMS2" + b"\0" * 2048
+    url = "http://replay1.valve.net/570/15_1.dem.bz2"
+    blob = bz2.compress(dem)
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: blob},
+                      headers={url: {"Content-Length": str(len(blob))}})
+    assert src.download_replay(
+        opendota.MatchRef(15, url, "Professional", "15")) == dem

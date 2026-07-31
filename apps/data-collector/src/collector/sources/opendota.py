@@ -19,11 +19,13 @@ from typing import Iterable
 
 import requests
 
-from . import MatchRef, PermanentDownloadError, Shard, with_api_key
+from . import (IncompleteDownloadError, MatchRef, PermanentDownloadError,
+               Shard, with_api_key)
 
 logger = logging.getLogger("collector.opendota")
 
 DEM_MAGIC = b"PBDEMS2"
+BZ2_MAGIC = b"BZh"
 
 
 class OpenDotaSource:
@@ -102,10 +104,35 @@ class OpenDotaSource:
                 f"(HTTP {resp.status_code}) — снят с серверов Valve")
         resp.raise_for_status()
         data = resp.content
+
+        # Обрыв на 50–110 МиБ — обычное дело, и requests не всегда его
+        # сигналит: тело просто приходит короче обещанного. Распаковка
+        # такого куска даёт ровно то же "Invalid data stream", что и
+        # настоящий битый архив, поэтому РАЗЛИЧАТЬ их надо ДО bz2 — иначе
+        # каждый обрыв навсегда выбрасывает исправный матч (инцидент
+        # 2026-07-31: реплейный путь стоял с processed=0 при живом
+        # конвейере).
+        expected = resp.headers.get("Content-Length")
+        if expected and expected.isdigit() and len(data) < int(expected):
+            raise IncompleteDownloadError(
+                f"match {ref.match_id}: скачано {len(data)} из {expected} "
+                f"байт — обрыв, повторю позже")
+
         if ref.replay_url.endswith(".bz2"):
+            # Пустое тело или не-bz2 в начале: сервер отдал заглушку или
+            # HTML с кодом 200 — это тоже не «битый архив».
+            if not data:
+                raise IncompleteDownloadError(
+                    f"match {ref.match_id}: пустой ответ — повторю позже")
+            if not data.startswith(BZ2_MAGIC):
+                raise PermanentDownloadError(
+                    f"match {ref.match_id}: тело не bz2 "
+                    f"(первые байты {data[:16]!r})")
             try:
                 data = bz2.decompress(data)
             except (OSError, EOFError, ValueError) as exc:
+                # Магия на месте, длина сошлась, а поток всё равно не
+                # читается — вот теперь это действительно битый архив.
                 raise PermanentDownloadError(
                     f"match {ref.match_id}: битый bz2 ({exc})") from exc
         if not data.startswith(DEM_MAGIC):

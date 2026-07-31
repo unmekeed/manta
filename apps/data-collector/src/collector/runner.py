@@ -18,7 +18,8 @@ import psycopg
 from confluent_kafka import Producer
 from minio import Minio
 
-from .sources import MatchRef, PermanentDownloadError, Source
+from .sources import (IncompleteDownloadError, MatchRef,
+                      PermanentDownloadError, Source)
 
 logger = logging.getLogger("collector")
 
@@ -169,6 +170,18 @@ class Collector:
                 logger.warning("match %s: %s — пропускаю навсегда",
                                ref.match_id, exc)
                 self._advance_cursor(ref)
+                continue
+            except IncompleteDownloadError as exc:
+                # Намеренно НЕ считается постоянной: файл цел, оборвалась
+                # передача. Падает в общую ветку временных сбоев ниже —
+                # повторим, и только после MAX_TRANSIENT_RETRIES уйдём
+                # дальше, чтобы не встать на одном матче.
+                logger.warning("match %s: %s", ref.match_id, exc)
+                n = self._transient_fails.get(ref.match_id, 0) + 1
+                self._transient_fails[ref.match_id] = n
+                if n >= MAX_TRANSIENT_RETRIES:
+                    self._advance_cursor(ref)
+                    self._transient_fails.pop(ref.match_id, None)
                 continue
             except Exception as exc:  # noqa: BLE001
                 # Временный сбой: повторяем матч, но не бесконечно — иначе
