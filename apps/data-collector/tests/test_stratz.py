@@ -13,9 +13,10 @@ import requests
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from collector.sources import Shard  # noqa: E402
-from collector.sources.stratz import (StratzError,  # noqa: E402
+from collector.sources.stratz import (GAME_MODE_NAMES,  # noqa: E402
+                                      LOBBY_NAMES, StratzError,
                                       StratzTimelineSource, cumulative,
-                                      match_passes, timeline_rows)
+                                      enum_id, match_passes, timeline_rows)
 
 
 def _match(mid=7000000000, minutes=4, win=True):
@@ -114,6 +115,54 @@ def test_match_rejected_by_turbo_and_short_and_patch():
     assert match_passes(old, 900, 180) == (False, "old-patch")
     empty = _match(); empty["radiantNetworthLeads"] = []
     assert match_passes(empty, 900, None) == (False, "no-timeline")
+
+
+def test_enum_accepts_names_and_numbers():
+    """STRATZ отдаёт lobbyType/gameMode строками-энумами ('UNRANKED'), а
+    OpenDota — числами. Инцидент 2026-07-31: int('UNRANKED') ронял цикл."""
+    assert enum_id("UNRANKED", LOBBY_NAMES) == 0
+    assert enum_id("RANKED", LOBBY_NAMES) == 7
+    assert enum_id(7, LOBBY_NAMES) == 7
+    assert enum_id("7", LOBBY_NAMES) == 7
+    assert enum_id("TURBO", GAME_MODE_NAMES) == 23
+    assert enum_id("ALL_PICK_RANKED", GAME_MODE_NAMES) == 22
+
+
+def test_unknown_enum_value_rejects_match_and_warns(caplog):
+    """Незнакомое имя не должно молча протащить матч в обучающую выборку:
+    отсеиваем, но пишем в лог, чтобы энум можно было дополнить."""
+    with caplog.at_level("WARNING"):
+        assert enum_id("SOME_NEW_MODE", GAME_MODE_NAMES) == -1
+    assert "SOME_NEW_MODE" in caplog.text
+    assert enum_id(None, LOBBY_NAMES) == -1
+
+
+def test_match_passes_with_string_enums():
+    """Тот самый матч, на котором падал коллектор."""
+    m = _match()
+    m["lobbyType"] = "RANKED"
+    m["gameMode"] = "ALL_PICK_RANKED"
+    assert match_passes(m, 900, None)[0]
+
+    turbo = _match()
+    turbo["lobbyType"] = "RANKED"
+    turbo["gameMode"] = "TURBO"
+    assert match_passes(turbo, 900, None) == (False, "mode")
+
+    unranked_lobby = _match()
+    unranked_lobby["lobbyType"] = "BATTLE_CUP"
+    assert match_passes(unranked_lobby, 900, None) == (False, "lobby")
+
+
+def test_bad_match_does_not_break_cycle(monkeypatch):
+    """Один неразбираемый матч не должен обнулять весь проход: раньше
+    ValueError из match_passes ронял цикл, а с ним и половину притока."""
+    broken = _match(50)
+    broken["durationSeconds"] = "не число"
+    good = _match(52)
+    src = make_source(monkeypatch, {50: broken, 52: good}, [50, 52])
+    got = list(src.fetch_new())
+    assert [t.match_id for t in got] == [52]
 
 
 def test_pro_mode_skips_lobby_and_mode_checks():

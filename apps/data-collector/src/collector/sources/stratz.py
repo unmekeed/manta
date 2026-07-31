@@ -47,6 +47,47 @@ UA = {"User-Agent": "STRATZ_API"}
 RANKED_LOBBIES = {0, 7}
 STANDARD_MODES = {1, 2, 3, 4, 5, 16, 22}
 
+# STRATZ отдаёт lobbyType/gameMode ЭНУМАМИ-строками ("UNRANKED"), а не
+# числами, как OpenDota. Порядок значений в обоих энумах совпадает с
+# нумерацией Valve, поэтому имена переводятся в те же id, по которым
+# фильтруют остальные источники.
+LOBBY_NAMES = {
+    "UNRANKED": 0, "PRACTICE": 1, "TOURNAMENT": 2, "TUTORIAL": 3,
+    "COOP_BOTS": 4, "RANKED_TEAM_MMR": 5, "RANKED_SOLO_MMR": 6,
+    "RANKED": 7, "SOLO_MID": 8, "BATTLE_CUP": 9, "EVENT": 12,
+}
+GAME_MODE_NAMES = {
+    "NONE": 0, "ALL_PICK": 1, "CAPTAINS_MODE": 2, "RANDOM_DRAFT": 3,
+    "SINGLE_DRAFT": 4, "ALL_RANDOM": 5, "INTRO": 6, "THE_DIRETIDE": 7,
+    "REVERSE_CAPTAINS_MODE": 8, "THE_GREEVILING": 9, "TUTORIAL": 10,
+    "MID_ONLY": 11, "LEAST_PLAYED": 12, "LIMITED_HEROES": 13,
+    "COMPENDIUM_MATCHMAKING": 14, "CUSTOM": 15, "CAPTAINS_DRAFT": 16,
+    "BALANCED_DRAFT": 17, "ABILITY_DRAFT": 18, "EVENT": 19,
+    "ALL_RANDOM_DEATH_MATCH": 20, "SOLO_MID": 21, "ALL_PICK_RANKED": 22,
+    "TURBO": 23, "MUTATION": 24,
+}
+
+
+def enum_id(value, names: dict[str, int]) -> int:
+    """id значения энума STRATZ: принимает и число, и имя.
+
+    Неизвестное имя даёт -1 (матч не пройдёт фильтр) и пишется в лог:
+    молча пропустить незнакомый режим в обучающую выборку хуже, чем
+    потерять матч, но и знать о расширении энума нужно.
+    """
+    if isinstance(value, bool) or value is None:
+        return -1
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if text.lstrip("-").isdigit():
+        return int(text)
+    key = text.upper()
+    if key in names:
+        return names[key]
+    logger.warning("неизвестное значение энума STRATZ: %r", value)
+    return -1
+
 FEATURE_VERSION = "stratz-graphql@1"
 
 # Поля матча. Держим списком, а не одной строкой: при расхождении со схемой
@@ -161,9 +202,9 @@ def match_passes(m: dict, min_duration_s: int, min_patch: int | None,
     рангового фильтра либо из /proMatches (pro), где ранг не применим.
     """
     if not pro:
-        if int(m.get("lobbyType", -1)) not in RANKED_LOBBIES:
+        if enum_id(m.get("lobbyType"), LOBBY_NAMES) not in RANKED_LOBBIES:
             return False, "lobby"
-        if int(m.get("gameMode", -1)) not in STANDARD_MODES:
+        if enum_id(m.get("gameMode"), GAME_MODE_NAMES) not in STANDARD_MODES:
             return False, "mode"
     if int(m.get("durationSeconds") or 0) < min_duration_s:
         return False, "short"
@@ -332,14 +373,25 @@ class StratzTimelineSource:
             if not m:
                 self._rejected.add(mid)
                 continue
-            ok, why = match_passes(m, self._min_duration_s, self._min_patch,
-                                   pro=(self._mode == "pro"))
-            if not ok:
-                logger.debug("матч %d отфильтрован: %s", mid, why)
+            # Разбор ОДНОГО матча не имеет права ронять цикл: STRATZ меняет
+            # формат полей (2026-07-31 — lobbyType приехал строкой-энумом
+            # вместо числа), и один неожиданный тип обнулял весь проход,
+            # а с ним и половину суточного притока.
+            try:
+                ok, why = match_passes(m, self._min_duration_s,
+                                       self._min_patch,
+                                       pro=(self._mode == "pro"))
+                if not ok:
+                    logger.debug("матч %d отфильтрован: %s", mid, why)
+                    self._rejected.add(mid)
+                    continue
+                patch = self._patch_of(m)
+                rows = timeline_rows(m, self._kills_cumulative)
+            except (ValueError, TypeError, KeyError) as e:
+                logger.warning("матч %d: не разобрать ответ STRATZ (%s) — "
+                               "пропуск", mid, e)
                 self._rejected.add(mid)
                 continue
-            patch = self._patch_of(m)
-            rows = timeline_rows(m, self._kills_cumulative)
             if not rows:
                 self._rejected.add(mid)
                 continue

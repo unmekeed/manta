@@ -411,3 +411,39 @@ def test_ensure_db_reconnects_after_server_restart(monkeypatch):
     # Живое соединение повторно не пересоздаётся.
     assert coll.collect_once() == 0
     assert queries.count("SELECT") >= 1
+
+
+def test_patch_floor_keeps_previous_patch(monkeypatch):
+    """В день выхода патча матчей на нём почти нет, и планка «строго
+    текущий» обнуляет приток на сутки-двое — так случилось 2026-07-31
+    с выходом 7.41. Принимаем текущий и PATCH_LAG предыдущих."""
+    import os
+    from collector.sources.opendota_timeline import OpenDotaTimelineSource
+
+    class FakeResp:
+        def json(self):
+            return [{"id": 56, "name": "7.39"}, {"id": 57, "name": "7.40"},
+                    {"id": 58, "name": "7.41"}]
+
+    src = OpenDotaTimelineSource(api_delay_s=0)
+    monkeypatch.setattr(src, "_get", lambda path, **kw: FakeResp())
+
+    os.environ.pop("PATCH_LAG", None)
+    assert src._latest_patch() == 57          # 7.41 и 7.40 проходят
+
+    os.environ["PATCH_LAG"] = "0"             # прежнее строгое поведение
+    try:
+        assert src._latest_patch() == 58
+    finally:
+        os.environ.pop("PATCH_LAG", None)
+
+
+def test_patch_floor_never_negative(monkeypatch):
+    class FakeResp:
+        def json(self):
+            return [{"id": 0, "name": "old"}]
+
+    from collector.sources.opendota_timeline import OpenDotaTimelineSource
+    src = OpenDotaTimelineSource(api_delay_s=0)
+    monkeypatch.setattr(src, "_get", lambda path, **kw: FakeResp())
+    assert src._latest_patch() == 0

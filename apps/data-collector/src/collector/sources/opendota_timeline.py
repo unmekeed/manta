@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -213,10 +214,22 @@ class OpenDotaTimelineSource:
         return resp
 
     def _latest_patch(self) -> int:
+        """Нижняя граница патча для фильтра.
+
+        НЕ самый свежий патч, а самый свежий минус PATCH_LAG (дефолт 1).
+        В день выхода патча матчей на нём почти нет, и планка «строго
+        текущий» обнуляет приток на сутки-двое — ровно это случилось
+        2026-07-31 с выходом 7.41. Отсекать старую мету полностью и не
+        нужно: при обучении она уже даунвешена по возрасту патча (A9),
+        так что жёсткий отсев был бы двойным наказанием.
+        """
         patches = self._get("constants/patch").json()
         latest = max(p["id"] for p in patches)
-        logger.info("актуальный патч: id=%d", latest)
-        return latest
+        lag = int(os.getenv("PATCH_LAG", "1"))
+        floor = max(latest - max(lag, 0), 0)
+        logger.info("актуальный патч: id=%d, принимаю от id=%d (lag=%d)",
+                    latest, floor, lag)
+        return floor
 
     def fetch_new(self, after_cursor: str | None = None,
                   skip=None) -> Iterable[TimelineMatch]:

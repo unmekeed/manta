@@ -26,6 +26,11 @@ PATTERNS=(
     "collector --source opendota-timeline --interval:timeline-coll."
     "collector --source opendota-timeline-pro:pro-timeline"
     "collector --source opendota --interval:pro-replay"
+    # STRATZ поднимается опционально, но останавливать его надо всегда:
+    # пропущенный в этом списке процесс переживал `manta down`, продолжал
+    # жечь суточный лимит и мешал recover'у перезапустить себя с новым кодом.
+    "collector --source stratz-timeline --interval:stratz-coll."
+    "collector --source stratz-timeline-pro:stratz-pro"
     "^/tmp/parser-svc:parser-svc"
     "python3 -u -m extractor:feature-extractor"
     "python3 -u -m training.auto:auto-train"
