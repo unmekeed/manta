@@ -89,5 +89,17 @@ def test_download_rejects_garbage(monkeypatch):
     url = "http://replay1.valve.net/570/11_1.dem.bz2"
     src = make_source(monkeypatch, pro_matches=[], details={},
                       downloads={url: bz2.compress(b"<html>not a demo</html>")})
-    with pytest.raises(ValueError, match="not a Source 2 demo"):
+    # Постоянная ошибка, а не ValueError: коллектор обязан отличить её от
+    # временного сбоя и сдвинуть курсор через этот матч.
+    with pytest.raises(opendota.PermanentDownloadError,
+                       match="not a Source 2 demo"):
         src.download_replay(opendota.MatchRef(11, url, "Professional", "11"))
+
+
+def test_download_of_corrupt_bz2_is_permanent(monkeypatch):
+    """Битый bz2 (то, на чём встал реплейный путь) — постоянная ошибка."""
+    url = "http://replay1.valve.net/570/12_1.dem.bz2"
+    src = make_source(monkeypatch, pro_matches=[], details={},
+                      downloads={url: b"BZh9 truncated garbage"})
+    with pytest.raises(opendota.PermanentDownloadError, match="битый bz2"):
+        src.download_replay(opendota.MatchRef(12, url, "Professional", "12"))

@@ -19,7 +19,7 @@ from typing import Iterable
 
 import requests
 
-from . import MatchRef, Shard, with_api_key
+from . import MatchRef, PermanentDownloadError, Shard, with_api_key
 
 logger = logging.getLogger("collector.opendota")
 
@@ -85,14 +85,31 @@ class OpenDotaSource:
         return resp.json()
 
     def download_replay(self, ref: MatchRef) -> bytes:
+        """Скачать и распаковать .dem.
+
+        Неисправимые случаи поднимаются как PermanentDownloadError, чтобы
+        коллектор сдвинул курсор и не встал на этом матче навсегда;
+        всё остальное (таймаут, 5xx, обрыв) летит как есть — это
+        временные сбои, матч будет повторён.
+        """
         logger.info("downloading %s", ref.replay_url)
         resp = requests.get(ref.replay_url, timeout=600.0)
+        # Реплеи живут на серверах Valve ограниченное время: для матча,
+        # чей .dem уже удалён, повторять скачивание бессмысленно.
+        if resp.status_code in (403, 404, 410):
+            raise PermanentDownloadError(
+                f"match {ref.match_id}: реплей недоступен "
+                f"(HTTP {resp.status_code}) — снят с серверов Valve")
         resp.raise_for_status()
         data = resp.content
         if ref.replay_url.endswith(".bz2"):
-            data = bz2.decompress(data)
+            try:
+                data = bz2.decompress(data)
+            except (OSError, EOFError, ValueError) as exc:
+                raise PermanentDownloadError(
+                    f"match {ref.match_id}: битый bz2 ({exc})") from exc
         if not data.startswith(DEM_MAGIC):
-            raise ValueError(
+            raise PermanentDownloadError(
                 f"match {ref.match_id}: not a Source 2 demo "
                 f"(magic {data[:8]!r})")
         logger.info("match %s: %.1f MiB decompressed",

@@ -18,12 +18,17 @@ import psycopg
 from confluent_kafka import Producer
 from minio import Minio
 
-from .sources import MatchRef, Source
+from .sources import MatchRef, PermanentDownloadError, Source
 
 logger = logging.getLogger("collector")
 
 PRODUCER_NAME = "data-collector@0.1.0"
 TOPIC = "match.downloaded"
+
+# Сколько раз подряд повторять матч, упавший с ВРЕМЕННОЙ ошибкой, прежде
+# чем сдвинуть курсор через него. Очередь важнее одного матча: при
+# часовом интервале это максимум 3 часа простоя вместо бесконечного.
+MAX_TRANSIENT_RETRIES = 3
 
 
 @dataclass
@@ -64,6 +69,11 @@ class Collector:
         self._source = source
         self._db = psycopg.connect(cfg.postgres_dsn, autocommit=False)
         self._producer = Producer({"bootstrap.servers": cfg.kafka_brokers})
+        # match_id -> сколько циклов подряд он падал с временной ошибкой.
+        # В памяти намеренно: счётчик нужен лишь чтобы разомкнуть затор,
+        # и рестарт процесса — сам по себе достаточный повод дать матчу
+        # ещё один шанс.
+        self._transient_fails: dict[int, int] = {}
         self._s3 = Minio(cfg.s3_endpoint, access_key=cfg.s3_access_key,
                          secret_key=cfg.s3_secret_key, secure=cfg.s3_secure)
         if not self._s3.bucket_exists(cfg.s3_bucket):
@@ -109,13 +119,29 @@ class Collector:
                 """INSERT INTO CollectedMatches (match_id, source_name, replay_url)
                    VALUES (%s, %s, %s) ON CONFLICT (match_id) DO NOTHING""",
                 (ref.match_id, self._source.name, replay_url))
-            cur.execute(
-                """INSERT INTO CollectorCursor (source_name, cursor_value, updated_at)
-                   VALUES (%s, %s, NOW())
-                   ON CONFLICT (source_name)
-                   DO UPDATE SET cursor_value = EXCLUDED.cursor_value,
-                                 updated_at = NOW()""",
-                (self._source.name, ref.source_cursor))
+            self._write_cursor(cur, ref)
+        self._db.commit()
+
+    def _write_cursor(self, cur, ref: MatchRef) -> None:
+        cur.execute(
+            """INSERT INTO CollectorCursor (source_name, cursor_value, updated_at)
+               VALUES (%s, %s, NOW())
+               ON CONFLICT (source_name)
+               DO UPDATE SET cursor_value = EXCLUDED.cursor_value,
+                             updated_at = NOW()""",
+            (self._source.name, ref.source_cursor))
+
+    def _advance_cursor(self, ref: MatchRef) -> None:
+        """Сдвинуть курсор ЧЕРЕЗ матч, который собрать не удалось.
+
+        Без этого шага источник блокируется навсегда: fetch_new отдаёт
+        кандидатов старыми вперёд, отбрасывая всё <= курсора, поэтому
+        несобираемый матч возвращается первым в каждом следующем цикле
+        (инцидент 2026-07-31). Матч в CollectedMatches НЕ пишется — он
+        не собран, и запись означала бы обратное.
+        """
+        with self._db.cursor() as cur:
+            self._write_cursor(cur, ref)
         self._db.commit()
 
     # -- pipeline ------------------------------------------------------------
@@ -126,21 +152,44 @@ class Collector:
         cursor = self._get_cursor()
         processed = 0
         for ref in self._source.fetch_new(cursor):
+            # Дубликат — курсор ОБЯЗАН сдвинуться. CollectedMatches общая
+            # для всех источников: про-матч, уже взятый timeline-источником
+            # по JSON, встречается здесь как дубликат, и без сдвига курсора
+            # реплейный источник упирается в него каждый цикл навсегда.
             if self._is_collected(ref.match_id):
                 logger.info("skip duplicate match_id=%s", ref.match_id)
+                self._advance_cursor(ref)
                 continue
 
             # Сбой одного матча (503 реплей-сервера, битый bz2, сеть) не
             # должен ронять весь цикл (Гл. 2.4.2): логируем и идём дальше.
-            # Курсор для неудачного матча не фиксируется — он будет
-            # повторён следующим циклом, если позже не перекроется курсором
-            # более нового успешного матча (для пабликов это приемлемо).
             try:
                 data = self._source.download_replay(ref)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("match %s: download failed (%s), пропуск",
+            except PermanentDownloadError as exc:
+                logger.warning("match %s: %s — пропускаю навсегда",
                                ref.match_id, exc)
+                self._advance_cursor(ref)
                 continue
+            except Exception as exc:  # noqa: BLE001
+                # Временный сбой: повторяем матч, но не бесконечно — иначе
+                # ошибка, которую мы ошибочно сочли временной, встаёт
+                # намертво поперёк очереди.
+                n = self._transient_fails.get(ref.match_id, 0) + 1
+                self._transient_fails[ref.match_id] = n
+                if n >= MAX_TRANSIENT_RETRIES:
+                    logger.warning(
+                        "match %s: download failed (%s), попытка %d/%d — "
+                        "сдвигаю курсор, чтобы не блокировать очередь",
+                        ref.match_id, exc, n, MAX_TRANSIENT_RETRIES)
+                    self._advance_cursor(ref)
+                    self._transient_fails.pop(ref.match_id, None)
+                else:
+                    logger.warning(
+                        "match %s: download failed (%s), попытка %d/%d — "
+                        "повторю следующим циклом",
+                        ref.match_id, exc, n, MAX_TRANSIENT_RETRIES)
+                continue
+            self._transient_fails.pop(ref.match_id, None)
             object_key = f"{self._source.name}/{ref.match_id}.dem"
             self._s3.put_object(self._cfg.s3_bucket, object_key,
                                 io.BytesIO(data), len(data),
