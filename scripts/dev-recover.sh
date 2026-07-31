@@ -210,7 +210,7 @@ if [ -n "${STRATZ_API_TOKEN:-}" ]; then
         skip "stratz-pro-collector"
     fi
 else
-    skip "stratz-collector (STRATZ_API_TOKEN не задан)"
+    printf '   stratz-collector — STRATZ_API_TOKEN не задан, пропуск\n'
 fi
 
 if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
