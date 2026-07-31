@@ -326,12 +326,43 @@ class StratzTimelineSource:
 
     # -- цикл -----------------------------------------------------------------
 
-    def _candidates(self) -> Iterable[int]:
-        """match_id с вершины листинга OpenDota (один дешёвый вызов)."""
-        for entry in self._opendota(self._candidates_path):
-            mid = entry.get("match_id")
-            if mid is not None:
-                yield int(mid)
+    def _candidates(self, max_pages: int = 10) -> Iterable[int]:
+        """match_id из листинга OpenDota, с пагинацией вглубь.
+
+        Одной страницы (100 записей) не хватает: шард машины делит их
+        пополам, SourceSplit со STRATZ — ещё пополам, и после дедупа от
+        сотни остаются единицы. Именно поэтому цикл собирал 4–13 матчей
+        при лимите 40, упираясь не в квоту STRATZ, а в поставку
+        кандидатов. Листинг дёшев (один вызов на 100 записей), так что
+        уходим вглубь, пока не наберём достаточно или не кончатся
+        страницы.
+        """
+        cursor: int | None = None
+        seen: set[int] = set()
+        for _ in range(max_pages):
+            params = {}
+            if cursor:
+                params["less_than_match_id"] = cursor
+            batch = self._opendota(self._candidates_path, **params)
+            if not batch:
+                return
+            fresh = 0
+            for entry in batch:
+                mid = entry.get("match_id")
+                if mid is None:
+                    continue
+                cursor = int(mid)
+                if cursor in seen:
+                    continue          # страница повторяет уже выданное
+                seen.add(cursor)
+                fresh += 1
+                yield cursor
+            # Страница не дала ни одного нового id — значит API не понял
+            # less_than_match_id и отдаёт одно и то же. Дальше листать
+            # бессмысленно: без этой проверки цикл жёг бы вызовы, гоняя
+            # одни и те же кандидаты по кругу.
+            if fresh == 0:
+                return
 
     def fetch_new(self, after_cursor: str | None = None,
                   skip=None) -> Iterable[TimelineMatch]:
@@ -346,12 +377,35 @@ class StratzTimelineSource:
         if len(self._rejected) > 50_000:   # id монотонны, старые не вернутся
             self._rejected.clear()
         yielded = 0
+        # Счётчики причин отсева: без них в логе виден только итог
+        # «собрано N», и непонятно, упёрлись мы в лимит, в дедуп или в
+        # фильтр качества — а лечатся эти три случая по-разному.
+        stats = {"кандидатов": 0, "чужой шард": 0, "не моя доля": 0,
+                 "дубликат": 0, "кэш отказов": 0, "фильтр": 0,
+                 "нет данных": 0}
+
+        def report() -> None:
+            logger.info("цикл STRATZ: собрано %d из %d кандидатов (%s)",
+                        yielded, stats["кандидатов"],
+                        ", ".join(f"{k}: {v}" for k, v in stats.items()
+                                  if k != "кандидатов" and v))
+
         for mid in self._candidates():
+            stats["кандидатов"] += 1
             if yielded >= self._limit:
+                report()
                 return
-            if (not self._shard.accepts(mid)
-                    or not self._split.accepts(mid)
-                    or skip(mid) or mid in self._rejected):
+            if not self._shard.accepts(mid):
+                stats["чужой шард"] += 1
+                continue
+            if not self._split.accepts(mid):
+                stats["не моя доля"] += 1
+                continue
+            if skip(mid):
+                stats["дубликат"] += 1
+                continue
+            if mid in self._rejected:
+                stats["кэш отказов"] += 1
                 continue
             try:
                 data = self._gql(MATCH_QUERY, {"id": mid})
@@ -371,6 +425,7 @@ class StratzTimelineSource:
                 continue
             m = data.get("match")
             if not m:
+                stats["нет данных"] += 1
                 self._rejected.add(mid)
                 continue
             # Разбор ОДНОГО матча не имеет права ронять цикл: STRATZ меняет
@@ -382,7 +437,8 @@ class StratzTimelineSource:
                                        self._min_patch,
                                        pro=(self._mode == "pro"))
                 if not ok:
-                    logger.debug("матч %d отфильтрован: %s", mid, why)
+                    stats["фильтр"] += 1
+                    stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
                     self._rejected.add(mid)
                     continue
                 patch = self._patch_of(m)
@@ -393,8 +449,10 @@ class StratzTimelineSource:
                 self._rejected.add(mid)
                 continue
             if not rows:
+                stats["нет данных"] += 1
                 self._rejected.add(mid)
                 continue
             yielded += 1
             yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
                                 source_cursor=str(mid), patch=patch, raw={})
+        report()

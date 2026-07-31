@@ -380,3 +380,42 @@ def test_empty_token_rejected():
     чем крутить циклы, получая 401 на каждый матч."""
     with pytest.raises(ValueError, match="STRATZ_API_TOKEN"):
         StratzTimelineSource(token="")
+
+
+def test_candidates_paginate_beyond_first_page(monkeypatch):
+    """Одной страницы не хватает: шард делит её пополам, SourceSplit —
+    ещё пополам, дедуп добивает остаток. Из-за этого цикл собирал 4–13
+    матчей при лимите 40, упираясь не в квоту STRATZ, а в кандидатов."""
+    pages = {
+        None: [{"match_id": m} for m in range(9000, 8990, -1)],
+        8991: [{"match_id": m} for m in range(8990, 8980, -1)],
+        8981: [],
+    }
+    calls = []
+
+    src = StratzTimelineSource(token="t", api_delay_s=0)
+
+    def fake_opendota(path, **params):
+        key = params.get("less_than_match_id")
+        calls.append(key)
+        return pages.get(key, [])
+
+    monkeypatch.setattr(src, "_opendota", fake_opendota)
+    got = list(src._candidates())
+    assert len(got) == 20, got
+    assert calls == [None, 8991, 8981]
+
+
+def test_candidates_stop_when_api_ignores_cursor(monkeypatch):
+    """Если API отдаёт ту же страницу, листать бессмысленно — иначе цикл
+    жёг бы вызовы, гоняя одни и те же id по кругу."""
+    src = StratzTimelineSource(token="t", api_delay_s=0)
+    calls = []
+
+    def fake_opendota(path, **params):
+        calls.append(params.get("less_than_match_id"))
+        return [{"match_id": 777}]
+
+    monkeypatch.setattr(src, "_opendota", fake_opendota)
+    assert list(src._candidates()) == [777]     # без повторов
+    assert len(calls) == 2                       # вторая страница и стоп
