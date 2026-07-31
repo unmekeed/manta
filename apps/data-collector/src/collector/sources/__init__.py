@@ -74,6 +74,39 @@ class Shard:
         return self.count == 1 or match_id % self.count == self.shard_id
 
 
+@dataclass(frozen=True)
+class SourceSplit:
+    """Разделение кандидатов между источниками деталей ОДНОЙ машины.
+
+    Shard разводит машины, а этот фильтр — источники внутри машины.
+    Нужен, потому что JSON-источники читают ОДИН И ТОТ ЖЕ листинг с
+    вершины: без разделения opendota-timeline и stratz-timeline каждый
+    цикл дерутся за одни и те же свежие матчи. CollectedMatches отсекает
+    повтор только ПОСЛЕ того, как матч отмечен, а между проверкой и
+    отметкой лежит запрос деталей — в это окно оба успевают взять матч.
+
+    Цена такой ничьей не «лишний запрос», а потеря фич: витрина —
+    ReplacingMergeTree по (match_id, game_time), и побеждает строка,
+    вставленная последней. Приди она от STRATZ, она затрёт строку
+    OpenDota вместе с фичами трека F, которых у STRATZ нет.
+
+    Делится по `match_id // 10`, а не по остатку самого id: младшие
+    разряды уже заняты межмашинным Shard, и общий делитель сцепил бы два
+    фильтра (машина №2 не получала бы половину источников вовсе).
+    """
+
+    split_id: int = 0
+    count: int = 1
+
+    def __post_init__(self) -> None:
+        if self.count < 1 or not (0 <= self.split_id < self.count):
+            raise ValueError(
+                f"некорректное разделение {self.split_id}/{self.count}")
+
+    def accepts(self, match_id: int) -> bool:
+        return self.count == 1 or (match_id // 10) % self.count == self.split_id
+
+
 class Source(Protocol):
     """Контракт источника: имя + итератор новых матчей после курсора."""
 

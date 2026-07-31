@@ -35,7 +35,7 @@ from typing import Iterable
 
 import requests
 
-from . import Shard, with_api_key
+from . import Shard, SourceSplit, with_api_key
 from .opendota_timeline import TimelineMatch
 
 logger = logging.getLogger("collector.stratz")
@@ -192,7 +192,8 @@ class StratzTimelineSource:
                  opendota_base: str = "https://api.opendota.com/api",
                  opendota_key: str | None = None,
                  api_url: str = API_URL, kills_cumulative: bool = False,
-                 shard: Shard | None = None) -> None:
+                 shard: Shard | None = None,
+                 split: SourceSplit | None = None) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -215,6 +216,9 @@ class StratzTimelineSource:
         self._opendota_base = opendota_base.rstrip("/")
         self._opendota_key = opendota_key
         self._shard = shard or Shard()
+        # Своя доля кандидатов: JSON-источник OpenDota читает тот же
+        # листинг с вершины, и без разделения оба брали бы одни матчи.
+        self._split = split or SourceSplit()
         self._rejected: set[int] = set()
         # gameVersionId STRATZ -> patch id OpenDota; строится лениво.
         self._patch_map: dict[int, int] | None = None
@@ -304,8 +308,9 @@ class StratzTimelineSource:
         for mid in self._candidates():
             if yielded >= self._limit:
                 return
-            if (not self._shard.accepts(mid) or skip(mid)
-                    or mid in self._rejected):
+            if (not self._shard.accepts(mid)
+                    or not self._split.accepts(mid)
+                    or skip(mid) or mid in self._rejected):
                 continue
             try:
                 data = self._gql(MATCH_QUERY, {"id": mid})

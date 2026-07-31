@@ -28,7 +28,7 @@ from typing import Iterable
 import requests
 
 from ..signals import all_minute_features
-from . import Shard, with_api_key
+from . import Shard, SourceSplit, with_api_key
 
 logger = logging.getLogger("collector.opendota_timeline")
 
@@ -175,7 +175,8 @@ class OpenDotaTimelineSource:
                  timeout: float = 30.0, api_delay_s: float = 1.1,
                  mode: str = "public", api_key: str | None = None,
                  detail_budget: int | None = None,
-                 shard: Shard | None = None) -> None:
+                 shard: Shard | None = None,
+                 split: SourceSplit | None = None) -> None:
         assert mode in ("public", "pro")
         self._mode = mode
         self.name = ("opendota_timeline" if mode == "public"
@@ -192,6 +193,9 @@ class OpenDotaTimelineSource:
         self._delay = api_delay_s
         self._api_key = api_key
         self._shard = shard or Shard()
+        # Разделение кандидатов со STRATZ-источником: оба читают один и тот
+        # же листинг с вершины и без него дрались бы за одни матчи.
+        self._split = split or SourceSplit()
         # Бюджет анонимного тарифа: /matches/{id} — самый дорогой вызов
         # цикла, ограничиваем их число сверху (yielded + отфильтрованные).
         self._detail_budget = detail_budget or 2 * limit_per_cycle
@@ -245,6 +249,7 @@ class OpenDotaTimelineSource:
                 mid = int(entry["match_id"])
                 cursor = mid
                 if (not self._shard.accepts(mid)
+                        or not self._split.accepts(mid)
                         or skip(mid) or mid in self._rejected):
                     continue
                 if details >= self._detail_budget:

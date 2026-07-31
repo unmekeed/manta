@@ -22,7 +22,7 @@ CYCLES_FAILED = Counter("collector_cycles_failed_total",
                         "Циклы сбора, упавшие по внешним причинам")
 RATE_LIMITED = Counter("opendota_rate_limited_total",
                        "Циклы, оборванные 429 (квота OpenDota исчерпана)")
-from .sources import Shard
+from .sources import Shard, SourceSplit
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
@@ -49,6 +49,25 @@ def _shard_from_env() -> Shard:
     Одинаковый шард на обеих машинах кластера, разный SHARD_ID."""
     return Shard(shard_id=int(os.getenv("COLLECTOR_SHARD_ID", "0")),
                  count=int(os.getenv("COLLECTOR_SHARD_COUNT", "1")))
+
+
+def _detail_split(name: str) -> SourceSplit:
+    """Доля кандидатов этого источника среди источников деталей машины.
+
+    JSON-источники OpenDota и STRATZ читают ОДИН И ТОТ ЖЕ листинг с
+    вершины. Без разделения они каждый цикл берут одни и те же свежие
+    матчи: CollectedMatches отсекает повтор лишь ПОСЛЕ отметки, а между
+    проверкой и отметкой лежит запрос деталей. Проигрыш в этой гонке
+    стоит не лишнего запроса, а фич — витрина ReplacingMergeTree
+    оставляет строку, вставленную последней, и строка STRATZ затирает
+    строку OpenDota вместе с треком F.
+
+    Пока STRATZ не настроен, делить не с кем — фильтр пропускает всё.
+    """
+    if not os.getenv("STRATZ_API_TOKEN"):
+        return SourceSplit()
+    return SourceSplit(split_id=1 if name.startswith("stratz") else 0,
+                       count=2)
 
 
 def build_source(name: str):
@@ -80,6 +99,7 @@ def build_source(name: str):
             api_key=api_key,
             detail_budget=int(detail_budget) if detail_budget else None,
             shard=shard,
+            split=_detail_split(name),
         )
     if name in ("stratz-timeline", "stratz-timeline-pro"):
         # Кандидаты — дешёвый листинг OpenDota, детали — GraphQL STRATZ.
@@ -94,6 +114,7 @@ def build_source(name: str):
             opendota_key=api_key,
             kills_cumulative=os.getenv("STRATZ_KILLS_CUMULATIVE") == "1",
             shard=shard,
+            split=_detail_split(name),
         )
     raise ValueError(f"unknown source {name!r}")
 
