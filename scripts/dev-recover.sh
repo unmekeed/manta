@@ -215,7 +215,10 @@ fi
 
 if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
     say "запускаю pro-replay-collector (лог: $LOG_DIR/pro-collector.log)"
-    (cd apps/data-collector && OPENDOTA_LIMIT=1 METRICS_PORT=9109 PYTHONPATH=src:$ROOT/libs \
+    # Лимит берётся из env-файла, как и у остальных коллекторов: жёсткая
+    # единица здесь молча отменяла документированный OPENDOTA_LIMIT (E4) и
+    # держала реплей-путь на одном матче в час независимо от настроек.
+    (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-1}" METRICS_PORT=9109 PYTHONPATH=src:$ROOT/libs \
         nohup python3 -u -m collector --source opendota \
             --interval "${PRO_REPLAY_INTERVAL:-3600}" \
             >"$LOG_DIR/pro-collector.log" 2>&1 &)
