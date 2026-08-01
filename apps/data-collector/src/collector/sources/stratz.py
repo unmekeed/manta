@@ -228,7 +228,7 @@ class StratzTimelineSource:
 
     def __init__(self, token: str, limit_per_cycle: int = 40,
                  min_duration_s: int = 900, min_patch: int | None = None,
-                 timeout: float = 30.0, api_delay_s: float = 0.35,
+                 timeout: float = 30.0, api_delay_s: float = 0.6,
                  mode: str = "public",
                  opendota_base: str = "https://api.opendota.com/api",
                  opendota_key: str | None = None,
@@ -249,8 +249,11 @@ class StratzTimelineSource:
         self._min_duration_s = min_duration_s
         self._min_patch = min_patch
         self._timeout = timeout
-        # 250 запросов/мин у Default-токена → 0.35с между вызовами держит
-        # ~170/мин с запасом на всплески.
+        # 250 запросов/мин у Default-токена. Пауза 0.6с даёт ~100/мин на
+        # источник — и это важно: public и pro работают ОДНОВРЕМЕННО и
+        # делят один токен, поэтому считать надо суммарный темп. При
+        # прежних 0.35с (~170/мин каждый) двое вместе давали ~340/мин и
+        # ловили 429 (инцидент 2026-08-01).
         self._delay = api_delay_s
         self._api_url = api_url
         self._kills_cumulative = kills_cumulative

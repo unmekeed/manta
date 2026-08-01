@@ -22,6 +22,11 @@ CYCLES_FAILED = Counter("collector_cycles_failed_total",
                         "Циклы сбора, упавшие по внешним причинам")
 RATE_LIMITED = Counter("opendota_rate_limited_total",
                        "Циклы, оборванные 429 (квота OpenDota исчерпана)")
+
+# Запас суточной квоты, ниже которого 429 считается исчерпанием суток, а
+# не минутным всплеском. Не ноль: заголовок отдаёт остаток на момент
+# ответа, и у самой границы оба лимита срабатывают вперемешку.
+BURST_DAY_MARGIN = 50
 from .sources import Shard, SourceSplit
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
@@ -207,12 +212,34 @@ def main() -> None:
                     RATE_LIMITED.inc()
                     remaining = e.response.headers.get(
                         "x-rate-limit-remaining-day", "?")
-                    sleep_s = max(sleep_s, seconds_until_utc_midnight())
-                    log.warning(
-                        "429: квота OpenDota исчерпана (remaining-day=%s); "
-                        "жду сброса ~%.1fч вместо обычных %ss — см. "
-                        "docs/runbooks.md и OPENDOTA_API_KEY",
-                        remaining, sleep_s / 3600, args.interval)
+                    # У OpenDota ДВА лимита: суточный (~2000) и burst
+                    # 60/мин. Раньше любой 429 усыплял коллектор до
+                    # полуночи UTC — и всплеск на несколько секунд стоил
+                    # 14 часов простоя (инцидент 2026-08-01: сон при
+                    # remaining-day=2030, то есть при целой квоте).
+                    # Различаем по остатку суточной: он цел → это burst.
+                    day_left = None
+                    if remaining not in ("", "?", None):
+                        try:
+                            day_left = int(remaining)
+                        except ValueError:
+                            day_left = None
+                    if day_left is not None and day_left > BURST_DAY_MARGIN:
+                        sleep_s = max(sleep_s, int(os.getenv(
+                            "OPENDOTA_BURST_SLEEP_S", "90")))
+                        log.warning(
+                            "429 при целой суточной квоте (remaining-day=%s) "
+                            "— это минутный лимит 60/мин; жду %ss. Если "
+                            "повторяется, разнести коллекторы по времени "
+                            "или снизить лимиты",
+                            remaining, sleep_s)
+                    else:
+                        sleep_s = max(sleep_s, seconds_until_utc_midnight())
+                        log.warning(
+                            "429: квота OpenDota исчерпана (remaining-day=%s); "
+                            "жду сброса ~%.1fч вместо обычных %ss — см. "
+                            "docs/runbooks.md и OPENDOTA_API_KEY",
+                            remaining, sleep_s / 3600, args.interval)
                 else:
                     log.exception("цикл сбора упал; повтор через %ss",
                                   args.interval)
