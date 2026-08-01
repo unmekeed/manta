@@ -225,8 +225,13 @@ def main() -> None:
                         except ValueError:
                             day_left = None
                     if day_left is not None and day_left > BURST_DAY_MARGIN:
-                        sleep_s = max(sleep_s, int(os.getenv(
-                            "OPENDOTA_BURST_SLEEP_S", "90")))
+                        # ПРИСВАИВАЕМ, а не max(): sleep_s здесь уже равен
+                        # интервалу коллектора (1800с), и max оставлял бы
+                        # его — то есть за минутный всплеск платили бы
+                        # получасом. Цикл при этом оборван на середине,
+                        # часть кандидатов не обработана, и повторить его
+                        # нужно СКОРО, как только сбросится burst.
+                        sleep_s = int(os.getenv("OPENDOTA_BURST_SLEEP_S", "90"))
                         log.warning(
                             "429 при целой суточной квоте (remaining-day=%s) "
                             "— это минутный лимит 60/мин; жду %ss. Если "

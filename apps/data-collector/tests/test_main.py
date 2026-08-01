@@ -45,7 +45,7 @@ def _sleep_for_429(remaining: str, source: str = "opendota-timeline") -> int:
     if source.startswith("stratz"):
         return 3600
     if day_left is not None and day_left > BURST_DAY_MARGIN:
-        return 90
+        return 90          # присваивается, НЕ max(interval, 90)
     return seconds_until_utc_midnight()
 
 
@@ -54,6 +54,16 @@ def test_429_with_quota_left_is_burst_not_daily():
     целой суточной квоте — это минутный лимит 60/мин. Коллектор уснул до
     полуночи UTC и потерял 14 часов сбора."""
     assert _sleep_for_429("2030") == 90
+
+
+def test_burst_sleep_is_shorter_than_cycle_interval():
+    """Сон при всплеске НЕ должен растягиваться до интервала коллектора.
+    Первая версия делала max(interval, 90) и платила получасом за
+    минутный лимит — при том что цикл оборван на середине и его надо
+    повторить, как только burst сбросится."""
+    burst = _sleep_for_429("2030")
+    assert burst < 1800, "burst-сон не должен доходить до интервала цикла"
+    assert burst >= 60, "меньше минуты — burst не успеет сброситься"
 
 
 def test_429_with_exhausted_quota_sleeps_until_reset():
