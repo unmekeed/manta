@@ -31,8 +31,12 @@ PG_DB="${POSTGRES_DB:-manta}"
 # (миграция 011), но в список переноса их тогда не внесли — слепок молча
 # терял драфты, OOF-прайоры и события матчей. Обе — ReplacingMergeTree, то
 # есть повторная вставка дедуплицируется движком, как у витрин.
+# MatchFights (спринт 84) переносится ОБЯЗАТЕЛЬНО: драки восстанавливаются
+# из ReplayEvents, а он живёт 14 дней — потерять их в слепке значит
+# потерять безвозвратно, в отличие от витрин, которые пересчитываются из
+# сырья.
 REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures
-                  MatchDraft MatchEvents)
+                  MatchDraft MatchEvents MatchFights)
 RAW_TABLES=(EconomyTimeline PositionSnapshots)
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }

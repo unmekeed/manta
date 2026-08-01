@@ -21,6 +21,7 @@ from prometheus_client import Counter, Histogram
 
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
+from .fights import detect_fights
 from .pseudonym import apply as pseudonymize
 
 logger = logging.getLogger("extractor")
@@ -121,7 +122,7 @@ class Extractor:
             " ORDER BY player_id, game_time",
             {"match_id": match_id})
         kills = self.ch.select(
-            "SELECT game_time, target FROM ReplayEvents"
+            "SELECT game_time, target, attacker FROM ReplayEvents"
             " WHERE match_id = {match_id:UInt64} AND event_type = 'KILL'"
             "   AND target LIKE 'npc_dota_hero_%'"
             " ORDER BY game_time",
@@ -154,6 +155,18 @@ class Extractor:
             r["match_id"] = match_id
             r["tier"] = tier
             r["patch"] = patch
+
+        # Драки пишем ДО витрин: ReplayEvents живёт 14 дней, и это
+        # единственный шанс сохранить размен. Сбой здесь не должен
+        # ронять обработку матча — витрина первична.
+        try:
+            frows = detect_fights(kills, positions, roster.hero_team)
+            for r in frows:
+                r["match_id"] = match_id
+            self.ch.insert_rows("MatchFights", frows)
+        except Exception:  # noqa: BLE001
+            logger.warning("матч %s: драки не сохранены", match_id,
+                        exc_info=True)
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)
         self.ch.insert_rows("MatchTimelineFeatures", trows)
