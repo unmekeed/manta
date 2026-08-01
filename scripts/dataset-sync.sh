@@ -97,6 +97,15 @@ export_dataset() {
     cat "$dir/meta.json"
 }
 
+# Пустой дамп таблицы — норма, а не ошибка: слепок мог сниматься до
+# появления таблицы (архив от 2026-07-27 не содержал MatchDraft/MatchEvents,
+# их наполнил трек F позже). ClickHouse на пустом Native отвечает
+# NO_DATA_TO_INSERT, и без этой проверки одна пустая таблица роняла ВЕСЬ
+# импорт — данные, уже влитые до неё, оставались, остальные терялись.
+is_empty_dump() {
+    [ "$(gunzip -c "$1" | head -c 1 | wc -c)" -eq 0 ]
+}
+
 import_dataset() {
     local in="${1:?путь к архиву}"
     local dir; dir=$(mktemp -d)
@@ -106,6 +115,10 @@ import_dataset() {
 
     for t in "${REPLACING_TABLES[@]}"; do
         [ -f "$dir/$t.native.gz" ] || continue
+        if is_empty_dump "$dir/$t.native.gz"; then
+            echo ">> CH $t — в архиве пусто, пропуск"
+            continue
+        fi
         echo ">> CH $t (ReplacingMergeTree — вставка как есть)"
         gunzip -c "$dir/$t.native.gz" |
             docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" \
@@ -114,6 +127,10 @@ import_dataset() {
 
     for t in "${RAW_TABLES[@]}"; do
         [ -f "$dir/$t.native.gz" ] || continue
+        if is_empty_dump "$dir/$t.native.gz"; then
+            echo ">> CH $t — в архиве пусто, пропуск"
+            continue
+        fi
         echo ">> CH $t (MergeTree — только новые match_id через staging)"
         chq "DROP TABLE IF EXISTS manta.${t}_import"
         chq "CREATE TABLE manta.${t}_import AS manta.$t"
