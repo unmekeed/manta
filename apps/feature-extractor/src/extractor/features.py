@@ -14,9 +14,13 @@ MatchTimelineFeatures. Тестируются на синтетике без и�
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
-FEATURE_VERSION = "1.4.0"  # 1.4.0: + networth_total (для networth_rel)
+# 1.5.0: + local_manpower_diff, spread_diff (перевес в точке контакта и
+# собранность команды — alive_diff считал живых по всей карте и не
+# отличал «пятеро кучей» от «пятеро по карте»).
+FEATURE_VERSION = "1.5.0"
 
 WINDOW_S = 60  # шаг таймлайна фич
 
@@ -317,6 +321,98 @@ def alive_diff_by_window(positions: list[dict], hero_team: dict[str, int],
     return out
 
 
+# Радиус, внутри которого герои разных сторон считаются вступившими в
+# контакт: ~1200 юнитов — дистанция обычного боя. Дальше стороны видят
+# друг друга, но не разменивают заклинания.
+CONTACT_R = 1200.0
+# Радиус вокруг точки контакта, в котором считаются участники стычки.
+# Больше контактного: герой в 1800 юнитах добегает за секунды и
+# фактически в драке участвует.
+FIGHT_R = 1800.0
+
+
+def _alive_positions(positions: list[dict], hero_team: dict[str, int],
+                     max_t: int) -> dict[int, list[tuple[int, float, float]]]:
+    """окно → [(team, x, y)] по последнему снапшоту каждого ЖИВОГО героя."""
+    norm_team = {_normalize_hero(h): t for h, t in hero_team.items()}
+    last: dict[int, dict[str, tuple[int, float, float]]] = {}
+    for p in positions:
+        t = int(p["game_time"])
+        if t > max_t or int(p.get("is_alive", 1)) == 0:
+            continue
+        hero = _normalize_hero(str(p.get("hero", "")))
+        team = norm_team.get(hero)
+        if team not in (2, 3):
+            continue
+        w = ((t + WINDOW_S - 1) // WINDOW_S) * WINDOW_S
+        last.setdefault(w, {})[hero] = (team, float(p["x"]), float(p["y"]))
+    return {w: list(v.values()) for w, v in last.items()}
+
+
+def local_manpower_by_window(positions: list[dict], hero_team: dict[str, int],
+                             max_t: int) -> dict[int, float]:
+    """Численный перевес В ТОЧКЕ КОНТАКТА, Radiant − Dire, по окнам.
+
+    Чего не хватало модели: `alive_diff` считает живых по ВСЕЙ карте, и
+    «пятеро против пятерых, но трое наших на другом краю» выглядит как
+    равенство. Здесь берётся место, где стороны реально соприкасаются, и
+    перевес считается только среди тех, кто рядом.
+
+    Алгоритм окна: ищем пары «герой Radiant — герой Dire» ближе
+    CONTACT_R, за центр стычки берём середину самой близкой пары, считаем
+    живых каждой стороны в радиусе FIGHT_R. Контактов нет — стороны
+    разведены, значение 0: это не «равенство сил», а «сейчас никто не
+    дерётся», и ноль тут верное прочтение, а не пропуск.
+    """
+    per_window = _alive_positions(positions, hero_team, max_t)
+    out: dict[int, float] = {}
+    for w in range(WINDOW_S, max_t + 1, WINDOW_S):
+        heroes = per_window.get(w, [])
+        radiant = [(x, y) for t, x, y in heroes if t == 2]
+        dire = [(x, y) for t, x, y in heroes if t == 3]
+        best = None                       # (dist, cx, cy)
+        for rx, ry in radiant:
+            for dx, dy in dire:
+                d = math.hypot(rx - dx, ry - dy)
+                if d <= CONTACT_R and (best is None or d < best[0]):
+                    best = (d, (rx + dx) / 2.0, (ry + dy) / 2.0)
+        if best is None:
+            out[w] = 0.0
+            continue
+        _, cx, cy = best
+        n_r = sum(1 for x, y in radiant if math.hypot(x - cx, y - cy) <= FIGHT_R)
+        n_d = sum(1 for x, y in dire if math.hypot(x - cx, y - cy) <= FIGHT_R)
+        out[w] = float(n_r - n_d)
+    return out
+
+
+def spread_by_window(positions: list[dict], hero_team: dict[str, int],
+                     max_t: int) -> dict[int, float]:
+    """Разброс Radiant − Dire по окнам, в долях половины диагонали карты.
+
+    Среднее расстояние живых героев до центра масс своей команды.
+    Положительное — Radiant размазан сильнее противника, отрицательное —
+    собраннее. Нормируем на MAP_HALF_DIAG, чтобы величина не зависела от
+    единиц карты и жила примерно в [-1, 1].
+    """
+    per_window = _alive_positions(positions, hero_team, max_t)
+
+    def _spread(pts: list[tuple[float, float]]) -> float:
+        if len(pts) < 2:
+            return 0.0
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        return sum(math.hypot(x - cx, y - cy) for x, y in pts) / len(pts)
+
+    out: dict[int, float] = {}
+    for w in range(WINDOW_S, max_t + 1, WINDOW_S):
+        heroes = per_window.get(w, [])
+        r = _spread([(x, y) for t, x, y in heroes if t == 2])
+        d = _spread([(x, y) for t, x, y in heroes if t == 3])
+        out[w] = (r - d) / MAP_HALF_DIAG
+    return out
+
+
 def timeline_features(economy: list[dict], kills: list[dict],
                       roster: Roster,
                       positions: list[dict] | None = None,
@@ -344,6 +440,9 @@ def timeline_features(economy: list[dict], kills: list[dict],
     advance = position_advance_by_window(positions or [], max_t)
     buildings = building_diffs_by_window(building_kills or [], max_t)
     alive = alive_diff_by_window(positions or [], roster.hero_team, max_t)
+    manpower = local_manpower_by_window(positions or [], roster.hero_team,
+                                        max_t)
+    spread = spread_by_window(positions or [], roster.hero_team, max_t)
 
     out = []
     radiant_win = 1 if roster.winner == 2 else 0
@@ -377,4 +476,10 @@ def timeline_features(economy: list[dict], kills: list[dict],
             "radiant_win": radiant_win,
             "feature_version": FEATURE_VERSION,
         })
+        # Только когда позиции ЕСТЬ. Иначе ключи не пишутся вовсе, и в
+        # ClickHouse срабатывает DEFAULT nan: ноль здесь означал бы
+        # «стороны сошлись ровно поровну», то есть ложный сигнал.
+        if positions:
+            out[-1]["local_manpower_diff"] = manpower.get(t, 0.0)
+            out[-1]["spread_diff"] = round(spread.get(t, 0.0), 4)
     return out

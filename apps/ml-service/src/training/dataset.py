@@ -28,6 +28,9 @@ FEATURES = [
     "towers_diff",        # снесённые башни R−D накопительно (миграция 008)
     "rax_diff",           # снесённые бараки R−D накопительно (миграция 008)
     "networth_rel",       # доля преимущества: networth_diff/networth_total
+    # A14 (спринт 83). Только из реплея, у JSON-матчей NaN.
+    "local_manpower_diff",  # перевес В ТОЧКЕ КОНТАКТА, не по всей карте
+    "spread_diff",          # собранность команды: разброс R − D
     # Трек F (миграция 012). Все NaN у матчей, собранных до трека —
     # LightGBM обрабатывает пропуск нативно.
     "roshan_diff",        # убийства Рошана R−D накопительно (F2)
@@ -48,6 +51,8 @@ FEATURES = [
 # разностные и территориальные). game_time и kills_total симметричны.
 MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  "alive_diff", "towers_diff", "rax_diff", "networth_rel",
+                 # A14: обе разностные, при смене сторон меняют знак
+                 "local_manpower_diff", "spread_diff",
                  # Трек F: все разностные и знаковые фичи меняют знак.
                  "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
                  "item_value_diff", "key_items_diff", "obs_wards_diff",
@@ -210,6 +215,8 @@ ROW_COLUMNS = [
     "game_time", "networth_diff", "networth_total", "xp_diff",
     "kills_radiant", "kills_dire", "position_advance", "alive_diff",
     "towers_diff", "rax_diff",
+    # A14 (миграция 014): перевес в точке контакта и собранность команды
+    "local_manpower_diff", "spread_diff",
     # Трек F (миграция 012)
     "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
     "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
@@ -260,6 +267,8 @@ def row_to_features(row: dict) -> list[float]:
         _f("towers_diff"),
         _f("rax_diff"),
         rel,
+        _f("local_manpower_diff"),
+        _f("spread_diff"),
         _f("roshan_diff"),
         _f("aegis_alive"),
         _f("buybacks_diff"),
