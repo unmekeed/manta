@@ -162,6 +162,9 @@ doctor:        ## Health-check конвейера по ДАННЫМ (топик�
 collect-report: ## Почему упал темп сбора + покрытие фич: ARGS="rate|features|logs"
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/collect-report.sh $(ARGS)
 
+backfill:      ## Пересчёт фич по сохранённому JSON, без вызовов API: ARGS="--limit 50"
+	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs python3 -m collector.backfill $(ARGS)
+
 dashboard:     ## Живой дашборд наблюдаемости без Docker/Grafana (:9107)
 	python3 scripts/dashboard.py
 

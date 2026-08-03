@@ -444,6 +444,11 @@ make collect-report
 make collect-report ARGS=rate       # быстрый вариант: один темп сбора
 make collect-report ARGS=features   # только покрытие фич и объём датасета
 
+# пересчитать фичи по сохранённому JSON — ноль вызовов OpenDota
+make backfill ARGS="--limit 50 --dry-run"   # проба, ничего не пишет
+make backfill ARGS=--only-missing           # добить пустые колонки
+make backfill                               # всё хранилище
+
 # дашборд
 # http://localhost:9107
 ```
