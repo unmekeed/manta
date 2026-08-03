@@ -392,6 +392,108 @@ def item_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     }
 
 
+# -- Резерв и мёртвое золото (волна 1, спринт 91) ------------------------------
+
+# Стоимость выкупа: 100 + нетворс/13. Формула менялась патчами, поэтому
+# держим её здесь явно, а не размазываем по коду: когда Valve поменяет
+# делитель, править надо будет одно место.
+BUYBACK_BASE = 100
+BUYBACK_NETWORTH_DIV = 13
+# Кулдаун бэйбека. Пока он идёт, «резерв» существует только на бумаге.
+BUYBACK_COOLDOWN_S = 480
+
+
+def _gold_earned_at(gold_t: list, t: int) -> float:
+    """Накопленное золото игрока к секунде t по поминутному ряду gold_t.
+
+    Ряд идёт с шагом минуту, индекс равен номеру минуты. За хвостом ряда
+    берём последнее известное значение: матч мог закончиться раньше
+    последней минуты сетки.
+    """
+    if not gold_t:
+        return 0.0
+    i = min(max(t // 60, 0), len(gold_t) - 1)
+    try:
+        return float(gold_t[i] or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _player_economy(p: dict) -> tuple[list, list[tuple[int, float]], list[int]]:
+    """(ряд накопленного золота, покупки [(время, цена)], времена бэйбеков)."""
+    purchases: list[tuple[int, float]] = []
+    for it in p.get("purchase_log") or []:
+        if "time" not in it:
+            continue
+        cost = _ITEM_COST.get(str(it.get("key", "")))
+        if cost:
+            purchases.append((int(it["time"]), float(cost)))
+    purchases.sort()
+    buybacks = sorted(int(b["time"]) for b in (p.get("buyback_log") or [])
+                      if "time" in b)
+    return (p.get("gold_t") or []), purchases, buybacks
+
+
+def economy_reserve_features(m: dict, minutes: list[int]
+                             ) -> dict[str, list[float]]:
+    """unspent_gold_diff и buyback_availability из JSON OpenDota.
+
+    Золото в кармане = заработано − вложено в предметы − потрачено на
+    выкупы. `gold_t` OpenDota — накопленное ЗАРАБОТАННОЕ золото, поэтому
+    разность и даёт остаток.
+
+    Оценка неизбежно приблизительная, и врёт она в одну сторону — вверх:
+    продажа предметов возвращает золото, но в purchase_log не попадает, а
+    словарь цен (снимок констант) неполон. Для diff-фичи это терпимо:
+    обе стороны считаются одинаково, и систематический сдвиг сокращается.
+    Отрицательный остаток обрезается нулём — отрицательного золота не
+    бывает, и минус означал бы только накопленную ошибку оценки.
+
+    Пустой словарь (колонки останутся NaN), если поминутного золота нет
+    ни у кого: у матчей STRATZ его нет вовсе, и ноль означал бы «карманы
+    пусты» и «выкупиться не может никто» — оба ложные сигналы.
+    """
+    if not _ITEM_COST:
+        # Без словаря цен «вложено в предметы» равно нулю, и остаток
+        # выродился бы в накопленное золото — то есть в копию
+        # networth_diff под другим именем. Лучше пропуск.
+        return {}
+    players = []
+    for p in m.get("players") or []:
+        gold_t, purchases, buybacks = _player_economy(p)
+        if not gold_t:
+            continue
+        players.append((_sign(team_of(p.get("player_slot", 0))),
+                        gold_t, purchases, buybacks))
+    if not players:
+        return {}
+
+    unspent_series, avail_series = [], []
+    for t in minutes:
+        unspent_diff = 0.0
+        avail_diff = 0.0
+        for s, gold_t, purchases, buybacks in players:
+            earned = _gold_earned_at(gold_t, t)
+            spent = sum(c for pt, c in purchases if pt <= t)
+            # Выкуп тоже тратит золото, и его цена считается по нетворсу
+            # НА МОМЕНТ ВЫКУПА, а не на текущую минуту.
+            used = [bt for bt in buybacks if bt <= t]
+            spent += sum(BUYBACK_BASE
+                         + _gold_earned_at(gold_t, bt) / BUYBACK_NETWORTH_DIV
+                         for bt in used)
+            unspent = max(0.0, earned - spent)
+            unspent_diff += s * unspent
+
+            on_cooldown = any(t - bt < BUYBACK_COOLDOWN_S for bt in used)
+            cost_now = BUYBACK_BASE + earned / BUYBACK_NETWORTH_DIV
+            if not on_cooldown and unspent >= cost_now:
+                avail_diff += s
+        unspent_series.append(unspent_diff)
+        avail_series.append(avail_diff)
+    return {"unspent_gold_diff": unspent_series,
+            "buyback_availability": avail_series}
+
+
 def neutral_level_features(m: dict, minutes: list[int]
                            ) -> dict[str, list[float]]:
     """F6: сумма тиров нейтралок и разница уровней.
@@ -444,7 +546,8 @@ def all_minute_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     """Все поминутные фичи трека F одним вызовом."""
     out: dict[str, list[float]] = {}
     for fn in (objective_features, vision_features, vision_coverage,
-               item_features, neutral_level_features):
+               item_features, economy_reserve_features,
+               neutral_level_features):
         try:
             out.update(fn(m, minutes))
         except Exception:  # noqa: BLE001 — сбой одной группы не рушит остальные

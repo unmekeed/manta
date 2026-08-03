@@ -4,8 +4,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from collector.signals import (KEY_ITEMS, RADIANT, DIRE, all_minute_features,
-                               draft_row, event_rows, item_features,
+from collector.signals import (BUYBACK_BASE, BUYBACK_COOLDOWN_S,
+                               BUYBACK_NETWORTH_DIV,
+                               KEY_ITEMS, RADIANT, DIRE, all_minute_features,
+                               draft_row, economy_reserve_features,
+                               event_rows, item_features,
                                neutral_level_features, objective_features,
                                team_of, vision_coverage,
                                vision_features)
@@ -271,3 +274,117 @@ def test_length_matches_minutes():
     m = _ward_match([(60, 100, 100)], [])
     minutes = [60, 120, 180, 240]
     assert len(vision_coverage(m, minutes)["vision_coverage_diff"]) == 4
+
+
+# -- Резерв и мёртвое золото (волна 1, спринт 91) -----------------------------
+
+def _econ_match(radiant, dire, mid=777):
+    """Матч с экономикой. radiant/dire — списки словарей игрока:
+    {gold_t: [...], purchases: [(t, key)], buybacks: [t]}."""
+    def player(slot, spec):
+        return {"player_slot": slot, "hero_id": 1,
+                "gold_t": spec.get("gold_t", []),
+                "purchase_log": [{"time": t, "key": k}
+                                 for t, k in spec.get("purchases", [])],
+                "buyback_log": [{"time": t} for t in spec.get("buybacks", [])],
+                "obs_log": [], "sen_log": [], "runes_log": []}
+    players = [player(i, s) for i, s in enumerate(radiant)]
+    players += [player(128 + i, s) for i, s in enumerate(dire)]
+    return {"match_id": mid, "radiant_win": True, "players": players}
+
+
+def test_unspent_is_earned_minus_items():
+    """Золото в кармане — заработанное минус вложенное в предметы."""
+    m = _econ_match([{"gold_t": [0, 1000, 2000],
+                      "purchases": [(70, "blink")]}], [])   # blink = 2250
+    got = economy_reserve_features(m, [60, 120])["unspent_gold_diff"]
+    assert got[0] == 1000                       # покупки ещё не было
+    assert got[1] == 0                          # 2000 − 2250 → обрезано нулём
+
+
+def test_unspent_never_negative():
+    """Отрицательного золота не бывает: минус означал бы только
+    накопленную ошибку оценки (продажи, неполный словарь цен)."""
+    m = _econ_match([{"gold_t": [0, 100], "purchases": [(10, "blink")]}], [])
+    assert economy_reserve_features(m, [60])["unspent_gold_diff"][0] == 0
+
+
+def test_unspent_sign_and_symmetry():
+    rich = {"gold_t": [0, 5000]}
+    poor = {"gold_t": [0, 1000]}
+    m = _econ_match([rich], [poor])
+    assert economy_reserve_features(m, [60])["unspent_gold_diff"][0] == 4000
+    m = _econ_match([poor], [rich])
+    assert economy_reserve_features(m, [60])["unspent_gold_diff"][0] == -4000
+
+
+def test_unknown_items_do_not_count_as_spend():
+    """Предмета нет в словаре цен — трат не засчитываем. Оценка врёт
+    вверх, и это задокументировано: для diff обе стороны равны."""
+    m = _econ_match([{"gold_t": [0, 1000],
+                      "purchases": [(10, "нет_такого_предмета")]}], [])
+    assert economy_reserve_features(m, [60])["unspent_gold_diff"][0] == 1000
+
+
+def test_buyback_available_when_rich_and_off_cooldown():
+    """Хватает золота и бэйбек не на кулдауне — резерв есть."""
+    cost = BUYBACK_BASE + 5000 / BUYBACK_NETWORTH_DIV
+    m = _econ_match([{"gold_t": [0, 5000]}], [])
+    assert cost < 5000                                   # предпосылка теста
+    assert economy_reserve_features(m, [60])["buyback_availability"][0] == 1
+
+
+def test_buyback_unavailable_when_broke():
+    m = _econ_match([{"gold_t": [0, 5000],
+                      "purchases": [(10, "blink"), (20, "black_king_bar")]}], [])
+    assert economy_reserve_features(m, [60])["buyback_availability"][0] == 0
+
+
+def test_buyback_unavailable_during_cooldown():
+    """Свежий выкуп обнуляет резерв, даже если золота снова хватает:
+    восемь минут герой вернуться не может."""
+    m = _econ_match([{"gold_t": [0, 9000, 9000, 9000, 9000, 9000, 9000,
+                                 9000, 9000, 9000, 9000],
+                      "buybacks": [70]}], [])
+    got = economy_reserve_features(m, [120, 70 + BUYBACK_COOLDOWN_S + 60])
+    assert got["buyback_availability"][0] == 0     # кулдаун идёт
+    assert got["buyback_availability"][1] == 1     # кулдаун истёк
+
+
+def test_buyback_spend_reduces_unspent():
+    """Выкуп тратит золото, и в purchase_log он не попадает — без учёта
+    остаток был бы завышен ровно на стоимость выкупа."""
+    plain = _econ_match([{"gold_t": [0, 5000]}], [])
+    bought = _econ_match([{"gold_t": [0, 5000], "buybacks": [30]}], [])
+    a = economy_reserve_features(plain, [60])["unspent_gold_diff"][0]
+    b = economy_reserve_features(bought, [60])["unspent_gold_diff"][0]
+    assert b < a
+
+
+def test_availability_counts_heroes_not_teams():
+    """Диапазон [-5, 5]: считаются ГЕРОИ, а не факт «у команды есть»."""
+    rich = {"gold_t": [0, 9000]}
+    m = _econ_match([rich] * 5, [rich] * 2)
+    assert economy_reserve_features(m, [60])["buyback_availability"][0] == 3
+
+
+def test_no_gold_series_leaves_nan():
+    """У матчей STRATZ поминутного золота нет. Ноль означал бы «карманы
+    пусты» и «выкупиться не может никто» — оба ложные сигналы."""
+    m = _econ_match([{"gold_t": []}], [{"gold_t": []}])
+    assert economy_reserve_features(m, [60, 120]) == {}
+
+
+def test_gold_series_shorter_than_minutes_uses_last():
+    """Матч короче сетки минут: за хвостом берём последнее известное
+    значение, а не падаем по IndexError."""
+    m = _econ_match([{"gold_t": [0, 1000]}], [])
+    got = economy_reserve_features(m, [60, 120, 600])["unspent_gold_diff"]
+    assert got == [1000, 1000, 1000]
+
+
+def test_both_in_all_minute_features():
+    m = _econ_match([{"gold_t": [0, 5000]}], [{"gold_t": [0, 3000]}])
+    feats = all_minute_features(m, [60, 120])
+    assert "unspent_gold_diff" in feats and "buyback_availability" in feats
+    assert len(feats["unspent_gold_diff"]) == 2

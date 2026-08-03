@@ -38,6 +38,8 @@ FEATURES = [
     "buybacks_diff",      # потрачено бэйбеков R−D (F2)
     "first_blood",        # сторона первой крови (F2)
     "item_value_diff",    # стоимость закупа R−D (F4)
+    "unspent_gold_diff",  # золото В КАРМАНЕ R−D (волна 1, спринт 91)
+    "buyback_availability",  # героев с ГОТОВЫМ бэйбеком R−D, [-5, 5]
     "key_items_diff",     # взято ключевых предметов R−D (F4)
     "obs_wards_diff",     # активных обс-вардов R−D (F5)
     "vision_coverage_diff",  # ДОЛЯ КАРТЫ под обзором R−D (волна 1, спринт 90)
@@ -57,7 +59,8 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  # Трек F: все разностные и знаковые фичи меняют знак.
                  "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
                  "item_value_diff", "key_items_diff", "obs_wards_diff",
-                 "vision_coverage_diff",
+                 "vision_coverage_diff", "unspent_gold_diff",
+                 "buyback_availability",
                  "sen_wards_diff", "runes_diff", "neutral_tier_diff",
                  "levels_diff"}
 
