@@ -40,6 +40,7 @@ FEATURES = [
     "item_value_diff",    # стоимость закупа R−D (F4)
     "key_items_diff",     # взято ключевых предметов R−D (F4)
     "obs_wards_diff",     # активных обс-вардов R−D (F5)
+    "vision_coverage_diff",  # ДОЛЯ КАРТЫ под обзором R−D (волна 1, спринт 90)
     "sen_wards_diff",     # поставлено сентри R−D (F5)
     "runes_diff",         # подобрано рун R−D (F5)
     "neutral_tier_diff",  # сумма тиров нейтралок R−D (F6)
@@ -56,6 +57,7 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  # Трек F: все разностные и знаковые фичи меняют знак.
                  "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
                  "item_value_diff", "key_items_diff", "obs_wards_diff",
+                 "vision_coverage_diff",
                  "sen_wards_diff", "runes_diff", "neutral_tier_diff",
                  "levels_diff"}
 

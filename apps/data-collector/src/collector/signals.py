@@ -257,6 +257,119 @@ def vision_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     }
 
 
+# -- Площадь под обзором (волна 1 каталога, спринт 90) ------------------------
+
+# Координаты вардов OpenDota — клетки карты; игровая часть укладывается
+# примерно в квадрат 64..192 по обеим осям.
+MAP_MIN, MAP_MAX = 64, 192
+# Радиус обзора обс-варда: 1600 игровых юнитов при ~130 юнитах на клетку.
+WARD_VISION_CELLS = 12.5
+# Сторона растровой сетки. 64 даёт клетку примерно в две карт-клетки:
+# мельче — квадратичный рост стоимости бэкфилла на тысячах матчей,
+# крупнее — варды в одном лесу перестают отличаться от разнесённых.
+VISION_GRID = 64
+
+
+def _disc_offsets(radius_cells: float = WARD_VISION_CELLS,
+                  grid: int = VISION_GRID) -> list[tuple[int, int]]:
+    """Смещения клеток растра, накрытых одним вардом. Считается один раз:
+    диск одинаков для всех вардов, а матчей десятки тысяч."""
+    r = radius_cells * grid / (MAP_MAX - MAP_MIN)
+    ri = int(math.ceil(r))
+    return [(dx, dy)
+            for dx in range(-ri, ri + 1)
+            for dy in range(-ri, ri + 1)
+            if dx * dx + dy * dy <= r * r]
+
+
+_DISC = _disc_offsets()
+
+
+def _covered(wards: tuple, grid: int = VISION_GRID) -> int:
+    """Число клеток растра, накрытых ХОТЯ БЫ одним вардом.
+
+    Именно объединение, а не сумма площадей: перекрытие радиусов — это и
+    есть разница между «три варда по карте» и «три варда в одном лесу»,
+    ради которой фича заводится. Сумма площадей их не различила бы, как
+    не различает и счётчик obs_wards_diff.
+    """
+    cells: set[tuple[int, int]] = set()
+    span = MAP_MAX - MAP_MIN
+    for x, y in wards:
+        gx = int((x - MAP_MIN) / span * grid)
+        gy = int((y - MAP_MIN) / span * grid)
+        for dx, dy in _DISC:
+            cx, cy = gx + dx, gy + dy
+            if 0 <= cx < grid and 0 <= cy < grid:
+                cells.add((cx, cy))
+    return len(cells)
+
+
+def _ward_positions(m: dict) -> list[tuple[int, int, int, float, float]]:
+    """Обс-варды матча: (поставлен, снят, знак стороны, x, y).
+
+    Сентри не берём: они дают истинное зрение, а не обзор, и складывать
+    их с обсами значило бы смешать две разные величины.
+
+    Время снятия берётся из obs_left_log по порядку постановки — та же
+    логика, что в vision_features; при отсутствии записи вард живёт свои
+    360 секунд.
+    """
+    out = []
+    for p in m.get("players") or []:
+        s = _sign(team_of(p.get("player_slot", 0)))
+        placed = sorted((w for w in (p.get("obs_log") or []) if "time" in w),
+                        key=lambda w: w["time"])
+        left = sorted(int(w["time"]) for w in (p.get("obs_left_log") or [])
+                      if "time" in w)
+        for i, w in enumerate(placed):
+            x, y = w.get("x"), w.get("y")
+            if x is None or y is None:
+                continue
+            try:
+                x, y = float(x), float(y)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(x) or math.isnan(y):
+                continue
+            t0 = int(w["time"])
+            t1 = left[i] if i < len(left) else t0 + 360
+            out.append((t0, max(t1, t0), s, x, y))
+    return out
+
+
+def vision_coverage(m: dict, minutes: list[int]) -> dict[str, list[float]]:
+    """Доля карты под обзором Radiant минус то же для Dire, в [-1, 1].
+
+    Пустой словарь (колонка останется NaN) возвращается, только если у
+    матча НЕТ НИ ОДНОГО варда с координатами: у матчей STRATZ их нет
+    вовсе, и ноль означал бы «видят одинаково» — ложный сигнал. Если
+    варды есть хотя бы у одной стороны, ноль у второй честен.
+    """
+    wards = _ward_positions(m)
+    if not wards:
+        return {}
+    total = float(VISION_GRID * VISION_GRID)
+    # Набор активных вардов меняется куда реже, чем идут минуты, поэтому
+    # площадь считается один раз на набор. Без этого бэкфилл тысяч
+    # матчей упирался бы в перебор одних и тех же дисков.
+    memo: dict[tuple, int] = {}
+
+    def frac(active: tuple) -> float:
+        if active not in memo:
+            memo[active] = _covered(active)
+        return memo[active] / total
+
+    out = []
+    for t in minutes:
+        r = tuple(sorted((x, y) for t0, t1, s, x, y in wards
+                         if s > 0 and t0 <= t <= t1))
+        d = tuple(sorted((x, y) for t0, t1, s, x, y in wards
+                         if s < 0 and t0 <= t <= t1))
+        out.append(frac(r) - frac(d))
+    return {"vision_coverage_diff": out}
+
+
 def item_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     """F4: стоимость закупа и число взятых ключевых предметов (diff)."""
     cost_events: list[tuple[int, float]] = []
@@ -330,8 +443,8 @@ def neutral_level_features(m: dict, minutes: list[int]
 def all_minute_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     """Все поминутные фичи трека F одним вызовом."""
     out: dict[str, list[float]] = {}
-    for fn in (objective_features, vision_features, item_features,
-               neutral_level_features):
+    for fn in (objective_features, vision_features, vision_coverage,
+               item_features, neutral_level_features):
         try:
             out.update(fn(m, minutes))
         except Exception:  # noqa: BLE001 — сбой одной группы не рушит остальные

@@ -120,7 +120,8 @@ class Backfiller:
 
     # -- один матч ------------------------------------------------------------
 
-    def process(self, match_id: int, only_missing: bool = False) -> bool:
+    def process(self, match_id: int, only_missing: bool = False,
+                probe_column: str = PROBE_COLUMN) -> bool:
         self.stats["матчей"] += 1
         rows = self._rows_of(match_id)
         if not rows:
@@ -129,7 +130,7 @@ class Backfiller:
             self.stats["нет в витрине"] += 1
             return False
         if only_missing:
-            probe = MTF_COLUMNS.index(PROBE_COLUMN)
+            probe = MTF_COLUMNS.index(probe_column)
             if all(r[probe].lower() not in ("nan", "-nan", "") for r in rows):
                 self.stats["уже заполнены"] += 1
                 return False
@@ -182,13 +183,15 @@ class Backfiller:
         return True
 
     def run(self, match_ids, only_missing: bool = False,
-            limit: int | None = None) -> None:
+            limit: int | None = None,
+            probe_column: str = PROBE_COLUMN) -> None:
         t0 = time.monotonic()
         for i, mid in enumerate(match_ids, 1):
             if limit and i > limit:
                 break
             try:
-                self.process(mid, only_missing=only_missing)
+                self.process(mid, only_missing=only_missing,
+                             probe_column=probe_column)
             except Exception:  # noqa: BLE001 — один матч не рушит прогон
                 self.stats["ошибок"] += 1
                 logger.warning("матч %d: пропущен", mid, exc_info=True)
@@ -209,7 +212,13 @@ def main() -> None:
     p.add_argument("--limit", type=int, help="обработать не больше N матчей")
     p.add_argument("--match-id", type=int, help="только этот матч")
     p.add_argument("--only-missing", action="store_true",
-                   help=f"пропускать матчи, где {PROBE_COLUMN} уже заполнен")
+                   help="пропускать матчи, где колонка --probe уже заполнена")
+    # Новая фича добавляет НОВУЮ колонку, и «уже заполнено» надо мерить
+    # по ней, а не по roshan_diff: иначе --only-missing пропустит ровно
+    # те матчи, ради которых бэкфилл и запускается.
+    p.add_argument("--probe", default=PROBE_COLUMN,
+                   choices=[c for c in MTF_COLUMNS],
+                   help="колонка-индикатор для --only-missing")
     p.add_argument("--dry-run", action="store_true",
                    help="считать, но ничего не писать")
     args = p.parse_args()
@@ -222,7 +231,8 @@ def main() -> None:
 
     bf = Backfiller(TimelineConfig(), store, dry_run=args.dry_run)
     ids = [args.match_id] if args.match_id else store.iter_match_ids()
-    bf.run(ids, only_missing=args.only_missing, limit=args.limit)
+    bf.run(ids, only_missing=args.only_missing, limit=args.limit,
+           probe_column=args.probe)
 
 
 if __name__ == "__main__":

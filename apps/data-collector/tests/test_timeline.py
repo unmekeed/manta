@@ -155,8 +155,12 @@ def test_runner_inserts_and_marks(monkeypatch):
     assert len(lines) == 3
     first = lines[0].split("\t")
     assert first[0] == "42" and first[1] == "60"
-    # position_advance + alive_diff + networth_total (фикстура без gold_t)
-    assert lines[0].count("nan") == 3
+    # Ровно четыре пропуска, и каждый осмыслен: position_advance и
+    # alive_diff существуют только в реплее; networth_total — фикстура без
+    # gold_t; vision_coverage_diff — в фикстуре нет вардов с координатами.
+    # Проверка на ТОЧНОЕ число намеренна: лишний nan означает потерянную
+    # фичу, недостающий — ноль вместо пропуска, то есть ложный сигнал.
+    assert lines[0].count("nan") == 4
     assert "opendota-json@3" in lines[0]
     # PG: INSERT в CollectedMatches и CollectorCursor
     kinds = [k for k, _ in pg_store["sql"]]

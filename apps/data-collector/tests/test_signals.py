@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from collector.signals import (KEY_ITEMS, RADIANT, DIRE, all_minute_features,
                                draft_row, event_rows, item_features,
                                neutral_level_features, objective_features,
-                               team_of, vision_features)
+                               team_of, vision_coverage,
+                               vision_features)
 
 MINUTES = [60, 120, 180, 240, 300, 360, 420, 480]
 
@@ -173,3 +174,100 @@ def test_broken_match_does_not_crash():
     """Битый JSON не должен ронять сбор — группа фич просто пропускается."""
     f = all_minute_features({"match_id": 1, "players": "не список"}, MINUTES)
     assert isinstance(f, dict)
+
+
+# -- Площадь под обзором (волна 1, спринт 90) ---------------------------------
+
+def _ward_match(radiant_wards, dire_wards, mid=555):
+    """Матч с заданными обс-вардами: списки (time, x, y)."""
+    def player(slot, wards):
+        return {"player_slot": slot, "hero_id": 1,
+                "obs_log": [{"time": t, "x": x, "y": y}
+                            for t, x, y in wards],
+                "obs_left_log": [], "sen_log": [], "runes_log": [],
+                "purchase_log": []}
+    return {"match_id": mid, "radiant_win": True,
+            "players": [player(0, radiant_wards), player(128, dire_wards)]}
+
+
+def test_spread_wards_beat_clustered_at_equal_count():
+    """Ради чего фича заводится: счётчик obs_wards_diff не различает
+    три варда в одном лесу и три варда по карте, площадь — различает."""
+    spread = _ward_match([(60, 80, 80), (60, 128, 128), (60, 170, 170)], [])
+    clustered = _ward_match([(60, 80, 80), (60, 82, 81), (60, 81, 83)], [])
+    a = vision_coverage(spread, [60])["vision_coverage_diff"][0]
+    b = vision_coverage(clustered, [60])["vision_coverage_diff"][0]
+    assert a > b, "разнесённые варды обязаны давать больше площади"
+
+
+def test_overlap_is_union_not_sum():
+    """Два варда в одной точке накрывают ровно столько же, сколько один."""
+    one = _ward_match([(60, 128, 128)], [])
+    two = _ward_match([(60, 128, 128), (60, 128, 128)], [])
+    assert (vision_coverage(one, [60])["vision_coverage_diff"][0]
+            == vision_coverage(two, [60])["vision_coverage_diff"][0])
+
+
+def test_symmetric_wards_give_zero():
+    """Одинаковое покрытие сторон — ноль, как у любой diff-фичи."""
+    m = _ward_match([(60, 100, 100)], [(60, 150, 150)])
+    assert vision_coverage(m, [60])["vision_coverage_diff"][0] == 0.0
+
+
+def test_sign_follows_radiant():
+    """Знак согласован с networth_diff: плюс — в пользу Radiant."""
+    m = _ward_match([(60, 100, 100)], [])
+    assert vision_coverage(m, [60])["vision_coverage_diff"][0] > 0
+    m = _ward_match([], [(60, 100, 100)])
+    assert vision_coverage(m, [60])["vision_coverage_diff"][0] < 0
+
+
+def test_ward_expires_after_lifetime():
+    """Вард живёт 360 секунд: на 8-й минуте его уже нет."""
+    m = _ward_match([(60, 100, 100)], [])
+    got = vision_coverage(m, [120, 480])["vision_coverage_diff"]
+    assert got[0] > 0 and got[1] == 0.0
+
+
+def test_ward_removed_early_stops_counting():
+    """Снятый вард перестаёт давать обзор с момента снятия, а не через
+    свои 6 минут — иначе сентри-война не отражалась бы в фиче вовсе."""
+    m = _ward_match([(60, 100, 100)], [])
+    m["players"][0]["obs_left_log"] = [{"time": 130}]
+    got = vision_coverage(m, [120, 180])["vision_coverage_diff"]
+    assert got[0] > 0 and got[1] == 0.0
+
+
+def test_no_ward_coordinates_leaves_nan():
+    """У матчей STRATZ координат нет вовсе. Ноль означал бы «видят
+    одинаково» — ложный сигнал; колонка обязана остаться пустой."""
+    m = _ward_match([], [])
+    assert vision_coverage(m, [60, 120]) == {}
+    m2 = _ward_match([(60, None, None)], [])
+    assert vision_coverage(m2, [60]) == {}
+
+
+def test_one_sided_wards_are_not_nan():
+    """Обратная сторона: если варды есть хоть у кого-то, ноль у второй
+    стороны честен и колонку прятать нельзя."""
+    m = _ward_match([(60, 100, 100)], [])
+    assert "vision_coverage_diff" in vision_coverage(m, [60])
+
+
+def test_value_stays_in_unit_range():
+    m = _ward_match([(60, 70 + 5 * i, 70 + 5 * i) for i in range(20)], [])
+    v = vision_coverage(m, [60])["vision_coverage_diff"][0]
+    assert 0.0 < v <= 1.0
+
+
+def test_included_in_all_minute_features():
+    m = _ward_match([(60, 100, 100)], [(60, 150, 150)])
+    assert "vision_coverage_diff" in all_minute_features(m, [60, 120])
+
+
+def test_length_matches_minutes():
+    """Бэкфилл пропускает колонку при несовпадении длины — ряд обязан
+    быть ровно по сетке минут."""
+    m = _ward_match([(60, 100, 100)], [])
+    minutes = [60, 120, 180, 240]
+    assert len(vision_coverage(m, minutes)["vision_coverage_diff"]) == 4

@@ -43,11 +43,14 @@ MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
                # трек F: объективы, предметы, вижн, нейтралки
                "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
                "item_value_diff", "key_items_diff", "obs_wards_diff",
+               "vision_coverage_diff",
                "sen_wards_diff", "runes_diff", "neutral_tier_diff",
                "levels_diff"]
 
-# Фичи трека F, которых может не быть (битый JSON) — пишем nan.
-F_TRACK_COLUMNS = MTF_COLUMNS[-11:]
+# Фичи трека F и волны 1, которых может не быть (битый JSON) — пишем nan.
+# Срез считается от конца: добавляя колонку в хвост MTF_COLUMNS, поправить
+# и это число, иначе новая фича не попадёт в заполнение nan-ами.
+F_TRACK_COLUMNS = MTF_COLUMNS[-12:]
 
 DRAFT_COLUMNS = ["match_id", "patch", "tier", "radiant_win", "radiant_heroes",
                  "dire_heroes", "bans", "first_pick_team", "source"]

@@ -121,7 +121,8 @@ FROM manta.MatchTimelineFeatures GROUP BY feature_version ORDER BY rows DESC"
 | фича | смысл |
 |---|---|
 | `first_blood` | какая сторона взяла первую кровь |
-| `obs_wards_diff` | активные обзорные варды — контроль информации |
+| `obs_wards_diff` | активные обзорные варды — контроль информации, **штуками** |
+| `vision_coverage_diff` | **доля карты** под обзором, от −1 до +1. Отличается от счётчика тем, что видит перекрытие: три варда в одном лесу дают меньше площади, чем три разнесённых |
 | `sen_wards_diff` | поставленные сентри |
 | `runes_diff` | подобранные руны |
 | `draft_prior` | `P(win)` по одним лишь составам, из отдельной Draft Prior Model. Единственная фича-вероятность, а не разность |
@@ -447,6 +448,7 @@ make collect-report ARGS=features   # только покрытие фич и о
 # пересчитать фичи по сохранённому JSON — ноль вызовов OpenDota
 make backfill ARGS="--limit 50 --dry-run"   # проба, ничего не пишет
 make backfill ARGS=--only-missing           # добить пустые колонки
+make backfill ARGS="--only-missing --probe vision_coverage_diff"  # новая фича
 make backfill                               # всё хранилище
 
 # дашборд
