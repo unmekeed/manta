@@ -11,7 +11,7 @@
 Что отдаёт STRATZ. Поля MatchType, на которых держится витрина:
 radiantNetworthLeads / radiantExperienceLeads (поминутные ряды),
 radiantKills / direKills, didRadiantWin, durationSeconds, gameMode,
-lobbyType, gameVersionId. Этого хватает на ядро MatchTimelineFeatures.
+lobbyType, startDateTime. Этого хватает на ядро MatchTimelineFeatures.
 
 Чего STRATZ не даёт (пишется NaN, как и у JSON-источника OpenDota):
 position_advance и alive_diff — они существуют только в реплее; фичи
@@ -19,20 +19,33 @@ position_advance и alive_diff — они существуют только в �
 из JSON OpenDota, у STRATZ структура иная. NaN здесь честнее нуля:
 LightGBM обрабатывает пропуск нативно, а 0 был бы ложным сигналом.
 
-Патчи. gameVersionId у STRATZ — СВОЙ идентификатор, он не совпадает с
-patch id OpenDota, а колонка patch витрины используется для даунвейта
-старых патчей (A9). Поэтому id переводится по ИМЕНИ версии ("7.39"):
-constants.gameVersions у STRATZ против constants/patch у OpenDota. Если
-перевод не удался — patch=0 («неизвестен»), а не чужой id: испортить
-взвешивание молча хуже, чем потерять признак.
+Патчи. Колонка patch витрины нужна для даунвейта старых патчей (A9), и
+заполняется она по ДАТЕ НАЧАЛА матча против constants/patch OpenDota —
+ровно так, как это делает сам OpenDota для своих матчей. Версия STRATZ
+(gameVersionId / constants.gameVersions) для этого НЕ годится, и это не
+вопрос вкуса:
+
+    список версий STRATZ на 2026-08-03 заканчивается на 7.40b, хотя
+    игра уже четыре месяца на 7.41.
+
+Матчам на неизвестной ему версии STRATZ проставляет последнюю известную,
+то есть «новейшая версия» у него — корзина «7.40b и всё, что новее».
+Перевод по имени давал таким матчам patch=59 (7.40) при актуальном 60, а
+`patch_weights` умножает вес такой строки на 0.4 — систематический
+даунвейт трети датасета за несуществующее устаревание. Ошибиться в
+сторону 0 («неизвестен», без штрафа) не страшно; ошибиться в сторону
+чужого номера — тихая порча взвешивания.
+
+Дата от такой рассинхронизации защищена: она не зависит от того, успел
+ли поставщик завести версию в справочник.
 """
 from __future__ import annotations
 
 import logging
 import math
 import os
-import re
 import time
+from datetime import datetime
 from typing import Iterable
 
 import requests
@@ -70,29 +83,46 @@ GAME_MODE_NAMES = {
 }
 
 
-# Пересборка карты патчей после неудачи — не чаще раза в 10 минут.
+# Перечитывание справочника патчей после неудачи — не чаще раза в 10 минут.
 PATCH_MAP_RETRY_S = float(os.getenv("PATCH_MAP_RETRY_S", "600"))
 
-_VERSION_RE = re.compile(r"\s*(\d+)\.(\d+)")
 
+def patch_at(started_at: int, patches: list[tuple[int, int]]) -> int:
+    """id патча OpenDota, действовавшего в момент started_at (epoch).
 
-def norm_version(name) -> str:
-    """Имя версии игры к общему виду: '7.41b' и ' 7.41 ' → '7.41'.
-
-    Стороны нумеруют патчи с разной подробностью: OpenDota ведёт только
-    крупные геймплейные патчи ("7.41"), STRATZ — ещё и хотфиксы
-    ("7.41b"). Сопоставление ПО ТОЧНОМУ имени поэтому промахивалось
-    ровно на актуальной версии: пока патч свежий и живёт с буквой, ни
-    один матч не получал patch, а к моменту, когда имена совпадут, все
-    матчи этого патча уже собраны с patch=0.
-
-    Инцидент 2026-08-03: 1625 матчей STRATZ (43% датасета) с patch=0 при
-    patch=60 у матчей OpenDota. Взвешивание A9 не штрафует нули, так что
-    обучение не испортилось — но и защиты от старого патча у половины
-    датасета не было.
+    patches — пары (дата начала патча, id), по возрастанию даты. Матч
+    относится к последнему патчу, вышедшему НЕ ПОЗЖЕ его начала. Ноль
+    означает «неизвестен»: матч старше первого известного патча либо
+    справочник не прочитан.
     """
-    m = _VERSION_RE.match(str(name))
-    return f"{m.group(1)}.{m.group(2)}" if m else str(name).strip()
+    if not started_at or not patches:
+        return 0
+    out = 0
+    for ts, pid in patches:
+        if started_at >= ts:
+            out = pid
+        else:
+            break
+    return out
+
+
+def parse_patch_dates(od_patches: list) -> list[tuple[int, int]]:
+    """constants/patch OpenDota → [(epoch, id)] по возрастанию даты."""
+    out = []
+    for p in od_patches or []:
+        raw, pid = p.get("date"), p.get("id")
+        if not raw or pid is None:
+            continue
+        try:
+            # '2026-03-24T00:50:59.580Z' — fromisoformat принимает 'Z'
+            # только с 3.11, а машины кластера бывают старее.
+            ts = datetime.fromisoformat(
+                str(raw).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        out.append((int(ts), int(pid)))
+    out.sort()
+    return out
 
 
 def enum_id(value, names: dict[str, int]) -> int:
@@ -125,7 +155,7 @@ MATCH_FIELDS = """
     durationSeconds
     gameMode
     lobbyType
-    gameVersionId
+    startDateTime
     radiantNetworthLeads
     radiantExperienceLeads
     radiantKills
@@ -133,7 +163,6 @@ MATCH_FIELDS = """
 """
 
 MATCH_QUERY = "query($id: Long!) { match(id: $id) { %s } }" % MATCH_FIELDS
-VERSIONS_QUERY = "{ constants { gameVersions { id name } } }"
 
 
 class StratzError(RuntimeError):
@@ -221,12 +250,18 @@ def timeline_rows(m: dict, kills_cumulative: bool = False) -> list[dict]:
 
 
 def match_passes(m: dict, min_duration_s: int, min_patch: int | None,
-                 pro: bool = False) -> tuple[bool, str]:
+                 pro: bool = False, patch: int = 0) -> tuple[bool, str]:
     """Фильтр качества — та же популяция, что у JSON-источника OpenDota.
 
     Ранг не проверяется: у STRATZ он лежит в другом поле и не всегда
     заполнен, а кандидатов мы берём из /parsedMatches (public) уже после
     рангового фильтра либо из /proMatches (pro), где ранг не применим.
+
+    patch — УЖЕ переведённый id OpenDota (см. patch_at). Раньше здесь
+    стоял сырой gameVersionId STRATZ, то есть номер из чужой нумерации
+    сравнивался с порогом в нумерации OpenDota; фильтр молча отсекал бы
+    не то, что задумано. Сейчас порог не задан ни на одной машине, но
+    сравнение приведено к одной шкале, пока это не выстрелило.
     """
     if not pro:
         if enum_id(m.get("lobbyType"), LOBBY_NAMES) not in RANKED_LOBBIES:
@@ -235,7 +270,7 @@ def match_passes(m: dict, min_duration_s: int, min_patch: int | None,
             return False, "mode"
     if int(m.get("durationSeconds") or 0) < min_duration_s:
         return False, "short"
-    if min_patch is not None and int(m.get("gameVersionId") or 0) < min_patch:
+    if min_patch is not None and patch < min_patch:
         return False, "old-patch"
     if not (m.get("radiantNetworthLeads") and m.get("radiantExperienceLeads")):
         return False, "no-timeline"
@@ -305,8 +340,8 @@ class StratzTimelineSource:
         # считает только УСПЕХИ, а вызов тратится и на промах: когда
         # промахов много, цикл мог перебрать все 1000 кандидатов.
         self._detail_budget = detail_budget or 4 * limit_per_cycle
-        # gameVersionId STRATZ -> patch id OpenDota; строится лениво.
-        self._patch_map: dict[int, int] | None = None
+        # Справочник патчей OpenDota [(дата, id)]; читается лениво.
+        self._patches: list[tuple[int, int]] = []
         self._patch_map_at = -PATCH_MAP_RETRY_S
 
     # -- транспорт ------------------------------------------------------------
@@ -336,59 +371,43 @@ class StratzTimelineSource:
 
     # -- патчи ----------------------------------------------------------------
 
-    def _build_patch_map(self) -> dict[int, int]:
-        """gameVersionId STRATZ → patch id OpenDota по совпадению имени.
+    def _load_patch_dates(self) -> list[tuple[int, int]]:
+        """Справочник патчей OpenDota как [(дата начала, id)].
 
-        Обе стороны называют версии похоже, но НЕ одинаково, и числовые id
-        у них независимы. Сбой любой из сторон не должен ронять сбор:
-        пустая карта означает patch=0, витрина при этом наполняется.
+        Один вызов дешёвого constants-эндпоинта. Сбой не должен ронять
+        сбор: пустой справочник означает patch=0, витрина при этом
+        наполняется.
         """
         try:
-            versions = (self._gql(VERSIONS_QUERY).get("constants") or {}
-                        ).get("gameVersions") or []
-            od = self._opendota("constants/patch")
+            dates = parse_patch_dates(self._opendota("constants/patch"))
         except Exception:  # noqa: BLE001
-            logger.warning("карта патчей не построена — patch=0 у матчей",
+            logger.warning("справочник патчей не прочитан — patch=0 у матчей",
                            exc_info=True)
-            return {}
-        by_name = {norm_version(p["name"]): int(p["id"]) for p in od
-                   if p.get("name") and p.get("id") is not None}
-        out, missed = {}, []
-        for v in versions:
-            od_id = by_name.get(norm_version(v.get("name", "")))
-            if od_id is not None and v.get("id") is not None:
-                out[int(v["id"])] = od_id
-            elif v.get("name"):
-                missed.append(str(v["name"]))
-        if out:
-            logger.info("карта патчей STRATZ→OpenDota: %d версий "
-                        "(не сопоставлено: %d)", len(out), len(missed))
+            return []
+        if dates:
+            logger.info("справочник патчей OpenDota: %d записей, последний "
+                        "id=%d", len(dates), dates[-1][1])
         else:
-            # Пустая карта — это ТИХАЯ потеря колонки patch у всех матчей
+            # Пустой справочник — ТИХАЯ потеря колонки patch у всех матчей
             # источника, а с ней и даунвейта старых патчей (A9). Молчать
-            # тут нельзя: в витрине это выглядит как обычный ноль.
-            logger.warning(
-                "карта патчей ПУСТА — patch=0 у всех матчей STRATZ; имена "
-                "версий STRATZ: %s; имена OpenDota: %s",
-                sorted(missed)[-5:], sorted(by_name)[-5:])
-        return out
+            # нельзя: в витрине это выглядит как обычный ноль.
+            logger.warning("справочник патчей ПУСТ — patch=0 у всех матчей "
+                           "STRATZ")
+        return dates
 
     def _patch_of(self, m: dict) -> int:
-        if not self._patch_map:
-            # ПОВТОРЯЕМ построение, а не кэшируем неудачу навсегда.
-            # Прежняя версия писала {} в кэш при первом же сбое (STRATZ
-            # ответил 429 на старте, OpenDota моргнул) — и процесс жил
-            # неделями, проставляя patch=0 каждому матчу. Чтобы повтор не
-            # превратился в два лишних вызова на КАЖДЫЙ матч, он не чаще
-            # PATCH_MAP_RETRY_S.
+        if not self._patches:
+            # ПОВТОРЯЕМ чтение, а не кэшируем неудачу навсегда: прежняя
+            # версия писала пустой результат в кэш при первом же сбое
+            # (OpenDota моргнул) и процесс жил неделями, проставляя
+            # patch=0 каждому матчу. Чтобы повтор не превратился в лишний
+            # вызов на КАЖДЫЙ матч, он не чаще PATCH_MAP_RETRY_S.
             now = time.monotonic()
             if now - self._patch_map_at >= PATCH_MAP_RETRY_S:
                 self._patch_map_at = now
-                self._patch_map = self._build_patch_map()
-        gv = m.get("gameVersionId")
-        if gv is None:
-            return 0
-        return (self._patch_map or {}).get(int(gv), 0)
+                self._patches = self._load_patch_dates()
+        started = m.get("startDateTime")
+        return patch_at(int(started or 0), self._patches)
 
     # -- цикл -----------------------------------------------------------------
 
@@ -534,9 +553,12 @@ class StratzTimelineSource:
             # вместо числа), и один неожиданный тип обнулял весь проход,
             # а с ним и половину суточного притока.
             try:
+                # Патч считается ДО фильтра: min_patch сравнивается с ним,
+                # а не с чужой нумерацией версий STRATZ.
+                patch = self._patch_of(m)
                 ok, why = match_passes(m, self._min_duration_s,
                                        self._min_patch,
-                                       pro=(self._mode == "pro"))
+                                       pro=(self._mode == "pro"), patch=patch)
                 if not ok:
                     if why == "no-timeline":
                         # Матч у STRATZ есть, а поминутных рядов ещё нет —
@@ -548,7 +570,6 @@ class StratzTimelineSource:
                     stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
                     self._rejected.add(mid)
                     continue
-                patch = self._patch_of(m)
                 rows = timeline_rows(m, self._kills_cumulative)
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning("матч %d: не разобрать ответ STRATZ (%s) — "

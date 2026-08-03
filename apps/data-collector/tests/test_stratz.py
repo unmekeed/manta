@@ -17,8 +17,8 @@ from collector.sources import Shard  # noqa: E402
 from collector.sources.stratz import (GAME_MODE_NAMES,  # noqa: E402
                                       LOBBY_NAMES, StratzError,
                                       StratzTimelineSource, cumulative,
-                                      enum_id, match_passes, norm_version,
-                                      timeline_rows)
+                                      enum_id, match_passes, parse_patch_dates,
+                                      patch_at, timeline_rows)
 
 
 def _match(mid=7000000000, minutes=4, win=True):
@@ -28,7 +28,7 @@ def _match(mid=7000000000, minutes=4, win=True):
         "durationSeconds": 1800,
         "gameMode": 1,
         "lobbyType": 7,
-        "gameVersionId": 180,
+        "startDateTime": 1785000000,
         "radiantNetworthLeads": [0, 100, 250, 400][:minutes],
         "radiantExperienceLeads": [0, 80, 200, 350][:minutes],
         "radiantKills": [0, 1, 2, 0][:minutes],
@@ -105,7 +105,7 @@ def test_short_timeline_yields_nothing():
 # -- фильтр -------------------------------------------------------------------
 
 def test_match_passes_ok():
-    assert match_passes(_match(), 900, 180)[0]
+    assert match_passes(_match(), 900, 59, patch=60)[0]
 
 
 def test_match_rejected_by_turbo_and_short_and_patch():
@@ -113,8 +113,9 @@ def test_match_rejected_by_turbo_and_short_and_patch():
     assert match_passes(turbo, 900, None) == (False, "mode")
     short = _match(); short["durationSeconds"] = 300
     assert match_passes(short, 900, None) == (False, "short")
-    old = _match(); old["gameVersionId"] = 100
-    assert match_passes(old, 900, 180) == (False, "old-patch")
+    # min_patch и patch — оба в нумерации OpenDota. Раньше слева стоял
+    # gameVersionId STRATZ, то есть сравнивались номера из разных шкал.
+    assert match_passes(_match(), 900, 60, patch=59) == (False, "old-patch")
     empty = _match(); empty["radiantNetworthLeads"] = []
     assert match_passes(empty, 900, None) == (False, "no-timeline")
 
@@ -176,16 +177,17 @@ def test_pro_mode_skips_lobby_and_mode_checks():
 
 # -- источник -----------------------------------------------------------------
 
+PATCHES = [(1742770259, 59), (1774300000, 60)]   # 7.40 и 7.41
+
+
 def make_source(monkeypatch, matches, candidates, mode="public",
-                patch_map=None, gql_hook=None):
+                patches=None, gql_hook=None):
     src = StratzTimelineSource(token="t", limit_per_cycle=10, mode=mode,
                                api_delay_s=0, min_patch=None)
-    src._patch_map = {} if patch_map is None else patch_map
-    # Пустая карта патчей в бою означает «построить не удалось» и влечёт
-    # пересборку (спринт 87). Здесь пустота задана НАМЕРЕННО — «перевод
-    # не нужен», — поэтому часы пересборки взводятся: иначе каждый тест
-    # цикла получал бы лишний вызов _gql за версиями и считал бы его
-    # запросом матча.
+    src._patches = PATCHES if patches is None else patches
+    # Пустой справочник в бою означает «прочитать не удалось» и влечёт
+    # повторное чтение. Здесь он задан явно, но часы всё равно взводим:
+    # иначе тест с пустым справочником получил бы лишний вызов OpenDota.
     src._patch_map_at = time.monotonic()
 
     def fake_gql(query, variables=None):
@@ -281,44 +283,6 @@ def test_rate_limit_propagates(monkeypatch):
     monkeypatch.setattr(src, "_gql", limited)
     with pytest.raises(requests.HTTPError):
         list(src.fetch_new())
-
-
-# -- патчи --------------------------------------------------------------------
-
-def test_patch_map_translates_by_version_name(monkeypatch):
-    """gameVersionId STRATZ != patch id OpenDota; связывает их имя версии."""
-    src = StratzTimelineSource(token="t", api_delay_s=0)
-    monkeypatch.setattr(src, "_gql", lambda q, v=None: {
-        "constants": {"gameVersions": [{"id": 180, "name": "7.39"},
-                                       {"id": 179, "name": "7.38"}]}})
-    monkeypatch.setattr(src, "_opendota", lambda path, **kw: [
-        {"id": 57, "name": "7.39"}, {"id": 56, "name": "7.38"}])
-    assert src._patch_of({"gameVersionId": 180}) == 57
-    assert src._patch_of({"gameVersionId": 179}) == 56
-
-
-def test_unknown_patch_is_zero_not_foreign_id(monkeypatch):
-    """Неизвестная версия → 0 («неизвестен»). Записать сюда id STRATZ
-    значило бы молча испортить даунвейт старых патчей при обучении."""
-    src = StratzTimelineSource(token="t", api_delay_s=0)
-    monkeypatch.setattr(src, "_gql", lambda q, v=None: {
-        "constants": {"gameVersions": [{"id": 180, "name": "7.39"}]}})
-    monkeypatch.setattr(src, "_opendota",
-                        lambda path, **kw: [{"id": 57, "name": "7.39"}])
-    assert src._patch_of({"gameVersionId": 999}) == 0
-
-
-def test_patch_map_failure_does_not_break_collection(monkeypatch):
-    """Недоступные constants не должны останавливать сбор — витрина
-    наполняется, patch честно остаётся нулём."""
-    src = StratzTimelineSource(token="t", api_delay_s=0)
-
-    def boom(*a, **kw):
-        raise requests.ConnectionError("нет сети")
-
-    monkeypatch.setattr(src, "_gql", boom)
-    monkeypatch.setattr(src, "_opendota", boom)
-    assert src._patch_of({"gameVersionId": 180}) == 0
 
 
 def test_runner_writes_stratz_rows_and_own_feature_version(monkeypatch):
@@ -503,55 +467,79 @@ def test_default_detail_budget_leaves_room_for_misses(monkeypatch):
     assert src._detail_budget > 25
 
 
-# -- нормализация имени версии (спринт 87) ------------------------------------
+# -- патч по дате матча (спринт 89) -------------------------------------------
 
-@pytest.mark.parametrize("raw,want", [
-    ("7.41", "7.41"), ("7.41b", "7.41"), (" 7.41 ", "7.41"),
-    ("7.39c", "7.39"), ("7.40", "7.40"),
-])
-def test_norm_version_strips_hotfix_letter(raw, want):
-    assert norm_version(raw) == want
+OD_PATCHES = [
+    {"id": 58, "name": "7.39", "date": "2025-05-22T23:36:01.602Z"},
+    {"id": 59, "name": "7.40", "date": "2025-12-16T00:50:40.281Z"},
+    {"id": 60, "name": "7.41", "date": "2026-03-24T00:50:59.580Z"},
+]
 
 
-def test_patch_map_matches_hotfix_names(monkeypatch):
-    """OpenDota ведёт только крупные патчи ("7.41"), STRATZ — ещё и
-    хотфиксы ("7.41b"). Сопоставление по ТОЧНОМУ имени промахивалось
-    ровно на актуальной версии, и все свежие матчи получали patch=0
-    (инцидент 2026-08-03: 1625 матчей, 43% датасета)."""
+def test_parse_patch_dates_sorted_epochs():
+    got = parse_patch_dates(OD_PATCHES)
+    assert [pid for _ts, pid in got] == [58, 59, 60]
+    assert got[0][0] < got[1][0] < got[2][0]
+
+
+def test_parse_patch_dates_skips_broken_entries():
+    """Битая запись не должна ронять весь справочник: без даты патч
+    просто не участвует в сопоставлении."""
+    got = parse_patch_dates(OD_PATCHES + [{"id": 61, "name": "7.42"},
+                                          {"id": None, "date": "2026-01-01Z"},
+                                          {"id": 62, "date": "не дата"}])
+    assert [pid for _ts, pid in got] == [58, 59, 60]
+
+
+def test_patch_at_picks_last_released_before_match():
+    p = parse_patch_dates(OD_PATCHES)
+    import datetime as dt
+    after_741 = int(dt.datetime(2026, 8, 3, tzinfo=dt.timezone.utc).timestamp())
+    between = int(dt.datetime(2026, 1, 5, tzinfo=dt.timezone.utc).timestamp())
+    before_all = int(dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+    assert patch_at(after_741, p) == 60
+    assert patch_at(between, p) == 59
+    assert patch_at(before_all, p) == 0
+
+
+def test_patch_at_unknown_is_zero_not_guess():
+    """Ноль — «неизвестен», и patch_weights его НЕ штрафует. Любое
+    угаданное число здесь означало бы тихий даунвейт (см. ниже)."""
+    assert patch_at(0, parse_patch_dates(OD_PATCHES)) == 0
+    assert patch_at(1785000000, []) == 0
+
+
+def test_match_on_patch_unknown_to_stratz_gets_current(monkeypatch):
+    """Регресс 2026-08-03, ради которого всё переписано.
+
+    Справочник версий STRATZ заканчивался на 7.40b, хотя игра четыре
+    месяца как на 7.41; матчам на 7.41 STRATZ проставлял последнюю
+    известную ему версию. Перевод ПО ИМЕНИ давал таким матчам patch=59
+    при актуальном 60 — и patch_weights умножал их вес на 0.4, то есть
+    треть датасета получала штраф за несуществующее устаревание. Ноль
+    («неизвестен») был бы безобиднее, а верная дата — правильнее всего.
+    """
     src = StratzTimelineSource(token="t", api_delay_s=0)
-    monkeypatch.setattr(src, "_gql", lambda q, v=None: {
-        "constants": {"gameVersions": [{"id": 182, "name": "7.41b"},
-                                       {"id": 181, "name": "7.41"}]}})
-    monkeypatch.setattr(src, "_opendota",
-                        lambda path, **kw: [{"id": 60, "name": "7.41"}])
-    assert src._patch_of({"gameVersionId": 182}) == 60
-    assert src._patch_of({"gameVersionId": 181}) == 60
+    monkeypatch.setattr(src, "_opendota", lambda path, **kw: OD_PATCHES)
+    import datetime as dt
+    started = int(dt.datetime(2026, 8, 3, tzinfo=dt.timezone.utc).timestamp())
+    assert src._patch_of({"startDateTime": started}) == 60
 
 
-def test_empty_patch_map_is_rebuilt_not_cached_forever(monkeypatch):
-    """Прежняя версия писала {} в кэш при первом же сбое и жила так
-    неделями, проставляя patch=0 каждому матчу. Пустая карта — повод
-    попробовать снова, а не приговор."""
+def test_patch_survives_unreadable_reference(monkeypatch):
+    """Недоступный constants не рушит сбор: витрина наполняется, patch
+    честно остаётся нулём."""
     src = StratzTimelineSource(token="t", api_delay_s=0)
-    calls = {"n": 0}
 
-    def gql(q, v=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise requests.ConnectionError("нет сети")
-        return {"constants": {"gameVersions": [{"id": 180, "name": "7.39"}]}}
+    def boom(*a, **kw):
+        raise requests.ConnectionError("нет сети")
 
-    monkeypatch.setattr(src, "_gql", gql)
-    monkeypatch.setattr(src, "_opendota",
-                        lambda path, **kw: [{"id": 57, "name": "7.39"}])
-    assert src._patch_of({"gameVersionId": 180}) == 0      # сбой
-    src._patch_map_at = -10**9                             # прошло время
-    assert src._patch_of({"gameVersionId": 180}) == 57     # починилось само
+    monkeypatch.setattr(src, "_opendota", boom)
+    assert src._patch_of({"startDateTime": 1785000000}) == 0
 
 
-def test_patch_map_rebuild_is_rate_limited(monkeypatch):
-    """Повтор не должен превращаться в два лишних вызова на КАЖДЫЙ матч —
-    это сожгло бы часовую квоту быстрее, чем сам сбор."""
+def test_patch_reference_reread_is_rate_limited(monkeypatch):
+    """Повтор чтения не должен стать вызовом на каждый матч."""
     src = StratzTimelineSource(token="t", api_delay_s=0)
     calls = {"n": 0}
 
@@ -559,8 +547,32 @@ def test_patch_map_rebuild_is_rate_limited(monkeypatch):
         calls["n"] += 1
         raise requests.ConnectionError("нет сети")
 
-    monkeypatch.setattr(src, "_gql", boom)
     monkeypatch.setattr(src, "_opendota", boom)
     for _ in range(50):
-        assert src._patch_of({"gameVersionId": 180}) == 0
-    assert calls["n"] <= 2
+        assert src._patch_of({"startDateTime": 1785000000}) == 0
+    assert calls["n"] == 1
+
+
+def test_patch_reference_recovers_after_failure(monkeypatch):
+    """Пустой справочник — повод перечитать, а не приговор на весь срок
+    жизни процесса."""
+    src = StratzTimelineSource(token="t", api_delay_s=0)
+    calls = {"n": 0}
+
+    def od(path, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.ConnectionError("нет сети")
+        return OD_PATCHES
+
+    monkeypatch.setattr(src, "_opendota", od)
+    assert src._patch_of({"startDateTime": 1785000000}) == 0
+    src._patch_map_at = -10**9
+    assert src._patch_of({"startDateTime": 1785000000}) == 60
+
+
+def test_collected_match_carries_patch(monkeypatch):
+    """Сквозняк: патч доезжает до TimelineMatch, а не теряется в цикле."""
+    src = make_source(monkeypatch, {31: _match(31)}, [31])
+    got = list(src.fetch_new())
+    assert got[0].patch == 60
