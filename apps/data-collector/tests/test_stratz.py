@@ -6,6 +6,7 @@
 """
 import pathlib
 import sys
+import time
 
 import pytest
 import requests
@@ -16,7 +17,8 @@ from collector.sources import Shard  # noqa: E402
 from collector.sources.stratz import (GAME_MODE_NAMES,  # noqa: E402
                                       LOBBY_NAMES, StratzError,
                                       StratzTimelineSource, cumulative,
-                                      enum_id, match_passes, timeline_rows)
+                                      enum_id, match_passes, norm_version,
+                                      timeline_rows)
 
 
 def _match(mid=7000000000, minutes=4, win=True):
@@ -179,6 +181,12 @@ def make_source(monkeypatch, matches, candidates, mode="public",
     src = StratzTimelineSource(token="t", limit_per_cycle=10, mode=mode,
                                api_delay_s=0, min_patch=None)
     src._patch_map = {} if patch_map is None else patch_map
+    # Пустая карта патчей в бою означает «построить не удалось» и влечёт
+    # пересборку (спринт 87). Здесь пустота задана НАМЕРЕННО — «перевод
+    # не нужен», — поэтому часы пересборки взводятся: иначе каждый тест
+    # цикла получал бы лишний вызов _gql за версиями и считал бы его
+    # запросом матча.
+    src._patch_map_at = time.monotonic()
 
     def fake_gql(query, variables=None):
         if gql_hook:
@@ -419,3 +427,140 @@ def test_candidates_stop_when_api_ignores_cursor(monkeypatch):
     monkeypatch.setattr(src, "_opendota", fake_opendota)
     assert list(src._candidates()) == [777]     # без повторов
     assert len(calls) == 2                       # вторая страница и стоп
+
+
+# -- временные отказы против постоянных (спринт 87) ---------------------------
+
+def test_missing_match_is_retried_not_buried(monkeypatch):
+    """STRATZ парсит матч с задержкой, а кандидаты берутся с вершины
+    листинга — самые свежие. Матч, которого у STRATZ ещё нет, обязан
+    попробоваться снова: прежняя версия хоронила его навсегда, и
+    источник душил сам себя (инцидент 2026-08-03 — сбор упал с 25 до 3
+    матчей за цикл при израсходованных 8% суточной квоты)."""
+    asked = []
+    ready = {}
+    src = make_source(monkeypatch, ready, [17],
+                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+    assert list(src.fetch_new()) == []            # STRATZ ещё не знает матч
+    ready[17] = _match(17)                        # распарсился между циклами
+    assert [t.match_id for t in src.fetch_new()] == [17]
+    assert asked == [17, 17]
+
+
+def test_missing_match_gives_up_after_attempts(monkeypatch):
+    """Бесконечно спрашивать тоже нельзя: матч, который STRATZ не
+    распарсит никогда, обязан осесть в постоянном кэше отказов."""
+    asked = []
+    src = make_source(monkeypatch, {}, [18],
+                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+    src._retry_attempts = 3
+    for _ in range(5):
+        assert list(src.fetch_new()) == []
+    assert asked == [18, 18, 18]                  # ровно retry_attempts
+
+
+def test_empty_timeline_is_transient_too(monkeypatch):
+    """Матч у STRATZ есть, а рядов ещё нет — он в очереди на парсинг.
+    Та же временная причина, что и отсутствие самого матча."""
+    m = _match(19)
+    m["radiantNetworthLeads"] = []
+    m["radiantExperienceLeads"] = []
+    store = {19: m}
+    src = make_source(monkeypatch, store, [19])
+    assert list(src.fetch_new()) == []
+    store[19] = _match(19)
+    assert [t.match_id for t in src.fetch_new()] == [19]
+
+
+def test_permanent_filter_is_not_retried(monkeypatch):
+    """Обратная сторона: турбо не станет рейтинговым матчем никогда, и
+    повторный вызов — чистая трата квоты."""
+    turbo = _match(21); turbo["gameMode"] = 23
+    asked = []
+    src = make_source(monkeypatch, {21: turbo}, [21],
+                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+    for _ in range(4):
+        assert list(src.fetch_new()) == []
+    assert asked == [21]
+
+
+def test_detail_budget_caps_calls_per_cycle(monkeypatch):
+    """Лимит цикла считает УСПЕХИ, а вызов тратится и на промах. Без
+    отдельного потолка цикл с высокой долей промахов перебирал бы все
+    1000 кандидатов и выжигал часовую квоту."""
+    asked = []
+    src = make_source(monkeypatch, {}, list(range(100, 200)),
+                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+    src._detail_budget = 7
+    assert list(src.fetch_new()) == []
+    assert len(asked) == 7
+
+
+def test_default_detail_budget_leaves_room_for_misses(monkeypatch):
+    """Дефолт — кратно лимиту, а не равен ему: иначе первый же десяток
+    несозревших матчей съедал бы бюджет и цикл возвращал ноль."""
+    src = StratzTimelineSource(token="t", limit_per_cycle=25, api_delay_s=0)
+    assert src._detail_budget > 25
+
+
+# -- нормализация имени версии (спринт 87) ------------------------------------
+
+@pytest.mark.parametrize("raw,want", [
+    ("7.41", "7.41"), ("7.41b", "7.41"), (" 7.41 ", "7.41"),
+    ("7.39c", "7.39"), ("7.40", "7.40"),
+])
+def test_norm_version_strips_hotfix_letter(raw, want):
+    assert norm_version(raw) == want
+
+
+def test_patch_map_matches_hotfix_names(monkeypatch):
+    """OpenDota ведёт только крупные патчи ("7.41"), STRATZ — ещё и
+    хотфиксы ("7.41b"). Сопоставление по ТОЧНОМУ имени промахивалось
+    ровно на актуальной версии, и все свежие матчи получали patch=0
+    (инцидент 2026-08-03: 1625 матчей, 43% датасета)."""
+    src = StratzTimelineSource(token="t", api_delay_s=0)
+    monkeypatch.setattr(src, "_gql", lambda q, v=None: {
+        "constants": {"gameVersions": [{"id": 182, "name": "7.41b"},
+                                       {"id": 181, "name": "7.41"}]}})
+    monkeypatch.setattr(src, "_opendota",
+                        lambda path, **kw: [{"id": 60, "name": "7.41"}])
+    assert src._patch_of({"gameVersionId": 182}) == 60
+    assert src._patch_of({"gameVersionId": 181}) == 60
+
+
+def test_empty_patch_map_is_rebuilt_not_cached_forever(monkeypatch):
+    """Прежняя версия писала {} в кэш при первом же сбое и жила так
+    неделями, проставляя patch=0 каждому матчу. Пустая карта — повод
+    попробовать снова, а не приговор."""
+    src = StratzTimelineSource(token="t", api_delay_s=0)
+    calls = {"n": 0}
+
+    def gql(q, v=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.ConnectionError("нет сети")
+        return {"constants": {"gameVersions": [{"id": 180, "name": "7.39"}]}}
+
+    monkeypatch.setattr(src, "_gql", gql)
+    monkeypatch.setattr(src, "_opendota",
+                        lambda path, **kw: [{"id": 57, "name": "7.39"}])
+    assert src._patch_of({"gameVersionId": 180}) == 0      # сбой
+    src._patch_map_at = -10**9                             # прошло время
+    assert src._patch_of({"gameVersionId": 180}) == 57     # починилось само
+
+
+def test_patch_map_rebuild_is_rate_limited(monkeypatch):
+    """Повтор не должен превращаться в два лишних вызова на КАЖДЫЙ матч —
+    это сожгло бы часовую квоту быстрее, чем сам сбор."""
+    src = StratzTimelineSource(token="t", api_delay_s=0)
+    calls = {"n": 0}
+
+    def boom(*a, **kw):
+        calls["n"] += 1
+        raise requests.ConnectionError("нет сети")
+
+    monkeypatch.setattr(src, "_gql", boom)
+    monkeypatch.setattr(src, "_opendota", boom)
+    for _ in range(50):
+        assert src._patch_of({"gameVersionId": 180}) == 0
+    assert calls["n"] <= 2

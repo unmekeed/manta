@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import re
 import time
 from typing import Iterable
 
@@ -66,6 +68,31 @@ GAME_MODE_NAMES = {
     "ALL_RANDOM_DEATH_MATCH": 20, "SOLO_MID": 21, "ALL_PICK_RANKED": 22,
     "TURBO": 23, "MUTATION": 24,
 }
+
+
+# Пересборка карты патчей после неудачи — не чаще раза в 10 минут.
+PATCH_MAP_RETRY_S = float(os.getenv("PATCH_MAP_RETRY_S", "600"))
+
+_VERSION_RE = re.compile(r"\s*(\d+)\.(\d+)")
+
+
+def norm_version(name) -> str:
+    """Имя версии игры к общему виду: '7.41b' и ' 7.41 ' → '7.41'.
+
+    Стороны нумеруют патчи с разной подробностью: OpenDota ведёт только
+    крупные геймплейные патчи ("7.41"), STRATZ — ещё и хотфиксы
+    ("7.41b"). Сопоставление ПО ТОЧНОМУ имени поэтому промахивалось
+    ровно на актуальной версии: пока патч свежий и живёт с буквой, ни
+    один матч не получал patch, а к моменту, когда имена совпадут, все
+    матчи этого патча уже собраны с patch=0.
+
+    Инцидент 2026-08-03: 1625 матчей STRATZ (43% датасета) с patch=0 при
+    patch=60 у матчей OpenDota. Взвешивание A9 не штрафует нули, так что
+    обучение не испортилось — но и защиты от старого патча у половины
+    датасета не было.
+    """
+    m = _VERSION_RE.match(str(name))
+    return f"{m.group(1)}.{m.group(2)}" if m else str(name).strip()
 
 
 def enum_id(value, names: dict[str, int]) -> int:
@@ -234,7 +261,9 @@ class StratzTimelineSource:
                  opendota_key: str | None = None,
                  api_url: str = API_URL, kills_cumulative: bool = False,
                  shard: Shard | None = None,
-                 split: SourceSplit | None = None) -> None:
+                 split: SourceSplit | None = None,
+                 retry_attempts: int = 3,
+                 detail_budget: int | None = None) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -263,9 +292,22 @@ class StratzTimelineSource:
         # Своя доля кандидатов: JSON-источник OpenDota читает тот же
         # листинг с вершины, и без разделения оба брали бы одни матчи.
         self._split = split or SourceSplit()
+        # Отказы ПОСТОЯННЫЕ: режим, лобби, длительность, патч, неразбор.
+        # Такой матч не станет пригодным никогда, и повторный запрос —
+        # чистая трата квоты.
         self._rejected: set[int] = set()
+        # Отказы ВРЕМЕННЫЕ: у STRATZ ещё нет матча или его таймлайна.
+        # Хранится число попыток; после retry_attempts матч переезжает
+        # в постоянные. Подробности — в _defer().
+        self._pending: dict[int, int] = {}
+        self._retry_attempts = retry_attempts
+        # Потолок detail-вызовов за цикл. Ограничение по limit_per_cycle
+        # считает только УСПЕХИ, а вызов тратится и на промах: когда
+        # промахов много, цикл мог перебрать все 1000 кандидатов.
+        self._detail_budget = detail_budget or 4 * limit_per_cycle
         # gameVersionId STRATZ -> patch id OpenDota; строится лениво.
         self._patch_map: dict[int, int] | None = None
+        self._patch_map_at = -PATCH_MAP_RETRY_S
 
     # -- транспорт ------------------------------------------------------------
 
@@ -297,9 +339,9 @@ class StratzTimelineSource:
     def _build_patch_map(self) -> dict[int, int]:
         """gameVersionId STRATZ → patch id OpenDota по совпадению имени.
 
-        Обе стороны называют версии одинаково ("7.39"), а числовые id у них
-        независимы. Сбой любой из сторон не должен ронять сбор: пустая карта
-        означает patch=0, витрина при этом наполняется.
+        Обе стороны называют версии похоже, но НЕ одинаково, и числовые id
+        у них независимы. Сбой любой из сторон не должен ронять сбор:
+        пустая карта означает patch=0, витрина при этом наполняется.
         """
         try:
             versions = (self._gql(VERSIONS_QUERY).get("constants") or {}
@@ -309,23 +351,44 @@ class StratzTimelineSource:
             logger.warning("карта патчей не построена — patch=0 у матчей",
                            exc_info=True)
             return {}
-        by_name = {str(p["name"]).strip(): int(p["id"]) for p in od
+        by_name = {norm_version(p["name"]): int(p["id"]) for p in od
                    if p.get("name") and p.get("id") is not None}
-        out = {}
+        out, missed = {}, []
         for v in versions:
-            od_id = by_name.get(str(v.get("name", "")).strip())
+            od_id = by_name.get(norm_version(v.get("name", "")))
             if od_id is not None and v.get("id") is not None:
                 out[int(v["id"])] = od_id
-        logger.info("карта патчей STRATZ→OpenDota: %d версий", len(out))
+            elif v.get("name"):
+                missed.append(str(v["name"]))
+        if out:
+            logger.info("карта патчей STRATZ→OpenDota: %d версий "
+                        "(не сопоставлено: %d)", len(out), len(missed))
+        else:
+            # Пустая карта — это ТИХАЯ потеря колонки patch у всех матчей
+            # источника, а с ней и даунвейта старых патчей (A9). Молчать
+            # тут нельзя: в витрине это выглядит как обычный ноль.
+            logger.warning(
+                "карта патчей ПУСТА — patch=0 у всех матчей STRATZ; имена "
+                "версий STRATZ: %s; имена OpenDota: %s",
+                sorted(missed)[-5:], sorted(by_name)[-5:])
         return out
 
     def _patch_of(self, m: dict) -> int:
-        if self._patch_map is None:
-            self._patch_map = self._build_patch_map()
+        if not self._patch_map:
+            # ПОВТОРЯЕМ построение, а не кэшируем неудачу навсегда.
+            # Прежняя версия писала {} в кэш при первом же сбое (STRATZ
+            # ответил 429 на старте, OpenDota моргнул) — и процесс жил
+            # неделями, проставляя patch=0 каждому матчу. Чтобы повтор не
+            # превратился в два лишних вызова на КАЖДЫЙ матч, он не чаще
+            # PATCH_MAP_RETRY_S.
+            now = time.monotonic()
+            if now - self._patch_map_at >= PATCH_MAP_RETRY_S:
+                self._patch_map_at = now
+                self._patch_map = self._build_patch_map()
         gv = m.get("gameVersionId")
         if gv is None:
             return 0
-        return self._patch_map.get(int(gv), 0)
+        return (self._patch_map or {}).get(int(gv), 0)
 
     # -- цикл -----------------------------------------------------------------
 
@@ -379,19 +442,47 @@ class StratzTimelineSource:
         skip = skip or (lambda _mid: False)
         if len(self._rejected) > 50_000:   # id монотонны, старые не вернутся
             self._rejected.clear()
+        if len(self._pending) > 50_000:
+            self._pending.clear()
         yielded = 0
+        calls = 0
         # Счётчики причин отсева: без них в логе виден только итог
         # «собрано N», и непонятно, упёрлись мы в лимит, в дедуп или в
         # фильтр качества — а лечатся эти три случая по-разному.
         stats = {"кандидатов": 0, "чужой шард": 0, "не моя доля": 0,
                  "дубликат": 0, "кэш отказов": 0, "фильтр": 0,
-                 "нет данных": 0}
+                 "нет данных": 0, "ждут парсинга": 0, "бюджет вызовов": 0}
 
         def report() -> None:
-            logger.info("цикл STRATZ: собрано %d из %d кандидатов (%s)",
-                        yielded, stats["кандидатов"],
+            logger.info("цикл STRATZ: собрано %d из %d кандидатов, "
+                        "вызовов %d (%s)",
+                        yielded, stats["кандидатов"], calls,
                         ", ".join(f"{k}: {v}" for k, v in stats.items()
                                   if k != "кандидатов" and v))
+
+        def defer(mid: int) -> None:
+            """Матч без данных — причина ВРЕМЕННАЯ, не повод хоронить.
+
+            STRATZ парсит матч с задержкой, а кандидаты берутся с вершины
+            листинга OpenDota, то есть самые свежие. Прежняя версия
+            отправляла такой матч в постоянный кэш отказов навсегда — и
+            он не пробовался снова, хотя данные появлялись через
+            минуты. Источник душил сам себя: за три цикла подряд
+            2026-08-03 «кэш отказов» рос 158→176→202 при падении «нет
+            данных» 72→56→36, и сбор давал 3, 3, 5 матчей вместо 25 —
+            при израсходованных 8% суточной квоты STRATZ.
+
+            Постоянные причины (режим, лобби, длительность, патч,
+            неразбор ответа) по-прежнему уходят в _rejected сразу.
+            """
+            n = self._pending.get(mid, 0) + 1
+            self._pending[mid] = n
+            if n >= self._retry_attempts:
+                del self._pending[mid]
+                self._rejected.add(mid)
+                stats["нет данных"] += 1
+            else:
+                stats["ждут парсинга"] += 1
 
         for mid in self._candidates():
             stats["кандидатов"] += 1
@@ -410,6 +501,14 @@ class StratzTimelineSource:
             if mid in self._rejected:
                 stats["кэш отказов"] += 1
                 continue
+            if calls >= self._detail_budget:
+                # Считаем ВЫЗОВЫ, а не успехи: промах тратит квоту так же,
+                # как попадание. Без этого потолка цикл с высокой долей
+                # промахов перебирал бы все 1000 кандидатов.
+                stats["бюджет вызовов"] += 1
+                report()
+                return
+            calls += 1
             try:
                 data = self._gql(MATCH_QUERY, {"id": mid})
             except StratzError as e:
@@ -428,8 +527,7 @@ class StratzTimelineSource:
                 continue
             m = data.get("match")
             if not m:
-                stats["нет данных"] += 1
-                self._rejected.add(mid)
+                defer(mid)          # STRATZ ещё не видел этот матч
                 continue
             # Разбор ОДНОГО матча не имеет права ронять цикл: STRATZ меняет
             # формат полей (2026-07-31 — lobbyType приехал строкой-энумом
@@ -440,6 +538,12 @@ class StratzTimelineSource:
                                        self._min_patch,
                                        pro=(self._mode == "pro"))
                 if not ok:
+                    if why == "no-timeline":
+                        # Матч у STRATZ есть, а поминутных рядов ещё нет —
+                        # он в очереди на парсинг. Такая же временная
+                        # причина, как отсутствие самого матча.
+                        defer(mid)
+                        continue
                     stats["фильтр"] += 1
                     stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
                     self._rejected.add(mid)
@@ -452,8 +556,7 @@ class StratzTimelineSource:
                 self._rejected.add(mid)
                 continue
             if not rows:
-                stats["нет данных"] += 1
-                self._rejected.add(mid)
+                defer(mid)          # ряды ещё не наполнились
                 continue
             yielded += 1
             yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,

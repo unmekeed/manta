@@ -111,6 +111,7 @@ def build_source(name: str):
         # Суточный потолок здесь свой (10000 у Default-токена), поэтому
         # лимит цикла задаётся отдельной переменной, а не OPENDOTA_LIMIT.
         min_patch = os.getenv("STRATZ_MIN_PATCH")
+        stratz_budget = os.getenv("STRATZ_DETAIL_BUDGET")
         return StratzTimelineSource(
             token=os.getenv("STRATZ_API_TOKEN", ""),
             limit_per_cycle=int(os.getenv("STRATZ_LIMIT", "40")),
@@ -120,6 +121,10 @@ def build_source(name: str):
             kills_cumulative=os.getenv("STRATZ_KILLS_CUMULATIVE") == "1",
             shard=shard,
             split=_detail_split(name),
+            # Свежий матч, которого STRATZ ещё не распарсил, пробуется
+            # несколько циклов вместо вечного отказа (спринт 87).
+            retry_attempts=int(os.getenv("STRATZ_RETRY_ATTEMPTS", "3")),
+            detail_budget=int(stratz_budget) if stratz_budget else None,
         )
     raise ValueError(f"unknown source {name!r}")
 
