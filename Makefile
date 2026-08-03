@@ -159,6 +159,9 @@ stop:          ## Остановить хостовые процессы (кон
 doctor:        ## Health-check конвейера по ДАННЫМ (топики, лаг, свежесть, квота)
 	./scripts/doctor.sh
 
+collect-report: ## Почему упал темп сбора + покрытие фич: ARGS="rate|features|logs"
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/collect-report.sh $(ARGS)
+
 dashboard:     ## Живой дашборд наблюдаемости без Docker/Grafana (:9107)
 	python3 scripts/dashboard.py
 
