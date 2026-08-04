@@ -351,8 +351,13 @@ class Job:
             self.lines.append(f"$ {shlex.join(spec['argv'])}")
             # Дашборд не должен умереть вместе с действием и наоборот:
             # отдельная группа процессов, вывод — в трубу.
+            # Метка «запущено из дашборда»: recover по ней понимает, что
+            # перезапускать дашборд СЕЙЧАС нельзя — он и есть родитель
+            # этого процесса, и убийство оборвало бы саму задачу.
+            job_env = {**os.environ, "MANTA_DASHBOARD_JOB": "1"}
             self._proc = subprocess.Popen(
-                spec["argv"], cwd=str(ROOT), stdout=subprocess.PIPE,
+                spec["argv"], cwd=str(ROOT), env=job_env,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True)
             threading.Thread(target=self._pump, daemon=True).start()

@@ -314,7 +314,32 @@ else
     skip "frontend"
 fi
 
-if ! pgrep -f "scripts/dashboard.py" >/dev/null; then
+# Дашборд — ЕДИНСТВЕННЫЙ процесс, который make stop намеренно не трогает
+# (спринт 74: иначе кнопка «Поднять всё» умирает вместе со стеком). Из-за
+# этого он же оказался единственным, кто НЕ ПОДХВАТЫВАЛ правки: recover
+# пропускал его как «уже работает», и процесс жил со старым кодом через
+# любое число git pull. Инцидент 2026-08-04: фиксы спринтов 92 и 96 не
+# доехали до страницы вовсе, а на экране висела надпись из версии
+# двухдневной давности. Поэтому здесь — сверка кода с процессом.
+dash_pid=$(pgrep -f "scripts/dashboard.py" | head -1)
+if [ -n "$dash_pid" ]; then
+    started=$(( $(date +%s) - $(ps -o etimes= -p "$dash_pid" 2>/dev/null \
+                                | tr -d ' ' || echo 0) ))
+    if [ "$(stat -c %Y scripts/dashboard.py)" -gt "$started" ]; then
+        if [ -n "${MANTA_DASHBOARD_JOB:-}" ]; then
+            # recover запущен кнопкой САМОГО дашборда: убить его сейчас
+            # значит оборвать эту же задачу на середине.
+            printf '   \033[33mВНИМАНИЕ\033[0m дашборд работает на СТАРОМ коде.\n'
+            printf '   Перезапустить вручную: pkill -f scripts/dashboard.py && make recover\n'
+        else
+            say "дашборд старее своего кода — перезапускаю"
+            kill "$dash_pid" 2>/dev/null || true
+            sleep 1
+            dash_pid=""
+        fi
+    fi
+fi
+if [ -z "$dash_pid" ] && ! pgrep -f "scripts/dashboard.py" >/dev/null; then
     say "запускаю дашборд (:9107, лог: $LOG_DIR/dashboard.log)"
     nohup python3 scripts/dashboard.py >"$LOG_DIR/dashboard.log" 2>&1 &
 else

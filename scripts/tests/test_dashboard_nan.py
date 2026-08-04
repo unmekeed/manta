@@ -65,3 +65,43 @@ def test_history_records_real_values():
     dashboard._history[key].clear()
     dashboard._record(key, 0.1682)
     assert list(dashboard._history[key]) == [0.1682]
+
+
+# -- дашборд обязан подхватывать правки (спринт 101) --------------------------
+
+def test_recover_restarts_stale_dashboard():
+    """Дашборд — единственный процесс, который make stop намеренно не
+    трогает (спринт 74: иначе умирает кнопка «Поднять всё»). Из-за этого
+    он же оказался единственным, кто НЕ ПОДХВАТЫВАЛ правки: recover
+    пропускал его как «уже работает».
+
+    Инцидент 2026-08-04: фиксы спринтов 92 и 96 не доехали до страницы
+    вовсе — на экране висела надпись из версии двухдневной давности, и
+    оба «исправленных» дефекта выглядели неисправленными.
+    """
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    assert "stat -c %Y scripts/dashboard.py" in src, (
+        "recover не сверяет время правки дашборда со временем запуска")
+    assert "дашборд старее своего кода" in src
+
+
+def test_recover_does_not_kill_its_own_parent():
+    """Если recover запущен КНОПКОЙ дашборда, убивать дашборд нельзя —
+    он родитель этой задачи, и она оборвётся на середине. В этом случае
+    ожидается предупреждение, а не kill."""
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    i = src.index("дашборд старее своего кода")
+    guard = src[max(0, i - 600):i]
+    assert "MANTA_DASHBOARD_JOB" in guard, (
+        "нет защиты от самоубийства при запуске из панели управления")
+
+
+def test_dashboard_marks_its_own_jobs():
+    """Метку ставит сам дашборд — иначе проверка выше опирается на
+    переменную, которую никто не выставляет."""
+    src = (Path(__file__).resolve().parents[1] / "dashboard.py"
+           ).read_text(encoding="utf-8")
+    assert 'MANTA_DASHBOARD_JOB": "1"' in src
+    assert "env=job_env" in src
