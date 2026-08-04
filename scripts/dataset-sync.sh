@@ -35,8 +35,13 @@ PG_DB="${POSTGRES_DB:-manta}"
 # из ReplayEvents, а он живёт 14 дней — потерять их в слепке значит
 # потерять безвозвратно, в отличие от витрин, которые пересчитываются из
 # сырья.
+# MatchMapCells (спринт 98) — ровно та же логика, что у MatchFights:
+# тепловые карты собираются из ReplayEvents и PositionSnapshots, первое
+# живёт 14 дней, реплеи Valve удаляет сама. Не внести таблицу в слепок
+# значит потерять всю историю карт при переносе на другую машину — и
+# заметить это только тогда, когда карту попросят построить.
 REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures
-                  MatchDraft MatchEvents MatchFights)
+                  MatchDraft MatchEvents MatchFights MatchMapCells)
 RAW_TABLES=(EconomyTimeline PositionSnapshots)
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }

@@ -22,6 +22,7 @@ from prometheus_client import Counter, Histogram
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
 from .fights import detect_fights
+from .mapcells import build_cells
 from .pseudonym import apply as pseudonymize
 
 logger = logging.getLogger("extractor")
@@ -159,6 +160,10 @@ class Extractor:
         # Драки пишем ДО витрин: ReplayEvents живёт 14 дней, и это
         # единственный шанс сохранить размен. Сбой здесь не должен
         # ронять обработку матча — витрина первична.
+        # Инициализируем ДО try: карты ниже используют frows, и при сбое
+        # детектора драк они получили бы NameError вместо честного
+        # «драк нет» — то есть один сбой унёс бы два слоя данных.
+        frows: list[dict] = []
         try:
             frows = detect_fights(kills, positions, roster.hero_team)
             for r in frows:
@@ -166,6 +171,26 @@ class Extractor:
             self.ch.insert_rows("MatchFights", frows)
         except Exception:  # noqa: BLE001
             logger.warning("матч %s: драки не сохранены", match_id,
+                        exc_info=True)
+
+        # Тепловые карты — по той же причине и в том же месте: сырьё
+        # истекает по TTL, агрегат живёт. Отдельным запросом, потому что
+        # kills выше берёт только смерти героев без координат.
+        try:
+            map_events = self.ch.select(
+                "SELECT game_time, event_type, x, y, attacker, target"
+                "  FROM ReplayEvents"
+                " WHERE match_id = {match_id:UInt64}"
+                "   AND event_type IN ('KILL', 'WARD_PLACE', 'SMOKE')"
+                " ORDER BY game_time",
+                {"match_id": match_id})
+            crows = build_cells(positions, map_events, frows,
+                                roster.hero_team)
+            for r in crows:
+                r["match_id"] = match_id
+            self.ch.insert_rows("MatchMapCells", crows)
+        except Exception:  # noqa: BLE001
+            logger.warning("матч %s: карты не сохранены", match_id,
                         exc_info=True)
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)

@@ -303,7 +303,7 @@ ch "SELECT uniqExact(match_id) AS with_signals
      FORMAT TabSeparated" | sed 's/^/   /'
 
 hdr "СОПУТСТВУЮЩИЕ ТАБЛИЦЫ"
-for t in MatchDraft MatchEvents MatchFights ReplayEvents PositionSnapshots EconomyTimeline; do
+for t in MatchDraft MatchEvents MatchFights MatchMapCells ReplayEvents PositionSnapshots EconomyTimeline; do
     n=$(ch "SELECT uniqExact(match_id) FROM $t FORMAT TabSeparated" 2>/dev/null)
     mt=$(ch "SELECT ifNull(toString(max(modification_time)), '-') FROM system.parts
               WHERE database = '$CH_DB' AND table = '$t' AND active
@@ -311,7 +311,7 @@ for t in MatchDraft MatchEvents MatchFights ReplayEvents PositionSnapshots Econo
     printf '   %-20s матчей %-8s последняя запись %s\n' "$t" "${n:-?}" "${mt:--}"
 done
 note "ReplayEvents живёт 14 дней (TTL, миграция 007) — падение числа матчей"
-note "там нормально; MatchFights без TTL и обязана только расти."
+note "там нормально; MatchFights и MatchMapCells без TTL и обязаны только расти."
 
 sub "Драки: распределение по числу участников (MatchFights)"
 ch "SELECT radiant_participants + dire_participants AS participants,
