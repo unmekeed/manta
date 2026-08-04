@@ -202,3 +202,17 @@ def test_item_dictionary_actually_loaded():
     """
     assert len(timings_mod._ITEM_IDS) > 400, "справочник предметов не загружен"
     assert timings_mod._ITEM_IDS[1] == "blink"
+
+
+def test_dictionary_includes_recipes():
+    """Отдельно от проверки выше: справочник обязан быть снят с
+    constants/item_ids, а не с constants/items. Второй ключуется по имени
+    и рецептов не содержит — а рецепт это половина покупок в игре.
+    Первый прогон 331 матча дал топ неразрешённых из одних рецептов
+    (49 recipe_phase_boots — 510 раз). Проверка длины этого не ловит:
+    501 запись против 596 выглядит правдоподобно.
+    """
+    assert timings_mod._ITEM_IDS[49] == "recipe_phase_boots"
+    recipes = [n for n in timings_mod._ITEM_IDS.values()
+               if n.startswith("recipe_")]
+    assert len(recipes) > 50, f"рецептов в справочнике всего {len(recipes)}"

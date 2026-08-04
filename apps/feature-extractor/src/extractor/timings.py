@@ -25,12 +25,22 @@ from pathlib import Path
 from .features import _normalize_hero
 from .mapcells import phase_of
 
-# Снимок constants/items OpenDota: id → npc-имя предмета. Нужен потому,
+# Снимок constants/item_ids OpenDota: id → npc-имя предмета. Нужен потому,
 # что у события покупки в combat log НЕТ строкового имени — там пусто в
 # inflictor, герой в target, а сам предмет лежит числовым id в value
 # (проверено на живых данных 2026-08-04: 32 talisman_of_evasion,
 # 41 bottle, 45 courier). Первая версия спринта 99 искала имя в строках
 # и молча выбрасывала ВСЕ покупки — ровно то, ради чего спринт делался.
+#
+# Источник именно item_ids, а НЕ constants/items: второй ключуется по
+# имени и рецептов не содержит вовсе. На первом прогоне 331 матча это
+# дало десятки тысяч безымянных покупок — топ неразрешённых оказался
+# сплошь рецептами (49 recipe_phase_boots — 510 раз, 167 recipe_desolator,
+# 165 recipe_maelstrom). Рецепт — половина всех покупок в игре.
+#
+# Дыры в самой константе остаются (333, 341, 352 отсутствуют и в
+# item_ids, и в снимке dotaconstants на GitHub) — их и обслуживает
+# запасное имя `item_<id>`.
 _ITEM_IDS: dict[int, str] = {}
 try:
     _raw = json.loads(
