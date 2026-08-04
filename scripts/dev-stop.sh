@@ -31,6 +31,7 @@ PATTERNS=(
     # жечь суточный лимит и мешал recover'у перезапустить себя с новым кодом.
     "collector --source stratz-timeline --interval:stratz-coll."
     "collector --source stratz-timeline-pro:stratz-pro"
+    "collector --source opendota-league:league-collector"
     "^/tmp/parser-svc:parser-svc"
     "python3 -u -m extractor:feature-extractor"
     "python3 -u -m training.auto:auto-train"

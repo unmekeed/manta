@@ -113,6 +113,7 @@ pg "SELECT to_char(date_trunc('hour', collected_at AT TIME ZONE 'UTC'), 'MM-DD H
            count(*) FILTER (WHERE source_name = 'stratz_timeline_pro')  AS \"stratz-pro\",
            count(*) FILTER (WHERE source_name = 'opendota_timeline')    AS \"od-json\",
            count(*) FILTER (WHERE source_name = 'opendota_timeline_pro') AS \"od-pro\",
+           count(*) FILTER (WHERE source_name = 'opendota_league')        AS \"лиги\",
            count(*) FILTER (WHERE source_name IN ('opendota','opendota_public')) AS \"реплей\",
            count(*) AS \"итого\"
       FROM CollectedMatches
@@ -181,7 +182,7 @@ if want rate || want logs; then
 hdr "ЛОГИ КОЛЛЕКТОРОВ ($LOG_DIR)"
 # stratz-pro.log читаем, хотя источник со спринта 93 не запускается:
 # в нём осталась история, по которой видно, когда и почему он встал.
-for f in stratz stratz-pro timeline timeline-pro collector pro-collector; do
+for f in stratz stratz-pro timeline timeline-pro league collector pro-collector; do
     p="$LOG_DIR/$f.log"
     [ -f "$p" ] || { printf '\n   %-14s лога нет (коллектор ни разу не запускался)\n' "$f"; continue; }
     age=$(( ($(date +%s) - $(stat -c %Y "$p")) / 60 ))

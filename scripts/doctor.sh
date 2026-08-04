@@ -137,6 +137,7 @@ proc() {
 proc data-collector   "collector --source opendota-public"
 proc timeline-coll.   "collector --source opendota-timeline --interval"
 proc pro-timeline     "collector --source opendota-timeline-pro"
+proc league-coll.     "collector --source opendota-league"
 proc pro-replay       "collector --source opendota --interval"
 # STRATZ опционален: без токена этих коллекторов быть и не должно, и
 # отмечать их DOWN было бы ложной тревогой.

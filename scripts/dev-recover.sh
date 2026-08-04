@@ -211,6 +211,19 @@ else
     printf '   stratz-collector — STRATZ_API_TOKEN не задан, пропуск\n'
 fi
 
+# Про-матчи ВГЛУБЬ по лигам (спринт 96). Окно /proMatches — около тысячи
+# последних матчей на весь мир, оно выбирается за сутки, и эталон гейта
+# перестаёт расти. Лиги дают историю турниров, которой в окне давно нет.
+if ! pgrep -f "collector --source opendota-league" >/dev/null; then
+    say "запускаю league-collector (лог: $LOG_DIR/league.log)"
+    (cd apps/data-collector && TIMELINE_LIMIT="${LEAGUE_LIMIT:-6}" METRICS_PORT=9117 PYTHONPATH=src:$ROOT/libs \
+        nohup python3 -u -m collector --source opendota-league \
+            --interval "${LEAGUE_INTERVAL:-3600}" \
+            >"$LOG_DIR/league.log" 2>&1 &)
+else
+    skip "league-collector"
+fi
+
 if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
     say "запускаю pro-replay-collector (лог: $LOG_DIR/pro-collector.log)"
     # Лимит берётся из env-файла, как и у остальных коллекторов: жёсткая
@@ -319,6 +332,7 @@ check feature-extractor "python3 -u -m extractor"
 check data-collector "collector --source opendota-public"
 check timeline-coll. "collector --source opendota-timeline --interval"
 check pro-timeline "collector --source opendota-timeline-pro"
+check league-coll. "collector --source opendota-league"
 check pro-replay "collector --source opendota --interval"
 if [ -n "${STRATZ_API_TOKEN:-}" ]; then
     check stratz-coll. "collector --source stratz-timeline --interval"

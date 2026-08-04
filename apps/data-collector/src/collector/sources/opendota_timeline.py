@@ -191,14 +191,21 @@ class OpenDotaTimelineSource:
                  mode: str = "public", api_key: str | None = None,
                  detail_budget: int | None = None,
                  shard: Shard | None = None,
-                 split: SourceSplit | None = None) -> None:
-        assert mode in ("public", "pro")
+                 split: SourceSplit | None = None,
+                 league_ttl_s: float = 3600.0) -> None:
+        assert mode in ("public", "pro", "league")
         self._mode = mode
-        self.name = ("opendota_timeline" if mode == "public"
-                     else "opendota_timeline_pro")
+        self.name = {"public": "opendota_timeline",
+                     "pro": "opendota_timeline_pro",
+                     "league": "opendota_league"}[mode]
         self._candidates_path = ("parsedMatches" if mode == "public"
                                  else "proMatches")
         self._tier = "Premium" if mode == "public" else "Professional"
+        # Кэш списка активных лиг: он меняется медленно (турниры живут
+        # неделями), а вызов стоит столько же, сколько страница листинга.
+        self._league_ttl = league_ttl_s
+        self._leagues: list[int] = []
+        self._leagues_at = -league_ttl_s
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._min_rank = min_rank
@@ -245,11 +252,82 @@ class OpenDotaTimelineSource:
                     latest, floor, lag)
         return floor
 
+    def _listing_candidates(self) -> Iterable[int]:
+        """Кандидаты из окна свежих матчей (/parsedMatches | /proMatches).
+
+        Отдаёт id по убыванию, вглубь до десяти страниц.
+        """
+        cursor: int | None = None
+        for _ in range(10):
+            params = {}
+            if cursor:
+                params["less_than_match_id"] = cursor
+            batch = self._get(self._candidates_path, **params).json()
+            if not batch:
+                return
+            for entry in batch:
+                mid = entry.get("match_id")
+                if mid is None:
+                    continue
+                cursor = int(mid)
+                yield cursor
+
+    def _active_leagues(self) -> list[int]:
+        """id лиг, матчи которых сейчас идут (по свежему /proMatches)."""
+        now = time.monotonic()
+        if self._leagues and now - self._leagues_at < self._league_ttl:
+            return self._leagues
+        try:
+            batch = self._get("proMatches").json() or []
+        except requests.RequestException:
+            logger.warning("список лиг не обновлён — работаю на прежнем",
+                           exc_info=True)
+            return self._leagues
+        seen: list[int] = []
+        for entry in batch:
+            lid = entry.get("leagueid")
+            if lid and int(lid) not in seen:
+                seen.append(int(lid))
+        if seen:
+            self._leagues, self._leagues_at = seen, now
+            logger.info("активных лиг: %d %s", len(seen), seen[:8])
+        return self._leagues
+
+    def _league_candidates(self) -> Iterable[int]:
+        """Кандидаты ИЗ ЛИГ — вглубь, а не вширь.
+
+        Окно /proMatches — около тысячи последних матчей на весь мир, и
+        оно выбирается за сутки: цикл начинает давать «собрано 0, все
+        дубликаты», а про-эталон перестаёт расти (наблюдалось
+        2026-08-04). При этом каждая лига — сотни матчей, которые в это
+        окно давно не попадают, и стоят они по одному дешёвому вызову
+        на лигу.
+
+        Порядок лиг сохраняется как в /proMatches, то есть самые
+        активные турниры идут первыми; дедуп по CollectedMatches сам
+        отсеет уже собранное, а бюджет цикла ограничит глубину.
+        """
+        for lid in self._active_leagues():
+            try:
+                batch = self._get(f"leagues/{lid}/matches").json() or []
+            except requests.RequestException as e:
+                logger.warning("лига %s: %s — пропуск", lid, e)
+                continue
+            for entry in batch:
+                mid = entry.get("match_id")
+                if mid is not None:
+                    yield int(mid)
+
+    def _candidates(self) -> Iterable[int]:
+        if self._mode == "league":
+            return self._league_candidates()
+        return self._listing_candidates()
+
     def fetch_new(self, after_cursor: str | None = None,
                   skip=None) -> Iterable[TimelineMatch]:
-        """Свежие распаршенные матчи: всегда от вершины /parsedMatches вниз.
+        """Свежие распаршенные матчи.
 
-        after_cursor игнорируется: /parsedMatches отдаёт id по убыванию, и
+        after_cursor игнорируется: листинг отдаёт id по убыванию, и
         «возобновление с прошлой позиции» уводило бы в прошлое от свежих
         матчей. Вместо курсора — предикат skip(match_id) (дедуп по
         CollectedMatches): уже собранные отсекаются ДО дорогого вызова
@@ -260,59 +338,47 @@ class OpenDotaTimelineSource:
         skip = skip or (lambda _mid: False)
         if len(self._rejected) > 50_000:   # id монотонны, старые не вернутся
             self._rejected.clear()
-        cursor: int | None = None
         yielded = 0
-        pages = 0
         details = 0
-        while yielded < self._limit and pages < 10:
-            params = {}
-            if cursor:
-                params["less_than_match_id"] = cursor
-            batch = self._get(self._candidates_path, **params).json()
-            if not batch:
+        for mid in self._candidates():
+            if (not self._shard.accepts(mid)
+                    or not self._split.accepts(mid)
+                    or skip(mid) or mid in self._rejected):
+                continue
+            if details >= self._detail_budget:
+                logger.info("бюджет detail-вызовов цикла исчерпан "
+                            "(%d), собрано %d", details, yielded)
                 return
-            pages += 1
-            for entry in batch:
-                mid = int(entry["match_id"])
-                cursor = mid
-                if (not self._shard.accepts(mid)
-                        or not self._split.accepts(mid)
-                        or skip(mid) or mid in self._rejected):
-                    continue
-                if details >= self._detail_budget:
-                    logger.info("бюджет detail-вызовов цикла исчерпан "
-                                "(%d), собрано %d", details, yielded)
-                    return
-                details += 1
-                try:
-                    m = self._get(f"matches/{mid}").json()
-                except requests.HTTPError as e:
-                    if (e.response is not None
-                            and e.response.status_code == 429):
-                        # Квота исчерпана — остальные кандидаты дадут те же
-                        # 429; обрываем цикл, не сжигая остаток лимита.
-                        raise
-                    logger.warning("матч %d: %s — пропуск", mid, e)
-                    continue
-                except requests.RequestException as e:
-                    logger.warning("матч %d: %s — пропуск", mid, e)
-                    continue
-                ok, why = match_passes(m, self._min_rank,
-                                       self._min_duration_s, self._min_patch,
-                                       pro=(self._mode == "pro"))
-                if not ok:
-                    logger.debug("матч %d отфильтрован: %s", mid, why)
-                    self._rejected.add(mid)
-                    continue
-                rows = timeline_rows(m)
-                if not rows:
-                    self._rejected.add(mid)
-                    continue
-                yielded += 1
-                yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
-                                    source_cursor=str(mid),
-                                    patch=int(m.get("patch") or 0),
-                                    avg_rank=avg_rank(m),
-                                    raw=m)
-                if yielded >= self._limit:
-                    return
+            details += 1
+            try:
+                m = self._get(f"matches/{mid}").json()
+            except requests.HTTPError as e:
+                if (e.response is not None
+                        and e.response.status_code == 429):
+                    # Квота исчерпана — остальные кандидаты дадут те же
+                    # 429; обрываем цикл, не сжигая остаток лимита.
+                    raise
+                logger.warning("матч %d: %s — пропуск", mid, e)
+                continue
+            except requests.RequestException as e:
+                logger.warning("матч %d: %s — пропуск", mid, e)
+                continue
+            ok, why = match_passes(m, self._min_rank,
+                                   self._min_duration_s, self._min_patch,
+                                   pro=(self._mode != "public"))
+            if not ok:
+                logger.debug("матч %d отфильтрован: %s", mid, why)
+                self._rejected.add(mid)
+                continue
+            rows = timeline_rows(m)
+            if not rows:
+                self._rejected.add(mid)
+                continue
+            yielded += 1
+            yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
+                                source_cursor=str(mid),
+                                patch=int(m.get("patch") or 0),
+                                avg_rank=avg_rank(m),
+                                raw=m)
+            if yielded >= self._limit:
+                return

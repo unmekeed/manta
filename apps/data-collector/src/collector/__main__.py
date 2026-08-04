@@ -81,7 +81,8 @@ def _detail_split(name: str) -> SourceSplit:
     Поэтому весь про-поток отдаётся OpenDota, а stratz-timeline-pro не
     запускается вовсе (см. dev-recover.sh).
     """
-    if name.endswith("-pro") or not os.getenv("STRATZ_API_TOKEN"):
+    if (name.endswith("-pro") or name == "opendota-league"
+            or not os.getenv("STRATZ_API_TOKEN")):
         return SourceSplit()
     return SourceSplit(split_id=1 if name.startswith("stratz") else 0,
                        count=2)
@@ -105,14 +106,16 @@ def build_source(name: str):
             api_key=api_key,
             shard=shard,
         )
-    if name in ("opendota-timeline", "opendota-timeline-pro"):
+    if name in ("opendota-timeline", "opendota-timeline-pro",
+                "opendota-league"):
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
         detail_budget = os.getenv("TIMELINE_DETAIL_BUDGET")
         return OpenDotaTimelineSource(
             limit_per_cycle=int(os.getenv("TIMELINE_LIMIT", "30")),
             min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
             min_patch=int(min_patch) if min_patch else None,
-            mode="pro" if name.endswith("-pro") else "public",
+            mode=("league" if name == "opendota-league"
+                  else "pro" if name.endswith("-pro") else "public"),
             api_key=api_key,
             detail_budget=int(detail_budget) if detail_budget else None,
             shard=shard,
@@ -162,6 +165,7 @@ def main() -> None:
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
                         choices=["fixture", "opendota", "opendota-public",
                                  "opendota-timeline", "opendota-timeline-pro",
+                                 "opendota-league",
                                  "stratz-timeline", "stratz-timeline-pro"])
     parser.add_argument("--interval", type=int,
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
@@ -170,13 +174,15 @@ def main() -> None:
     args = parser.parse_args()
 
     source = build_source(args.source)
-    if args.source.startswith(("opendota-timeline", "stratz-timeline")):
+    if args.source.startswith(("opendota-timeline", "opendota-league",
+                               "stratz-timeline")):
         # JSON-путь: без S3/Kafka — витрина пишется напрямую.
         from .timeline_runner import TimelineCollector, TimelineConfig
         collector = TimelineCollector(TimelineConfig(), source)
         default_metrics_port = {
             "opendota-timeline": "9108",
             "opendota-timeline-pro": "9110",
+            "opendota-league": "9117",
             "stratz-timeline": "9115",
             "stratz-timeline-pro": "9116",
         }[args.source]

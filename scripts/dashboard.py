@@ -648,12 +648,20 @@ function tile(t) {
 async function refresh() {
   let data;
   try {
-    data = await (await fetch("/api/metrics", {cache: "no-store"})).json();
+    // Проверяем resp.ok ОТДЕЛЬНО от сети. Без этого 500 от сервера и
+    // оборванное соединение давали одну и ту же надпись «нет связи», и
+    // отличить «сервер упал» от «порт не проброшен из WSL» было нечем
+    // (инцидент 2026-08-04: endpoint отвечал 200 за 0.04с через curl, а
+    // страница показывала «нет связи» — причина была НЕ в сервере).
+    const resp = await fetch("/api/metrics", {cache: "no-store"});
+    if (!resp.ok) throw new Error("HTTP " + resp.status + " " + resp.statusText);
+    data = await resp.json();
     document.getElementById("conn").textContent = "обновлено";
     document.body.classList.remove("disconnected");
   } catch (e) {
-    document.getElementById("conn").textContent = "нет связи с дашбордом";
+    document.getElementById("conn").textContent = "нет данных: " + e.message;
     document.body.classList.add("disconnected");
+    console.error("[manta] /api/metrics:", e);
     return;
   }
   const T = data.tiles, H = data.history;
@@ -838,8 +846,16 @@ function renderTraining(t) {
 async function pollTraining() {
   try {
     const r = await fetch("/api/training");
+    if (!r.ok) throw new Error("HTTP " + r.status + " " + r.statusText);
     renderTraining(await r.json());
-  } catch (e) { /* панель перезапускается — молча ждём */ }
+  } catch (e) {
+    // МОЛЧА ГЛОТАТЬ НЕЛЬЗЯ. Раздел оставался на «загрузка…» бесконечно,
+    // и отличить «сервер ещё поднимается» от «эндпоинт падает» было
+    // невозможно: одинаковый экран у временного и постоянного отказа.
+    document.getElementById("tr-head").textContent =
+      "раздел недоступен: " + e.message;
+    console.error("[manta] /api/training:", e);
+  }
 }
 
 pollTraining();
