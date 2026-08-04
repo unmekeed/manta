@@ -200,15 +200,13 @@ if [ -n "${STRATZ_API_TOKEN:-}" ]; then
         skip "stratz-collector"
     fi
 
-    if ! pgrep -f "collector --source stratz-timeline-pro" >/dev/null; then
-        say "запускаю stratz-pro-collector (лог: $LOG_DIR/stratz-pro.log)"
-        (cd apps/data-collector && STRATZ_LIMIT="${STRATZ_PRO_LIMIT:-10}" METRICS_PORT=9116 PYTHONPATH=src:$ROOT/libs \
-            nohup python3 -u -m collector --source stratz-timeline-pro \
-                --interval "${STRATZ_PRO_INTERVAL:-3600}" \
-                >"$LOG_DIR/stratz-pro.log" 2>&1 &)
-    else
-        skip "stratz-pro-collector"
-    fi
+    # stratz-timeline-pro НЕ ЗАПУСКАЕТСЯ (спринт 93). Про-матчи —
+    # дефицит и одновременно эталон гейта, а окно /proMatches меньше,
+    # чем мы способны обработать: цикл стабильно давал «собрано 0 из
+    # 1000 (дубликат: 238)», то есть источник тратил квоту впустую и
+    # при этом забирал половину дефицитного потока у OpenDota, который
+    # умеет трек F и networth_total. Весь про-поток теперь идёт через
+    # opendota-timeline-pro (см. _detail_split в collector/__main__.py).
 else
     printf '   stratz-collector — STRATZ_API_TOKEN не задан, пропуск\n'
 fi
@@ -324,7 +322,6 @@ check pro-timeline "collector --source opendota-timeline-pro"
 check pro-replay "collector --source opendota --interval"
 if [ -n "${STRATZ_API_TOKEN:-}" ]; then
     check stratz-coll. "collector --source stratz-timeline --interval"
-    check stratz-pro "collector --source stratz-timeline-pro"
 fi
 check ml-service "python3 -u -m app"
 check similarity "python3 -u -m serve$"

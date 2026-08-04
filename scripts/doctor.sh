@@ -142,7 +142,9 @@ proc pro-replay       "collector --source opendota --interval"
 # отмечать их DOWN было бы ложной тревогой.
 if [ -n "${STRATZ_API_TOKEN:-}" ]; then
     proc stratz-coll. "collector --source stratz-timeline --interval"
-    proc stratz-pro   "collector --source stratz-timeline-pro"
+    # stratz-timeline-pro намеренно не запускается со спринта 93 — весь
+    # про-поток идёт через opendota-timeline-pro. Проверять его здесь
+    # значило бы каждый раз поднимать ложную тревогу.
 fi
 proc parser-svc       "^/tmp/parser-svc"
 proc feature-extractor "python3 -u -m extractor"

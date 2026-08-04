@@ -95,8 +95,20 @@ def test_sources_get_opposite_shares_when_stratz_on():
     assert not any(od.accepts(m) and st.accepts(m) for m in IDS)
 
 
-def test_pro_sources_split_too():
-    """У pro-путей тот же листинг /proMatches и та же гонка."""
+def test_pro_sources_do_not_split():
+    """Про-матчи НЕ делятся (спринт 93), хотя листинг тот же.
+
+    Деление оправдано, когда кандидатов больше, чем мы успеваем
+    обработать. У /proMatches наоборот: окно меньше нашей пропускной
+    способности, и цикл stratz-pro стабильно давал «собрано 0 из 1000
+    (дубликат: 238)» — половина дефицитного потока уходила источнику,
+    который не умеет ни трек F, ни networth_total.
+
+    Цена ошибки здесь выше обычной: про-матчи — ЭТАЛОН гейта. Пока он
+    не растёт, каждое переобучение сравнивается со всё более старой
+    выборкой, и кандидаты деградируют (наблюдалось 2026-08-04: пять
+    отклонений подряд, эталон 0.1739 → 0.1910 при росте датасета на 44%).
+    """
     od = _split_for("opendota-timeline-pro", "t")
-    st = _split_for("stratz-timeline-pro", "t")
-    assert od.split_id != st.split_id
+    assert od.count == 1
+    assert all(od.accepts(m) for m in IDS)

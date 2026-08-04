@@ -179,6 +179,8 @@ fi
 # ── 3. Логи коллекторов ──────────────────────────────────────────────────────
 if want rate || want logs; then
 hdr "ЛОГИ КОЛЛЕКТОРОВ ($LOG_DIR)"
+# stratz-pro.log читаем, хотя источник со спринта 93 не запускается:
+# в нём осталась история, по которой видно, когда и почему он встал.
 for f in stratz stratz-pro timeline timeline-pro collector pro-collector; do
     p="$LOG_DIR/$f.log"
     [ -f "$p" ] || { printf '\n   %-14s лога нет (коллектор ни разу не запускался)\n' "$f"; continue; }
@@ -240,7 +242,6 @@ check() {  # имя, шаблон pgrep, порт метрик
     fi
 }
 check stratz       "collector --source stratz-timeline --interval"     9115
-check stratz-pro   "collector --source stratz-timeline-pro"            9116
 check od-timeline  "collector --source opendota-timeline --interval"   9108
 check od-pro       "collector --source opendota-timeline-pro"          9110
 check od-public    "collector --source opendota-public"                9105
