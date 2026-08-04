@@ -41,7 +41,8 @@ PG_DB="${POSTGRES_DB:-manta}"
 # значит потерять всю историю карт при переносе на другую машину — и
 # заметить это только тогда, когда карту попросят построить.
 REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures
-                  MatchDraft MatchEvents MatchFights MatchMapCells)
+                  MatchDraft MatchEvents MatchFights MatchMapCells
+                  MatchHeroTimings)
 RAW_TABLES=(EconomyTimeline PositionSnapshots)
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }

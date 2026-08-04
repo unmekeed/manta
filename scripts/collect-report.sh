@@ -303,7 +303,7 @@ ch "SELECT uniqExact(match_id) AS with_signals
      FORMAT TabSeparated" | sed 's/^/   /'
 
 hdr "СОПУТСТВУЮЩИЕ ТАБЛИЦЫ"
-for t in MatchDraft MatchEvents MatchFights MatchMapCells ReplayEvents PositionSnapshots EconomyTimeline; do
+for t in MatchDraft MatchEvents MatchFights MatchMapCells MatchHeroTimings ReplayEvents PositionSnapshots EconomyTimeline; do
     n=$(ch "SELECT uniqExact(match_id) FROM $t FORMAT TabSeparated" 2>/dev/null)
     mt=$(ch "SELECT ifNull(toString(max(modification_time)), '-') FROM system.parts
               WHERE database = '$CH_DB' AND table = '$t' AND active

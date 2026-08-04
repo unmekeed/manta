@@ -23,6 +23,7 @@ from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
 from .fights import detect_fights
 from .mapcells import build_cells
+from .timings import build_timings
 from .pseudonym import apply as pseudonymize
 
 logger = logging.getLogger("extractor")
@@ -176,21 +177,43 @@ class Extractor:
         # Тепловые карты — по той же причине и в том же месте: сырьё
         # истекает по TTL, агрегат живёт. Отдельным запросом, потому что
         # kills выше берёт только смерти героев без координат.
+        # Одним запросом на два агрегата: DAMAGE/HEAL намеренно НЕ берём —
+        # их десятки тысяч на матч, а ни карте, ни таймингам они не нужны.
+        raw_events = []
         try:
-            map_events = self.ch.select(
-                "SELECT game_time, event_type, x, y, attacker, target"
+            raw_events = self.ch.select(
+                "SELECT game_time, event_type, x, y,"
+                "       attacker, target, inflictor"
                 "  FROM ReplayEvents"
                 " WHERE match_id = {match_id:UInt64}"
-                "   AND event_type IN ('KILL', 'WARD_PLACE', 'SMOKE')"
+                "   AND event_type IN ('KILL', 'WARD_PLACE', 'SMOKE',"
+                "                      'ITEM_PURCHASE', 'ABILITY_CAST',"
+                "                      'BUYBACK')"
                 " ORDER BY game_time",
                 {"match_id": match_id})
-            crows = build_cells(positions, map_events, frows,
+        except Exception:  # noqa: BLE001
+            logger.warning("матч %s: события реплея не прочитаны", match_id,
+                        exc_info=True)
+
+        try:
+            crows = build_cells(positions, raw_events, frows,
                                 roster.hero_team)
             for r in crows:
                 r["match_id"] = match_id
             self.ch.insert_rows("MatchMapCells", crows)
         except Exception:  # noqa: BLE001
             logger.warning("матч %s: карты не сохранены", match_id,
+                        exc_info=True)
+
+        # Тайминги предметов и способностей: до спринта 99 эти события
+        # писались и умирали по TTL непрочитанными.
+        try:
+            hrows = build_timings(raw_events, roster.hero_team)
+            for r in hrows:
+                r["match_id"] = match_id
+            self.ch.insert_rows("MatchHeroTimings", hrows)
+        except Exception:  # noqa: BLE001
+            logger.warning("матч %s: тайминги не сохранены", match_id,
                         exc_info=True)
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)
