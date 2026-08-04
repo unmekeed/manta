@@ -142,6 +142,12 @@ def build_source(name: str):
             # несколько циклов вместо вечного отказа (спринт 87).
             retry_attempts=int(os.getenv("STRATZ_RETRY_ATTEMPTS", "3")),
             detail_budget=int(stratz_budget) if stratz_budget else None,
+            # Отступ от вершины листинга: STRATZ отстаёт от OpenDota, и
+            # без него 87 вызовов из 100 уходили на матчи, которых у
+            # него ещё нет (спринт 95). Для pro не нужен: лиговые матчи
+            # STRATZ разбирает сразу, а кандидатов там и так дефицит.
+            skip_freshest=0 if name.endswith("-pro") else
+                          int(os.getenv("STRATZ_SKIP_FRESHEST", "150")),
         )
     raise ValueError(f"unknown source {name!r}")
 

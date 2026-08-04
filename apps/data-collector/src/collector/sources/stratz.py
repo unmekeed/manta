@@ -343,7 +343,8 @@ class StratzTimelineSource:
                  shard: Shard | None = None,
                  split: SourceSplit | None = None,
                  retry_attempts: int = 3,
-                 detail_budget: int | None = None) -> None:
+                 detail_budget: int | None = None,
+                 skip_freshest: int = 0) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -386,6 +387,8 @@ class StratzTimelineSource:
         # считает только УСПЕХИ, а вызов тратится и на промах: когда
         # промахов много, цикл мог перебрать все 1000 кандидатов.
         self._detail_budget = detail_budget or 4 * limit_per_cycle
+        # Сколько самых свежих кандидатов пропустить (см. _candidates).
+        self._skip_freshest = skip_freshest
         # Справочник патчей OpenDota [(дата, id)]; читается лениво.
         self._patches: list[tuple[int, int]] = []
         self._patch_map_at = -PATCH_MAP_RETRY_S
@@ -460,6 +463,24 @@ class StratzTimelineSource:
     def _candidates(self, max_pages: int = 10) -> Iterable[int]:
         """match_id из листинга OpenDota, с пагинацией вглубь.
 
+        ОТСТУП ОТ ВЕРШИНЫ (спринт 95). Листинг отдаёт матчи, которые
+        распарсил OpenDota, а детали мы просим у STRATZ — и он отстаёт.
+        Матч с вершины листинга у STRATZ обычно ещё без поминутных
+        рядов, вызов уходит впустую, и матч откладывается до следующего
+        цикла. В логе это выглядело так:
+
+            собрано 1 из 421 кандидатов, вызовов 100
+            (… ждут парсинга: 87, бюджет вызовов: 1)
+
+        Восемьдесят семь вызовов из ста — по матчам, которых у STRATZ
+        ещё нет. Бюджет цикла выгорал на них, и до готовых кандидатов
+        очередь просто не доходила: один собранный матч за цикл при
+        лимите 25 и целой квоте (13834 из 15000 на сутки).
+        Пропуская N самых свежих, мы попадаем в матчи, которые STRATZ
+        успел обработать. Ничего не теряется: листинг — движущееся
+        окно, и пропущенный сейчас матч опустится ниже отступа к
+        следующему циклу.
+
         Одной страницы (100 записей) не хватает: шард машины делит их
         пополам, SourceSplit со STRATZ — ещё пополам, и после дедупа от
         сотни остаются единицы. Именно поэтому цикл собирал 4–13 матчей
@@ -470,6 +491,7 @@ class StratzTimelineSource:
         """
         cursor: int | None = None
         seen: set[int] = set()
+        skipped = 0
         for _ in range(max_pages):
             params = {}
             if cursor:
@@ -487,6 +509,10 @@ class StratzTimelineSource:
                     continue          # страница повторяет уже выданное
                 seen.add(cursor)
                 fresh += 1
+                if skipped < self._skip_freshest:
+                    # Самые свежие кандидаты пропускаются НАМЕРЕННО.
+                    skipped += 1
+                    continue
                 yield cursor
             # Страница не дала ни одного нового id — значит API не понял
             # less_than_match_id и отдаёт одно и то же. Дальше листать

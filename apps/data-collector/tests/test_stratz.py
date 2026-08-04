@@ -643,3 +643,55 @@ def test_collected_match_carries_rank(monkeypatch):
     src = make_source(monkeypatch, {41: _match(41)}, [41])
     got = list(src.fetch_new())
     assert got[0].avg_rank == 80
+
+
+# -- отступ от вершины листинга (спринт 95) -----------------------------------
+
+def _listing_source(monkeypatch, ids, skip):
+    src = StratzTimelineSource(token="t", api_delay_s=0, skip_freshest=skip)
+    pages = [ids[i:i + 100] for i in range(0, len(ids), 100)] or [[]]
+    calls = {"n": 0}
+
+    def fake_od(path, **kw):
+        i = calls["n"]
+        calls["n"] += 1
+        return [{"match_id": m} for m in (pages[i] if i < len(pages) else [])]
+
+    monkeypatch.setattr(src, "_opendota", fake_od)
+    return src
+
+
+def test_skip_freshest_drops_top_of_listing(monkeypatch):
+    """Матч с вершины листинга у STRATZ обычно ещё без поминутных рядов:
+    вызов уходит впустую, и бюджет цикла выгорает на матчах, которых у
+    него нет. В логе 2026-08-04 — «собрано 1 из 421 кандидатов, вызовов
+    100, ждут парсинга: 87»."""
+    ids = list(range(9000, 8800, -1))          # 200 штук, новые первыми
+    src = _listing_source(monkeypatch, ids, skip=150)
+    got = list(src._candidates())
+    assert got == ids[150:]
+
+
+def test_skip_zero_keeps_old_behaviour(monkeypatch):
+    ids = list(range(9000, 8900, -1))
+    src = _listing_source(monkeypatch, ids, skip=0)
+    assert list(src._candidates()) == ids
+
+
+def test_skip_larger_than_listing_yields_nothing(monkeypatch):
+    """Отступ больше листинга не должен ронять цикл — просто пустой
+    проход, следующий цикл возьмёт своё."""
+    ids = list(range(9000, 8950, -1))
+    src = _listing_source(monkeypatch, ids, skip=500)
+    assert list(src._candidates()) == []
+
+
+def test_skip_counts_across_pages(monkeypatch):
+    """Отступ считается по всему листингу, а не по каждой странице:
+    иначе с пагинацией он резал бы вершину каждой страницы, а не одну
+    вершину окна."""
+    ids = list(range(9000, 8700, -1))          # три страницы
+    src = _listing_source(monkeypatch, ids, skip=120)
+    got = list(src._candidates())
+    assert got[0] == ids[120]
+    assert len(got) == len(ids) - 120
