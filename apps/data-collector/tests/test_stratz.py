@@ -18,7 +18,7 @@ from collector.sources.stratz import (GAME_MODE_NAMES,  # noqa: E402
                                       LOBBY_NAMES, StratzError,
                                       StratzTimelineSource, cumulative,
                                       enum_id, match_passes, parse_patch_dates,
-                                      patch_at, timeline_rows)
+                                      patch_at, stratz_rank, timeline_rows)
 
 
 def _match(mid=7000000000, minutes=4, win=True):
@@ -29,6 +29,7 @@ def _match(mid=7000000000, minutes=4, win=True):
         "gameMode": 1,
         "lobbyType": 7,
         "startDateTime": 1785000000,
+        "rank": 80,
         "radiantNetworthLeads": [0, 100, 250, 400][:minutes],
         "radiantExperienceLeads": [0, 80, 200, 350][:minutes],
         "radiantKills": [0, 1, 2, 0][:minutes],
@@ -576,3 +577,69 @@ def test_collected_match_carries_patch(monkeypatch):
     src = make_source(monkeypatch, {31: _match(31)}, [31])
     got = list(src.fetch_new())
     assert got[0].patch == 60
+
+
+# -- ранговый фильтр (спринт 94) ----------------------------------------------
+
+def test_rank_reads_full_scale_not_bracket():
+    """Из четырёх полей-кандидатов годится `rank`: `averageRank` на живых
+    матчах пуст, а `bracket` — это rank // 10, то есть тир без звезды.
+    По bracket порог 80 превратился бы в «тир 8», и Divine 5 (75) прошёл
+    бы наравне с Immortal."""
+    assert stratz_rank({"rank": 80, "bracket": 8}) == 80
+    assert stratz_rank({"rank": 64}) == 64
+
+
+def test_rank_falls_back_and_defaults_to_zero():
+    assert stratz_rank({"rank": None, "actualRank": 71}) == 71
+    assert stratz_rank({"rank": None, "actualRank": None}) == 0
+    assert stratz_rank({}) == 0
+    assert stratz_rank({"rank": "не число"}) == 0
+
+
+def test_low_rank_match_is_rejected():
+    """Замер 2026-08-04: из четырёх свежесобранных матчей два оказались
+    rank 44 (Legend 4) и 64 (Ancient 4) — под ярлыком tier='Premium',
+    который у OpenDota означает 80+. Половина «высокоранговой» выборки
+    высокоранговой не была."""
+    low = _match(); low["rank"] = 44
+    assert match_passes(low, 900, None, min_rank=80) == (False, "low-rank")
+    mid = _match(); mid["rank"] = 64
+    assert match_passes(mid, 900, None, min_rank=80) == (False, "low-rank")
+
+
+def test_high_rank_match_passes():
+    high = _match(); high["rank"] = 80
+    assert match_passes(high, 900, None, min_rank=80)[0]
+
+
+def test_unknown_rank_is_rejected_like_opendota():
+    """OpenDota отбрасывает матч, когда рангов меньше пяти
+    («ranks-unknown»). Взять такой матч «на всякий случай» значило бы
+    вернуть ту же смесь популяций, ради устранения которой фильтр и
+    вводится."""
+    unknown = _match(); unknown["rank"] = None
+    assert match_passes(unknown, 900, None, min_rank=80) == (False,
+                                                            "rank-unknown")
+
+
+def test_rank_filter_off_by_default():
+    """min_rank=0 отключает проверку: про-режим и старые конфигурации не
+    должны внезапно потерять весь приток."""
+    low = _match(); low["rank"] = 20
+    assert match_passes(low, 900, None, min_rank=0)[0]
+
+
+def test_pro_mode_ignores_rank():
+    """У про-игроков ранг скрыт или не показателен — на эталонной
+    выборке фильтр отсёк бы всё."""
+    pro = _match(); pro["lobbyType"] = 2; pro["rank"] = None
+    assert match_passes(pro, 900, None, pro=True, min_rank=80)[0]
+
+
+def test_collected_match_carries_rank(monkeypatch):
+    """Сквозняк: ранг доезжает до TimelineMatch, иначе колонка витрины
+    осталась бы нулевой и проверить популяцию было бы нечем."""
+    src = make_source(monkeypatch, {41: _match(41)}, [41])
+    got = list(src.fetch_new())
+    assert got[0].avg_rank == 80

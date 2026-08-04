@@ -68,6 +68,29 @@ def main() -> int:
         if int(u15) > 0:
             print(f"  ⚠ {u15} коротких матчей (ранние сдачи искажают экономику)")
 
+    # Ярлык tier до спринта 94 означал РАЗНОЕ у разных источников:
+    # OpenDota отсекал матчи ниже OPENDOTA_MIN_RANK, STRATZ не проверял
+    # ранг вовсе. Проявлялось это только косвенно — расхождением Radiant
+    # WR внутри одного tier, то есть догадкой. Здесь популяция видна
+    # прямо; 0 — ранг неизвестен (строки, собранные до колонки avg_rank).
+    print("\nСредний ранг матча по источникам (Premium; 80 = Immortal):")
+    rows = q("SELECT feature_version,"
+             "       countIf(avg_rank = 0) AS unknown,"
+             "       countIf(avg_rank > 0 AND avg_rank < 80) AS below,"
+             "       countIf(avg_rank >= 80) AS good,"
+             "       round(avgIf(avg_rank, avg_rank > 0), 1) AS mean"
+             "  FROM (SELECT DISTINCT match_id, feature_version, avg_rank"
+             "          FROM MatchTimelineFeatures FINAL WHERE tier = 'Premium')"
+             " GROUP BY feature_version ORDER BY unknown + below + good DESC")
+    if not rows:
+        print("  (нет данных)")
+    for fv, unknown, below, good, mean in rows:
+        flag = "  ⚠ ниже порога" if int(below or 0) else ""
+        print(f"  {fv:<22} ниже 80: {below:>5}   80+: {good:>5}   "
+              f"неизвестен: {unknown:>5}   средний {mean}{flag}")
+    print("    avg_rank=0 — матчи, собранные до спринта 94: по ним популяцию")
+    print("    не проверить, смотреть надо на приток последних суток")
+
     print("\nДубликаты match_id между tier:")
     rows = q("SELECT count() FROM (SELECT match_id FROM MatchTimelineFeatures"
              " GROUP BY match_id HAVING countDistinct(tier) > 1)")

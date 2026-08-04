@@ -48,6 +48,10 @@ class TimelineMatch:
     rows: list[dict] = field(default_factory=list)   # схема MTF
     source_cursor: str = ""
     patch: int = 0            # id патча OpenDota; 0 — неизвестен (A9)
+    # Средний ранг матча в шкале rank_tier (тир×10 + звезда); 0 —
+    # неизвестен. Нужен, чтобы «Premium» означало одну популяцию у всех
+    # источников, а не только у того, который умеет фильтровать.
+    avg_rank: int = 0
     raw: dict = field(default_factory=dict)  # исходный JSON матча (трек F)
 
 
@@ -135,6 +139,18 @@ def timeline_rows(m: dict) -> list[dict]:
     return rows
 
 
+def avg_rank(m: dict) -> int:
+    """Средний rank_tier матча (тир×10 + звезда); 0 — неизвестен.
+
+    Ранг известен не у всех: часть игроков скрывает профиль. Меньше
+    пяти известных рангов — среднее считать не по чему, и это честнее
+    отдать нулём, чем усреднить по одному игроку.
+    """
+    ranks = [int(p["rank_tier"]) for p in (m.get("players") or [])
+             if p.get("rank_tier")]
+    return int(sum(ranks) / len(ranks)) if len(ranks) >= 5 else 0
+
+
 def match_passes(m: dict, min_rank: int, min_duration_s: int,
                  min_patch: int | None, pro: bool = False) -> tuple[bool, str]:
     """Фильтр качества.
@@ -154,11 +170,9 @@ def match_passes(m: dict, min_rank: int, min_duration_s: int,
     if min_patch is not None and int(m.get("patch") or 0) < min_patch:
         return False, "old-patch"
     if not pro:
-        ranks = [p["rank_tier"] for p in (m.get("players") or [])
-                 if p.get("rank_tier")]
-        if len(ranks) < 5:
+        if avg_rank(m) == 0:
             return False, "ranks-unknown"
-        if sum(ranks) / len(ranks) < min_rank:
+        if avg_rank(m) < min_rank:
             return False, "low-rank"
     if not (m.get("radiant_gold_adv") and m.get("radiant_xp_adv")):
         return False, "no-timeline"
@@ -298,6 +312,7 @@ class OpenDotaTimelineSource:
                 yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
                                     source_cursor=str(mid),
                                     patch=int(m.get("patch") or 0),
+                                    avg_rank=avg_rank(m),
                                     raw=m)
                 if yielded >= self._limit:
                     return

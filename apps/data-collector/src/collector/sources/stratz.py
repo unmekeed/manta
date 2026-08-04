@@ -156,6 +156,7 @@ MATCH_FIELDS = """
     gameMode
     lobbyType
     startDateTime
+    rank
     radiantNetworthLeads
     radiantExperienceLeads
     radiantKills
@@ -249,13 +250,46 @@ def timeline_rows(m: dict, kills_cumulative: bool = False) -> list[dict]:
     return rows
 
 
+def stratz_rank(m: dict) -> int:
+    """Средний ранг матча у STRATZ в шкале rank_tier; 0 — неизвестен.
+
+    Полей-кандидатов в схеме четыре, и они не равноценны: `averageRank`
+    на живых матчах приходит пустым, `bracket` — это всего лишь
+    rank // 10 (тир без звезды, потеря точности), а `rank` и
+    `actualRank` совпадают и дают полную шкалу. Берём `rank`,
+    `actualRank` — запасной.
+    """
+    for key in ("rank", "actualRank"):
+        val = m.get(key)
+        if val is None:
+            continue
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return 0
+
+
 def match_passes(m: dict, min_duration_s: int, min_patch: int | None,
-                 pro: bool = False, patch: int = 0) -> tuple[bool, str]:
+                 pro: bool = False, patch: int = 0,
+                 min_rank: int = 0) -> tuple[bool, str]:
     """Фильтр качества — та же популяция, что у JSON-источника OpenDota.
 
-    Ранг не проверяется: у STRATZ он лежит в другом поле и не всегда
-    заполнен, а кандидатов мы берём из /parsedMatches (public) уже после
-    рангового фильтра либо из /proMatches (pro), где ранг не применим.
+    РАНГ. Раньше здесь стояло «ранг не проверяется, кандидаты и так из
+    /parsedMatches после рангового фильтра». Это было неверно: OpenDota
+    фильтрует по рангу не листинг, а ДЕТАЛИ матча (см. match_passes в
+    opendota_timeline), и STRATZ, беря тот же листинг, забирал матчи
+    любого ранга под тем же ярлыком tier='Premium'. Замер 2026-08-04:
+    из четырёх свежесобранных матчей два оказались rank 44 (Legend 4) и
+    64 (Ancient 4) — их порог 80 отсёк бы. Половина «высокоранговой»
+    выборки была не высокоранговой, и модель училась на популяции, не
+    похожей на про-эталон, по которому её судят.
+
+    Шкала `rank` у STRATZ совпадает с rank_tier OpenDota (тир×10 +
+    звезда), проверено интроспекцией и живыми матчами. min_rank=0
+    отключает проверку.
 
     patch — УЖЕ переведённый id OpenDota (см. patch_at). Раньше здесь
     стоял сырой gameVersionId STRATZ, то есть номер из чужой нумерации
@@ -272,6 +306,16 @@ def match_passes(m: dict, min_duration_s: int, min_patch: int | None,
         return False, "short"
     if min_patch is not None and patch < min_patch:
         return False, "old-patch"
+    if not pro and min_rank:
+        rank = stratz_rank(m)
+        if rank == 0:
+            # Неизвестный ранг отбрасываем так же, как OpenDota
+            # ("ranks-unknown"): взять матч «на всякий случай» значило бы
+            # вернуть ровно ту смесь популяций, ради устранения которой
+            # фильтр и вводится. Счётчик причины виден в логе цикла.
+            return False, "rank-unknown"
+        if rank < min_rank:
+            return False, "low-rank"
     if not (m.get("radiantNetworthLeads") and m.get("radiantExperienceLeads")):
         return False, "no-timeline"
     return True, "ok"
@@ -290,6 +334,7 @@ class StratzTimelineSource:
 
     def __init__(self, token: str, limit_per_cycle: int = 40,
                  min_duration_s: int = 900, min_patch: int | None = None,
+                 min_rank: int = 0,
                  timeout: float = 30.0, api_delay_s: float = 0.6,
                  mode: str = "public",
                  opendota_base: str = "https://api.opendota.com/api",
@@ -312,6 +357,7 @@ class StratzTimelineSource:
         self._limit = limit_per_cycle
         self._min_duration_s = min_duration_s
         self._min_patch = min_patch
+        self._min_rank = min_rank
         self._timeout = timeout
         # 250 запросов/мин у Default-токена. Пауза 0.6с даёт ~100/мин на
         # источник — и это важно: public и pro работают ОДНОВРЕМЕННО и
@@ -558,7 +604,8 @@ class StratzTimelineSource:
                 patch = self._patch_of(m)
                 ok, why = match_passes(m, self._min_duration_s,
                                        self._min_patch,
-                                       pro=(self._mode == "pro"), patch=patch)
+                                       pro=(self._mode == "pro"), patch=patch,
+                                       min_rank=self._min_rank)
                 if not ok:
                     if why == "no-timeline":
                         # Матч у STRATZ есть, а поминутных рядов ещё нет —
@@ -581,5 +628,6 @@ class StratzTimelineSource:
                 continue
             yielded += 1
             yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
-                                source_cursor=str(mid), patch=patch, raw={})
+                                source_cursor=str(mid), patch=patch,
+                                avg_rank=stratz_rank(m), raw={})
         report()

@@ -128,6 +128,11 @@ def build_source(name: str):
             token=os.getenv("STRATZ_API_TOKEN", ""),
             limit_per_cycle=int(os.getenv("STRATZ_LIMIT", "40")),
             min_patch=int(min_patch) if min_patch else None,
+            # Тот же порог, что у JSON-источника OpenDota: без него
+            # ярлык tier='Premium' означал у двух источников разные
+            # популяции (спринт 94).
+            min_rank=int(os.getenv("STRATZ_MIN_RANK",
+                                   os.getenv("OPENDOTA_MIN_RANK", "80"))),
             mode="pro" if name.endswith("-pro") else "public",
             opendota_key=api_key,
             kills_cumulative=os.getenv("STRATZ_KILLS_CUMULATIVE") == "1",
