@@ -321,10 +321,17 @@ fi
 # любое число git pull. Инцидент 2026-08-04: фиксы спринтов 92 и 96 не
 # доехали до страницы вовсе, а на экране висела надпись из версии
 # двухдневной давности. Поэтому здесь — сверка кода с процессом.
-dash_pid=$(pgrep -f "scripts/dashboard.py" | head -1)
+# `|| true` обязателен: pgrep без совпадений возвращает 1, а скрипт идёт
+# под `set -e` — и recover падал ровно в том случае, ради которого этот
+# блок писался (дашборд убит вручную перед обновлением). Инцидент
+# 2026-08-04, внесён и исправлен в один день.
+dash_pid=$(pgrep -f "scripts/dashboard.py" | head -1 || true)
 if [ -n "$dash_pid" ]; then
-    started=$(( $(date +%s) - $(ps -o etimes= -p "$dash_pid" 2>/dev/null \
-                                | tr -d ' ' || echo 0) ))
+    dash_age=$(ps -o etimes= -p "$dash_pid" 2>/dev/null | tr -d ' ' || true)
+    # Процесс мог исчезнуть между pgrep и ps: пустой возраст means «не
+    # знаем», и тогда считаем код новее — перезапуск дешевле, чем ещё
+    # один день на устаревшей версии.
+    started=$(( $(date +%s) - ${dash_age:-0} ))
     if [ "$(stat -c %Y scripts/dashboard.py)" -gt "$started" ]; then
         if [ -n "${MANTA_DASHBOARD_JOB:-}" ]; then
             # recover запущен кнопкой САМОГО дашборда: убить его сейчас

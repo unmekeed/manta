@@ -105,3 +105,38 @@ def test_dashboard_marks_its_own_jobs():
            ).read_text(encoding="utf-8")
     assert 'MANTA_DASHBOARD_JOB": "1"' in src
     assert "env=job_env" in src
+
+
+def test_dashboard_probe_survives_missing_process():
+    """Строка поиска дашборда обязана переживать ОТСУТСТВИЕ процесса.
+
+    dev-recover.sh идёт под `set -euo pipefail`, а pgrep без совпадений
+    возвращает 1 — то есть присваивание `pid=$(pgrep ...)` роняет весь
+    скрипт. Инцидент 2026-08-04: recover падал ровно в том сценарии, ради
+    которого блок и писался, — когда дашборд убит вручную перед
+    обновлением.
+
+    Проверка ИСПОЛНЯЕТ строку, а не ищет в ней подстроку: `|| true`
+    можно потерять при рефакторинге, и текстовый тест это пропустил бы
+    ровно так же, как пропустил в первый раз.
+    """
+    import subprocess
+
+    import tempfile
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    line = next(l for l in src.splitlines()
+                if l.startswith("dash_pid=$(pgrep"))
+    probe = line.replace("scripts/dashboard.py", "процесса-которого-нет-9z9z")
+    # Скрипт кладём В ФАЙЛ, а не передаём через `bash -c`. Иначе шаблон
+    # попадает в командную строку самого bash, pgrep -f находит её же, и
+    # тест зеленеет при любом коде — проверено мутацией: без `|| true`
+    # вариант с `-c` тоже «проходил».
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "probe.sh"
+        f.write_text(f"set -euo pipefail\n{probe}\necho ДОШЛИ\n",
+                     encoding="utf-8")
+        r = subprocess.run(["bash", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, f"строка роняет скрипт: {r.stderr}"
+    assert "ДОШЛИ" in r.stdout
