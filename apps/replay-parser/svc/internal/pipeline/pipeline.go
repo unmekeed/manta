@@ -215,7 +215,14 @@ type coreEvent struct {
 	Target    string  `json:"target"`
 	Inflictor string  `json:"inflictor"`
 	Value     int64   `json:"value"`
+	X         float32 `json:"x"`
+	Y         float32 `json:"y"`
 }
+
+// Модификатор смоука. Отдельного типа combat log у смоука НЕТ — он
+// приходит как MODIFIER_ADD с этим именем, поэтому распознаётся по
+// строке, а не по числовому типу.
+const smokeModifier = "modifier_smoke_of_deceit"
 
 // Отображение типов combat log на Enum8 ReplayEvents; остальные типы
 // (модификаторы, золото, опыт) на слой сырых событий не пишутся — они
@@ -226,13 +233,13 @@ var eventTypeMap = map[string]string{
 	"DEATH":    "KILL",
 	"ABILITY":  "ABILITY_CAST",
 	"PURCHASE": "ITEM_PURCHASE",
-	// Трек F: бэйбек — сильный сигнал поздней игры (сторона потратила
-	// золото на выкуп). Ядро его парсило и раньше, но при записи в
-	// ClickHouse тип отбрасывался. Схема ReplayEvents перечисляет
-	// WARD_PLACE=6, свободного значения под бэйбек в Enum8 нет —
-	// пишем как ABILITY_CAST с inflictor="buyback", чтобы не менять
-	// enum миграцией (событий мало, разбор по inflictor однозначен).
-	"BUYBACK": "ABILITY_CAST",
+	// Бэйбек раньше маскировался под ABILITY_CAST с inflictor="buyback",
+	// чтобы не трогать Enum8. Маскировка стоила дороже, чем экономила:
+	// событие невозможно было ни отфильтровать запросом, ни увидеть в
+	// схеме — а в спринте 91 я на основании беглого чтения кода написал,
+	// что бэйбек до ClickHouse вовсе не доезжает. Enum расширен
+	// (миграция 019), тип теперь называется своим именем.
+	"BUYBACK": "BUYBACK",
 }
 
 const ticksPerSecond = 30
@@ -260,13 +267,22 @@ func (p *Pipeline) loadEvents(ctx context.Context, matchID uint64, path string) 
 		}
 		chType, ok := eventTypeMap[ev.Type]
 		if !ok {
-			return false, nil // тип вне схемы сырых событий — пропуск
+			// Смоук — единственный сигнал, который приходит не своим
+			// типом: у него нет записи в DOTA_COMBATLOG_TYPES, он
+			// появляется как MODIFIER_ADD с именем модификатора.
+			if ev.Type == "MODIFIER_ADD" && ev.Inflictor == smokeModifier {
+				chType = "SMOKE"
+			} else {
+				return false, nil // тип вне схемы сырых событий — пропуск
+			}
 		}
 		return true, w.Encode(row{
 			MatchID:     matchID,
 			Tick:        uint32(ev.T * ticksPerSecond),
 			GameTime:    int32(ev.T),
 			EventType:   chType,
+			X:           ev.X,
+			Y:           ev.Y,
 			ValueAmount: int32(ev.Value),
 			Inflictor:   ev.Inflictor,
 			Attacker:    ev.Attacker,

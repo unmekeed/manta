@@ -143,14 +143,21 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
                                       e.attacker_name, e.inflictor_name});
             }
             if (events_out) {
+                // x/y разбирались с самого начала (поля 21/22 combat
+                // log), но в JSONL не попадали — и колонки ReplayEvents.x/y
+                // были нулями у ВСЕХ событий за всю историю проекта.
+                // Тепловые карты смертей строить было не из чего, а по
+                // схеме казалось, что данные есть.
                 std::fprintf(events_out,
                     "{\"type\":\"%s\",\"t\":%.2f,\"attacker\":\"%s\","
                     "\"target\":\"%s\",\"inflictor\":\"%s\",\"value\":%lld,"
-                    "\"attacker_hero\":%d,\"target_hero\":%d}\n",
+                    "\"attacker_hero\":%d,\"target_hero\":%d,"
+                    "\"x\":%.1f,\"y\":%.1f}\n",
                     demo::combat_log_type_name(e.type), e.timestamp,
                     e.attacker_name.c_str(), e.target_name.c_str(),
                     e.inflictor_name.c_str(), (long long)e.value,
-                    e.is_attacker_hero ? 1 : 0, e.is_target_hero ? 1 : 0);
+                    e.is_attacker_hero ? 1 : 0, e.is_target_hero ? 1 : 0,
+                    e.location_x, e.location_y);
             }
         }
         if (probe_type != 0 && m.type == probe_type && probed < probe_limit) {
