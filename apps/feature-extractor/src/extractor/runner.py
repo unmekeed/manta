@@ -183,7 +183,7 @@ class Extractor:
         try:
             raw_events = self.ch.select(
                 "SELECT game_time, event_type, x, y,"
-                "       attacker, target, inflictor"
+                "       attacker, target, inflictor, value_amount"
                 "  FROM ReplayEvents"
                 " WHERE match_id = {match_id:UInt64}"
                 "   AND event_type IN ('KILL', 'WARD_PLACE', 'SMOKE',"

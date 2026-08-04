@@ -19,8 +19,26 @@ attacker, то в target — в зависимости от типа событ�
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from .features import _normalize_hero
 from .mapcells import phase_of
+
+# Снимок constants/items OpenDota: id → npc-имя предмета. Нужен потому,
+# что у события покупки в combat log НЕТ строкового имени — там пусто в
+# inflictor, герой в target, а сам предмет лежит числовым id в value
+# (проверено на живых данных 2026-08-04: 32 talisman_of_evasion,
+# 41 bottle, 45 courier). Первая версия спринта 99 искала имя в строках
+# и молча выбрасывала ВСЕ покупки — ровно то, ради чего спринт делался.
+_ITEM_IDS: dict[int, str] = {}
+try:
+    _raw = json.loads(
+        (Path(__file__).resolve().parents[4] / "libs" / "data"
+         / "item_ids.json").read_text(encoding="utf-8"))
+    _ITEM_IDS = {int(k): v for k, v in _raw.items()}
+except Exception:  # noqa: BLE001 — словарь опционален, id сохраним как есть
+    pass
 
 # Типы событий ReplayEvents → вид записи в MatchHeroTimings.
 KINDS = {"ITEM_PURCHASE": "item", "ABILITY_CAST": "ability",
@@ -45,16 +63,40 @@ def _actor(event: dict, hero_team: dict[str, int]) -> tuple[str, int] | None:
     return None
 
 
+def _item_name(event: dict) -> str:
+    """Имя предмета по числовому id из value.
+
+    Неизвестный id сохраняется как `item_<id>`, а не отбрасывается:
+    ценность записи — В ТАЙМИНГЕ, а не в названии. Справочник устареет
+    с новым патчем, тайминг — нет.
+    """
+    try:
+        item_id = int(event.get("value_amount") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if item_id <= 0:
+        return ""
+    return _ITEM_IDS.get(item_id, f"item_{item_id}")
+
+
 def _name_of(event: dict, kind: str, hero: str) -> str:
     """Имя предмета/способности события.
 
-    Ядро кладёт его в inflictor, но у покупок оно иногда оказывается в
-    target (там же, где у прочих событий стоит цель). Берём первое
-    непустое, отбрасывая само имя героя — иначе покупка записалась бы
-    предметом «npc_dota_hero_axe».
+    У ПОКУПКИ в живых данных строкового имени нет вовсе: inflictor пуст,
+    target — сам герой-покупатель, а предмет закодирован числом в value.
+    Поэтому у kind='item' сначала пробуется справочник id→имя.
+
+    Строковый поиск при этом СОХРАНЁН запасным путём. Спринт 99 полагался
+    только на строки и потерял все покупки; заменить его только на числа
+    значило бы поставить ту же ставку с другой стороны — а форма события
+    зависит от версии ядра-парсера, и обе формы уже встречались.
     """
     if kind == "buyback":
         return "buyback"
+    if kind == "item":
+        name = _item_name(event)
+        if name:
+            return name
     for key in ("inflictor", "target"):
         raw = str(event.get(key) or "").strip()
         if not raw or raw.startswith(UNRESOLVED_PREFIX):

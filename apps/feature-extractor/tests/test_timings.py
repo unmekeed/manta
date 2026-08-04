@@ -10,14 +10,24 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
+from extractor import timings as timings_mod  # noqa: E402
 from extractor.timings import build_timings  # noqa: E402
 
 HERO_TEAM = {"npc_dota_hero_axe": 2, "npc_dota_hero_lina": 3}
 
 
-def _ev(kind, t, attacker="", target="", inflictor=""):
+def _ev(kind, t, attacker="", target="", inflictor="", value_amount=0):
     return {"event_type": kind, "game_time": t, "attacker": attacker,
-            "target": target, "inflictor": inflictor}
+            "target": target, "inflictor": inflictor,
+            "value_amount": value_amount}
+
+
+def _buy(t, item_id, hero="npc_dota_hero_axe"):
+    """Покупка в том виде, в каком она приходит из ReplayEvents на живых
+    данных: attacker и inflictor пусты, герой в target, предмет — числом.
+    """
+    return {"event_type": "ITEM_PURCHASE", "game_time": t, "attacker": "",
+            "target": hero, "inflictor": "", "value_amount": item_id}
 
 
 def test_actor_found_in_attacker():
@@ -127,3 +137,68 @@ def test_rows_carry_no_match_id():
     rows = build_timings(
         [_ev("BUYBACK", 100, attacker="npc_dota_hero_axe")], HERO_TEAM)
     assert rows and "match_id" not in rows[0]
+
+
+# -- покупки приходят числовым id, а не строкой (спринт 103) ------------------
+
+def test_purchase_in_live_shape_is_not_dropped():
+    """Главный дефект спринта 99: у покупки НЕТ строкового имени, и вся
+    ветка молча возвращала пустую строку. За шесть часов так потерялись
+    все 10164 события ITEM_PURCHASE — ровно то, ради чего спринт делался.
+    """
+    rows = build_timings([_buy(300, 41)], HERO_TEAM)
+    assert len(rows) == 1, "покупка в живом формате снова отброшена"
+    assert rows[0]["kind"] == "item" and rows[0]["name"] == "bottle"
+    assert rows[0]["hero"] == "axe" and rows[0]["first_time"] == 300
+
+
+def test_unknown_item_id_keeps_the_timing():
+    """Справочник — снимок констант, он устареет с новым патчем. Тайминг
+    покупки ценен и без имени, поэтому неизвестный id сохраняется, а не
+    выбрасывается."""
+    rows = build_timings([_buy(420, 987654)], HERO_TEAM)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "item_987654"
+
+
+def test_purchase_without_item_id_is_skipped():
+    """Ноль/пусто в value — это не «предмет с id 0», а отсутствие данных.
+    Записать его значило бы наплодить фантомный предмет `item_0`."""
+    assert build_timings([_buy(300, 0)], HERO_TEAM) == []
+    e = _buy(300, 0)
+    del e["value_amount"]
+    assert build_timings([e], HERO_TEAM) == []
+
+
+def test_garbage_item_id_does_not_crash():
+    e = _buy(300, 0)
+    e["value_amount"] = "не число"
+    assert build_timings([e], HERO_TEAM) == []
+
+
+def test_string_item_name_still_works():
+    """Запасной путь: форма события зависит от версии ядра-парсера, и
+    строковая уже встречалась. Числовой id её вытесняет, но не отменяет.
+    """
+    rows = build_timings(
+        [_ev("ITEM_PURCHASE", 300, attacker="npc_dota_hero_axe",
+             inflictor="item_blink")], HERO_TEAM)
+    assert rows[0]["name"] == "item_blink"
+
+
+def test_item_id_wins_over_string_name():
+    """Если пришли оба, доверяем id: строку ядро иногда заполняет именем
+    героя или мусором, а id однозначен."""
+    e = _buy(300, 41)
+    e["inflictor"] = "item_blink"
+    assert build_timings([e], HERO_TEAM)[0]["name"] == "bottle"
+
+
+def test_item_dictionary_actually_loaded():
+    """Справочник читается из файла в libs/data через путь с parents[4].
+    Если файл переедет или путь съедет, except проглотит ошибку, словарь
+    останется пустым — и покупки тихо превратятся в `item_<id>`. Внешне
+    это выглядит рабочим: строки есть, агрегат заполняется.
+    """
+    assert len(timings_mod._ITEM_IDS) > 400, "справочник предметов не загружен"
+    assert timings_mod._ITEM_IDS[1] == "blink"
