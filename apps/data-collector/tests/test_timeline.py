@@ -452,3 +452,170 @@ def test_patch_floor_never_negative(monkeypatch):
     src = OpenDotaTimelineSource(api_delay_s=0)
     monkeypatch.setattr(src, "_get", lambda path, **kw: FakeResp())
     assert src._latest_patch() == 0
+
+
+# -- лог цикла называет причину отказа (спринт 104) ---------------------------
+
+class _R:
+    def __init__(self, payload):
+        self._p = payload
+
+    def json(self):
+        return self._p
+
+
+def _cycle_line(caplog):
+    """Единственная строка отчёта цикла из лога."""
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("цикл ")]
+    assert len(lines) == 1, f"ожидалась одна строка отчёта, найдено: {lines}"
+    return lines[0]
+
+
+def test_cycle_log_names_each_skip_reason(monkeypatch, caplog):
+    """Инцидент 2026-08-04: режим league отдавал «processed=0», и по этому
+    нулю нельзя было отличить «лиги не дали матчей» от «всё уже собрано»
+    от «всё отсеяно фильтром». Отказы фильтра уходили в logger.debug, а
+    отсев по шарду/доле/дедупу/кэшу не считался вовсе.
+    """
+    from collector.sources import Shard
+
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0, shard=Shard(1, 2))
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            if params.get("less_than_match_id"):
+                return _R([])
+            return _R([{"match_id": m} for m in (11, 12, 13, 15)])
+        mid = int(path.split("/")[1])
+        m = _parsed_match(mid=mid)
+        if mid == 13:                      # low-rank — отказ фильтра
+            for p in m["players"]:
+                p["rank_tier"] = 10
+        return _R(m)
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        got = [t.match_id for t in src.fetch_new(skip=lambda mid: mid == 11)]
+
+    assert got == [15]
+    line = _cycle_line(caplog)
+    assert "из 4 кандидатов" in line
+    assert "чужой шард: 1" in line          # 12 — чётный, шард 1 из 2
+    assert "дубликат: 1" in line            # 11 отсеян предикатом дедупа
+    assert "фильтр: 1" in line              # 13 — low-rank
+    assert "· low-rank: 1" in line          # и конкретная причина фильтра
+
+
+def test_league_cycle_reports_zero_leagues(monkeypatch, caplog):
+    """Ноль лиг обязан ПЕЧАТАТЬСЯ. Нулевые счётчики из отчёта убраны для
+    читаемости, и без исключения для league-ключей молчание о лигах было
+    бы неотличимо от исправной работы — та самая подмена «нет данных» на
+    «всё хорошо»."""
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0, mode="league")
+    monkeypatch.setattr(src, "_get", lambda path, **p: _R([]))
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        assert list(src.fetch_new()) == []
+    line = _cycle_line(caplog)
+    assert "лиг найдено: 0" in line
+    assert "матчей в лигах: 0" in line
+
+
+def test_league_cycle_distinguishes_empty_leagues(monkeypatch, caplog):
+    """Лиги нашлись, но матчей не отдали — другая поломка, другой ремонт."""
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0, mode="league")
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([{"match_id": 1, "leagueid": 7},
+                       {"match_id": 2, "leagueid": 8}])
+        return _R([])                      # leagues/{id}/matches — пусто
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        assert list(src.fetch_new()) == []
+    line = _cycle_line(caplog)
+    assert "лиг найдено: 2" in line
+    assert "лиг опрошено: 2" in line
+    assert "лиг пустых: 2" in line
+    assert "матчей в лигах: 0" in line
+
+
+def test_league_cycle_reports_filter_breakdown(monkeypatch, caplog):
+    """Матчи из лиг есть, но все отсеяны — видно, ЧЕМ именно."""
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0, mode="league")
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([{"match_id": 1, "leagueid": 7}])
+        if path.startswith("leagues/"):
+            return _R([{"match_id": 41}, {"match_id": 42}])
+        m = _parsed_match(mid=int(path.split("/")[1]))
+        m["patch"] = 50                    # старее планки min_patch=60
+        return _R(m)
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        assert list(src.fetch_new()) == []
+    line = _cycle_line(caplog)
+    assert "матчей в лигах: 2" in line
+    assert "· old-patch: 2" in line
+
+
+def test_report_survives_quota_abort(monkeypatch, caplog):
+    """429 обрывает цикл исключением. Это САМЫЙ частый обрыв, и молчать о
+    нём нельзя — иначе исчерпание квоты выглядит как отсутствие матчей."""
+    import requests
+
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0)
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            return _R([{"match_id": 5}])
+        resp = requests.Response()
+        resp.status_code = 429
+        raise requests.HTTPError(response=resp)
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        try:
+            list(src.fetch_new())
+        except requests.HTTPError:
+            pass
+    assert "из 1 кандидатов" in _cycle_line(caplog)
+
+
+def test_report_survives_early_stop(monkeypatch, caplog):
+    """Потребитель вправе бросить генератор, не досмотрев до конца."""
+    src = OpenDotaTimelineSource(limit_per_cycle=50, min_patch=60,
+                                 api_delay_s=0)
+
+    def fake_get(path, **params):
+        if path == "parsedMatches":
+            if params.get("less_than_match_id"):
+                return _R([])
+            return _R([{"match_id": m} for m in (9, 8, 7)])
+        return _R(_parsed_match(mid=int(path.split("/")[1])))
+
+    monkeypatch.setattr(src, "_get", fake_get)
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        gen = src.fetch_new()
+        next(gen)
+        gen.close()
+    assert "собрано 1" in _cycle_line(caplog)
+
+
+def test_public_cycle_hides_league_counters(monkeypatch, caplog):
+    """Обратная сторона исключения для нулей: в public-режиме league-ключи
+    не нужны и только зашумляют строку."""
+    src = OpenDotaTimelineSource(limit_per_cycle=5, min_patch=60,
+                                 api_delay_s=0)
+    monkeypatch.setattr(src, "_get", lambda path, **p: _R([]))
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        assert list(src.fetch_new()) == []
+    assert "лиг найдено" not in _cycle_line(caplog)

@@ -257,7 +257,7 @@ class OpenDotaTimelineSource:
                     latest, floor, lag)
         return floor
 
-    def _listing_candidates(self) -> Iterable[int]:
+    def _listing_candidates(self, stats: dict) -> Iterable[int]:
         """Кандидаты из окна свежих матчей (/parsedMatches | /proMatches).
 
         Отдаёт id по убыванию, вглубь до десяти страниц.
@@ -270,6 +270,7 @@ class OpenDotaTimelineSource:
             batch = self._get(self._candidates_path, **params).json()
             if not batch:
                 return
+            stats["страниц листинга"] += 1
             for entry in batch:
                 mid = entry.get("match_id")
                 if mid is None:
@@ -298,7 +299,7 @@ class OpenDotaTimelineSource:
             logger.info("активных лиг: %d %s", len(seen), seen[:8])
         return self._leagues
 
-    def _league_candidates(self) -> Iterable[int]:
+    def _league_candidates(self, stats: dict) -> Iterable[int]:
         """Кандидаты ИЗ ЛИГ — вглубь, а не вширь.
 
         Окно /proMatches — около тысячи последних матчей на весь мир, и
@@ -312,21 +313,30 @@ class OpenDotaTimelineSource:
         активные турниры идут первыми; дедуп по CollectedMatches сам
         отсеет уже собранное, а бюджет цикла ограничит глубину.
         """
-        for lid in self._active_leagues():
+        leagues = self._active_leagues()
+        stats["лиг найдено"] = len(leagues)
+        for lid in leagues:
             try:
                 batch = self._get(f"leagues/{lid}/matches").json() or []
             except requests.RequestException as e:
                 logger.warning("лига %s: %s — пропуск", lid, e)
+                stats["лиг сорвалось"] += 1
                 continue
+            stats["лиг опрошено"] += 1
+            if not batch:
+                # Лига без матчей в ответе — отдельная причина: она
+                # неотличима от «все матчи отсеяны» по итоговому нулю.
+                stats["лиг пустых"] += 1
             for entry in batch:
                 mid = entry.get("match_id")
                 if mid is not None:
+                    stats["матчей в лигах"] += 1
                     yield int(mid)
 
-    def _candidates(self) -> Iterable[int]:
+    def _candidates(self, stats: dict) -> Iterable[int]:
         if self._mode == "league":
-            return self._league_candidates()
-        return self._listing_candidates()
+            return self._league_candidates(stats)
+        return self._listing_candidates(stats)
 
     def fetch_new(self, after_cursor: str | None = None,
                   skip=None) -> Iterable[TimelineMatch]:
@@ -345,45 +355,97 @@ class OpenDotaTimelineSource:
             self._rejected.clear()
         yielded = 0
         details = 0
-        for mid in self._candidates():
-            if (not self._shard.accepts(mid)
-                    or not self._split.accepts(mid)
-                    or skip(mid) or mid in self._rejected):
-                continue
-            if details >= self._detail_budget:
-                logger.info("бюджет detail-вызовов цикла исчерпан "
-                            "(%d), собрано %d", details, yielded)
-                return
-            details += 1
-            try:
-                m = self._get(f"matches/{mid}").json()
-            except requests.HTTPError as e:
-                if (e.response is not None
-                        and e.response.status_code == 429):
-                    # Квота исчерпана — остальные кандидаты дадут те же
-                    # 429; обрываем цикл, не сжигая остаток лимита.
-                    raise
-                logger.warning("матч %d: %s — пропуск", mid, e)
-                continue
-            except requests.RequestException as e:
-                logger.warning("матч %d: %s — пропуск", mid, e)
-                continue
-            ok, why = match_passes(m, self._min_rank,
-                                   self._min_duration_s, self._min_patch,
-                                   pro=(self._mode != "public"))
-            if not ok:
-                logger.debug("матч %d отфильтрован: %s", mid, why)
-                self._rejected.add(mid)
-                continue
-            rows = timeline_rows(m)
-            if not rows:
-                self._rejected.add(mid)
-                continue
-            yielded += 1
-            yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
-                                source_cursor=str(mid),
-                                patch=int(m.get("patch") or 0),
-                                avg_rank=avg_rank(m),
-                                raw=m)
-            if yielded >= self._limit:
-                return
+        # Счётчики причин отсева. До спринта 104 их не было вовсе: отказы
+        # фильтра уходили в logger.debug (не виден при INFO), а отсев по
+        # шарду, доле, дедупу и кэшу не считался никак. Наружу торчал один
+        # итог «processed=0» — по нему нельзя отличить «лиги не отдали
+        # матчей» от «все матчи уже собраны» от «все отсеяны фильтром», а
+        # лечатся эти случаи по-разному. Ровно так режим league и встал
+        # 2026-08-04: четыре активных лиги найдены, собрано ноль, причина
+        # невидима.
+        stats = {"кандидатов": 0, "чужой шард": 0, "не моя доля": 0,
+                 "дубликат": 0, "кэш отказов": 0, "фильтр": 0,
+                 "нет строк": 0, "ошибка запроса": 0, "бюджет вызовов": 0,
+                 "страниц листинга": 0, "лиг найдено": 0, "лиг опрошено": 0,
+                 "матчей в лигах": 0, "лиг пустых": 0, "лиг сорвалось": 0}
+
+        # Нулевые счётчики из отчёта убраны, иначе строка нечитаема. Но у
+        # режима league ноль — САМОЕ ИНФОРМАТИВНОЕ значение: «лиг найдено:
+        # 0» и «матчей в лигах: 0» указывают на разные поломки, а молчание
+        # об обеих неотличимо от исправной работы.
+        always = ({"лиг найдено", "лиг опрошено", "матчей в лигах"}
+                  if self._mode == "league" else set())
+
+        def report() -> None:
+            logger.info("цикл %s: собрано %d из %d кандидатов, "
+                        "detail-вызовов %d (%s)",
+                        self.name, yielded, stats["кандидатов"], details,
+                        ", ".join(f"{k}: {v}" for k, v in stats.items()
+                                  if k != "кандидатов" and (v or k in always)))
+
+        # finally, а не вызов перед каждым return: выходов из цикла пять
+        # (бюджет, лимит, исчерпание кандидатов, 429, ошибка схемы), и
+        # забытый report() на одном из них означал бы молчание ровно в том
+        # случае, который и надо разглядеть. При 429 строка отчёта тем
+        # более обязана уйти в лог — это самый частый обрыв.
+        try:
+            for mid in self._candidates(stats):
+                stats["кандидатов"] += 1
+                if not self._shard.accepts(mid):
+                    stats["чужой шард"] += 1
+                    continue
+                if not self._split.accepts(mid):
+                    stats["не моя доля"] += 1
+                    continue
+                if skip(mid):
+                    stats["дубликат"] += 1
+                    continue
+                if mid in self._rejected:
+                    stats["кэш отказов"] += 1
+                    continue
+                if details >= self._detail_budget:
+                    stats["бюджет вызовов"] += 1
+                    return
+                details += 1
+                try:
+                    m = self._get(f"matches/{mid}").json()
+                except requests.HTTPError as e:
+                    if (e.response is not None
+                            and e.response.status_code == 429):
+                        # Квота исчерпана — остальные кандидаты дадут те же
+                        # 429; обрываем цикл, не сжигая остаток лимита.
+                        raise
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    stats["ошибка запроса"] += 1
+                    continue
+                except requests.RequestException as e:
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    stats["ошибка запроса"] += 1
+                    continue
+                ok, why = match_passes(m, self._min_rank,
+                                       self._min_duration_s, self._min_patch,
+                                       pro=(self._mode != "public"))
+                if not ok:
+                    logger.debug("матч %d отфильтрован: %s", mid, why)
+                    self._rejected.add(mid)
+                    stats["фильтр"] += 1
+                    # Разбивка по конкретной причине: «фильтр: 300» само по
+                    # себе не говорит, чинить ли планку патча, ждать ли
+                    # парсинга или менять источник кандидатов.
+                    stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
+                    continue
+                rows = timeline_rows(m)
+                if not rows:
+                    self._rejected.add(mid)
+                    stats["нет строк"] += 1
+                    continue
+                yielded += 1
+                yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
+                                    source_cursor=str(mid),
+                                    patch=int(m.get("patch") or 0),
+                                    avg_rank=avg_rank(m),
+                                    raw=m)
+                if yielded >= self._limit:
+                    return
+        finally:
+            report()
