@@ -13,11 +13,28 @@ radiantNetworthLeads / radiantExperienceLeads (поминутные ряды),
 radiantKills / direKills, didRadiantWin, durationSeconds, gameMode,
 lobbyType, startDateTime. Этого хватает на ядро MatchTimelineFeatures.
 
-Чего STRATZ не даёт (пишется NaN, как и у JSON-источника OpenDota):
-position_advance и alive_diff — они существуют только в реплее; фичи
-трека F (вижн, предметы, руны, нейтралки) — их собирает all_minute_features
-из JSON OpenDota, у STRATZ структура иная. NaN здесь честнее нуля:
-LightGBM обрабатывает пропуск нативно, а 0 был бы ложным сигналом.
+Что добавлено в спринте 100. Вызов к STRATZ уже оплачен, и лишние поля
+в том же запросе не стоят ни одного пункта квоты — растёт только размер
+ответа. Взяты два, каждое закрывает измеримую дыру:
+
+  players.stats.networthPerMinute → networth_total, а с ним networth_rel
+      (radiantNetworthLeads — РАЗНОСТЬ, суммы из неё не получить, и
+      колонка была NaN у 46% датасета);
+  players.heroId + playerSlot     → MatchDraft для матчей STRATZ
+      (драфт был только у 1224 матчей из 4129, отсюда и нулевое
+      покрытие draft_prior).
+
+Чего STRATZ по-прежнему не даёт (пишется NaN, как и у JSON-источника
+OpenDota): position_advance и alive_diff — они существуют только в
+реплее; фичи трека F (вижн, руны, нейтралки) — их собирает
+all_minute_features из JSON OpenDota, у STRATZ структура иная. NaN здесь
+честнее нуля: LightGBM обрабатывает пропуск нативно, а 0 был бы ложным
+сигналом.
+
+Не взято намеренно: leagueId, lane, position, role. Поля есть и выглядят
+полезными, но каждое раздувает ответ на всех матчах, а неверно понятая
+семантика молча портит фичу во всём датасете — так уже вышло с
+gameVersionId. Добавлять их стоит тогда, когда под них есть потребитель.
 
 Патчи. Колонка patch витрины нужна для даунвейта старых патчей (A9), и
 заполняется она по ДАТЕ НАЧАЛА матча против constants/patch OpenDota —
@@ -51,6 +68,7 @@ from typing import Iterable
 import requests
 
 from . import Shard, SourceSplit, with_api_key
+from ..signals import HERO_BY_ID, team_of
 from .opendota_timeline import TimelineMatch
 
 logger = logging.getLogger("collector.stratz")
@@ -59,6 +77,7 @@ API_URL = "https://api.stratz.com/graphql"
 # STRATZ отклоняет запросы без опознавательного User-Agent.
 UA = {"User-Agent": "STRATZ_API"}
 
+RADIANT = 2
 RANKED_LOBBIES = {0, 7}
 STANDARD_MODES = {1, 2, 3, 4, 5, 16, 22}
 
@@ -161,6 +180,11 @@ MATCH_FIELDS = """
     radiantExperienceLeads
     radiantKills
     direKills
+    players {
+        playerSlot
+        heroId
+        stats { networthPerMinute }
+    }
 """
 
 MATCH_QUERY = "query($id: Long!) { match(id: $id) { %s } }" % MATCH_FIELDS
@@ -212,6 +236,7 @@ def timeline_rows(m: dict, kills_cumulative: bool = False) -> list[dict]:
     n = min(len(gold), len(xp))
     if n < 2:
         return []
+    totals = networth_totals(m, n)
     radiant_win = 1 if m.get("didRadiantWin") else 0
     r_kills = cumulative(m.get("radiantKills") or [], kills_cumulative)
     d_kills = cumulative(m.get("direKills") or [], kills_cumulative)
@@ -237,7 +262,7 @@ def timeline_rows(m: dict, kills_cumulative: bool = False) -> list[dict]:
             "match_id": int(m["id"]),
             "game_time": i * 60,
             "networth_diff": int(gold[i] or 0),
-            "networth_total": math.nan,   # суммарного нетворса по минутам нет
+            "networth_total": totals[i] if i < len(totals) else math.nan,
             "xp_diff": int(xp[i] or 0),
             "kills_radiant": _kills(r_kills, i),
             "kills_dire": _kills(d_kills, i),
@@ -270,6 +295,72 @@ def stratz_rank(m: dict) -> int:
         if n > 0:
             return n
     return 0
+
+
+def networth_totals(m: dict, minutes: int) -> list[float]:
+    """Суммарный нетворс обеих команд по минутам.
+
+    radiantNetworthLeads — РАЗНОСТЬ, а не сумма, поэтому networth_total из
+    неё не получить: 5000 преимущества при 20 тысячах общего золота и при
+    100 тысячах означают совершенно разное, и ровно эту поправку даёт
+    networth_rel. До спринта 100 колонка была NaN у всех матчей STRATZ,
+    то есть networth_rel отсутствовал у 46% датасета.
+
+    Пустой список (колонка останется NaN), если поминутного нетворса нет
+    ни у кого: у старых ответов STRATZ поля players могло не быть.
+    """
+    series = []
+    for p in m.get("players") or []:
+        row = ((p.get("stats") or {}).get("networthPerMinute")) or []
+        if row:
+            series.append(row)
+    if not series:
+        return []
+    out = []
+    for i in range(minutes):
+        total = 0.0
+        for row in series:
+            if i < len(row):
+                try:
+                    total += float(row[i] or 0)
+                except (TypeError, ValueError):
+                    pass
+        out.append(total)
+    return out
+
+
+def draft_row(m: dict) -> dict | None:
+    """Строка MatchDraft из составов STRATZ.
+
+    До спринта 100 драфт был только у матчей OpenDota — 1224 из 4129, и
+    это одна из причин нулевого покрытия draft_prior. Составы у STRATZ
+    лежат прямо в ответе, который мы и так запрашиваем.
+
+    Баны и порядок пика не берём: их в запросе нет, а добавлять поле ради
+    графы, которой draft_prior не пользуется, значит раздувать ответ на
+    всех матчах. bans=[] и first_pick_team=0 честнее выдумки.
+    """
+    radiant, dire = [], []
+    for p in m.get("players") or []:
+        npc = HERO_BY_ID.get(int(p.get("heroId") or 0))
+        if not npc:
+            return None            # неизвестный герой — матч мимо
+        slot = p.get("playerSlot")
+        if slot is None:
+            return None
+        (radiant if team_of(slot) == RADIANT else dire).append(npc)
+    if len(radiant) != 5 or len(dire) != 5:
+        return None
+    return {
+        "match_id": int(m["id"]),
+        "patch": 0,                # проставит раннер из TimelineMatch.patch
+        "radiant_win": 1 if m.get("didRadiantWin") else 0,
+        "radiant_heroes": radiant,
+        "dire_heroes": dire,
+        "bans": [],
+        "first_pick_team": 0,
+        "source": "stratz",
+    }
 
 
 def match_passes(m: dict, min_duration_s: int, min_patch: int | None,
@@ -655,5 +746,6 @@ class StratzTimelineSource:
             yielded += 1
             yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
                                 source_cursor=str(mid), patch=patch,
-                                avg_rank=stratz_rank(m), raw={})
+                                avg_rank=stratz_rank(m),
+                                draft=draft_row(m), raw={})
         report()

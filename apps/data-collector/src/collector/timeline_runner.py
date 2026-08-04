@@ -181,6 +181,20 @@ class TimelineCollector:
     def _store_signals(self, tm) -> None:
         """Трек F: драфт, события и сырой JSON матча. Сбой здесь НЕ должен
         рушить сбор — витрина уже записана и она первична."""
+        # Драфт пишем ДО проверки raw: у STRATZ сырого JSON формы OpenDota
+        # нет вовсе, но составы он отдаёт своим ответом и кладёт готовую
+        # строку в tm.draft. До спринта 100 выход по `if not raw` уносил
+        # вместе с фичами трека F и драфт — MatchDraft наполнялся только
+        # матчами OpenDota, 1224 из 4129, и draft_prior оставался пустым.
+        draft = getattr(tm, "draft", None)
+        if draft:
+            try:
+                draft = {**draft, "tier": tm.tier, "patch": tm.patch}
+                self._ch_insert("MatchDraft", DRAFT_COLUMNS, [draft])
+            except Exception:  # noqa: BLE001 — витрина первична
+                logger.warning("матч %d: драфт источника не записан",
+                               tm.match_id, exc_info=True)
+
         raw = getattr(tm, "raw", None) or {}
         if not raw:
             return

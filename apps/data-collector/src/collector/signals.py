@@ -42,6 +42,9 @@ _ITEM_COST: dict[str, int] = _load("item_costs.json", {})
 _HEROES: dict[str, dict] = _load("heroes.json", {})
 _HERO_BY_ID: dict[int, str] = {v["id"]: k for k, v in _HEROES.items()
                                if isinstance(v, dict) and "id" in v}
+# Публичное имя: словарь нужен и источнику STRATZ, который строит драфт
+# из heroId, а не из JSON OpenDota (спринт 100).
+HERO_BY_ID = _HERO_BY_ID
 
 # Предметы, чей тайминг меняет ход игры (F4). Список намеренно короткий:
 # считаем «сколько таких вех взято», а не «сколько предметов куплено».

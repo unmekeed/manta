@@ -18,7 +18,9 @@ from collector.sources.stratz import (GAME_MODE_NAMES,  # noqa: E402
                                       LOBBY_NAMES, StratzError,
                                       StratzTimelineSource, cumulative,
                                       enum_id, match_passes, parse_patch_dates,
-                                      patch_at, stratz_rank, timeline_rows)
+                                      networth_totals, patch_at,
+                                      stratz_rank, timeline_rows)
+from collector.sources.stratz import draft_row as stratz_draft  # noqa: E402
 
 
 def _match(mid=7000000000, minutes=4, win=True):
@@ -695,3 +697,84 @@ def test_skip_counts_across_pages(monkeypatch):
     got = list(src._candidates())
     assert got[0] == ids[120]
     assert len(got) == len(ids) - 120
+
+
+# -- нетворс и драфт из ответа STRATZ (спринт 100) ----------------------------
+
+def _players(radiant_ids=(1, 2, 3, 4, 5), dire_ids=(6, 7, 8, 9, 10),
+             networth=None):
+    out = []
+    for i, hid in enumerate(radiant_ids):
+        out.append({"playerSlot": i, "heroId": hid,
+                    "stats": {"networthPerMinute": networth or []}})
+    for i, hid in enumerate(dire_ids):
+        out.append({"playerSlot": 128 + i, "heroId": hid,
+                    "stats": {"networthPerMinute": networth or []}})
+    return out
+
+
+def test_networth_totals_sums_all_players():
+    """radiantNetworthLeads — РАЗНОСТЬ, суммы из неё не получить. Без
+    поминутного нетворса игроков networth_total оставался NaN, а с ним
+    отсутствовал networth_rel — у 46% датасета."""
+    m = {"players": _players(networth=[0, 100, 250])}
+    assert networth_totals(m, 3) == [0.0, 1000.0, 2500.0]
+
+
+def test_networth_totals_tolerates_short_and_missing_series():
+    m = {"players": [{"stats": {"networthPerMinute": [10, 20]}},
+                     {"stats": {"networthPerMinute": [1]}},
+                     {"stats": {}}]}
+    assert networth_totals(m, 3) == [11.0, 20.0, 0.0]
+
+
+def test_networth_totals_empty_when_no_player_stats():
+    """Пустой список означает NaN в витрине — честнее нуля, который читался
+    бы как «в матче не заработали золота»."""
+    assert networth_totals({"players": [{"stats": {}}]}, 3) == []
+    assert networth_totals({}, 3) == []
+
+
+def test_timeline_rows_carry_networth_total():
+    m = _match()
+    m["players"] = _players(networth=[0, 500, 900, 1200])
+    rows = timeline_rows(m)
+    assert rows[0]["networth_total"] == 5000.0     # минута 1, десять игроков
+
+
+def test_timeline_rows_keep_nan_without_player_stats():
+    import math as _m
+    rows = timeline_rows(_match())          # фикстура без players
+    assert _m.isnan(rows[0]["networth_total"])
+
+
+def test_draft_row_splits_sides_by_player_slot():
+    """Составы у STRATZ лежат в том же ответе, который мы и так просим.
+    До спринта 100 MatchDraft наполнялся только матчами OpenDota."""
+    m = {"id": 77, "didRadiantWin": True, "players": _players()}
+    d = stratz_draft(m)
+    assert d is not None
+    assert len(d["radiant_heroes"]) == 5 and len(d["dire_heroes"]) == 5
+    assert d["radiant_win"] == 1 and d["source"] == "stratz"
+    assert d["bans"] == [] and d["first_pick_team"] == 0
+
+
+def test_draft_row_rejects_unknown_hero():
+    """Неизвестный герой означает битый или устаревший словарь, а не
+    новую сторону: писать такой драфт в обучение нельзя."""
+    m = {"id": 77, "players": _players(radiant_ids=(1, 2, 3, 4, 99999))}
+    assert stratz_draft(m) is None
+
+
+def test_draft_row_rejects_incomplete_roster():
+    m = {"id": 77, "players": _players()[:8]}
+    assert stratz_draft(m) is None
+
+
+def test_collected_match_carries_draft(monkeypatch):
+    m = _match(51)
+    m["players"] = _players()
+    src = make_source(monkeypatch, {51: m}, [51])
+    got = list(src.fetch_new())
+    assert got[0].draft is not None
+    assert got[0].draft["match_id"] == 51
