@@ -64,6 +64,29 @@ BRIER_PHASE = Gauge("wp_brier_phase",
                     "Brier последней тренировки по фазам игры",
                     ["phase"])  # early | mid | late
 
+def _publish_production_metrics(metrics: dict) -> None:
+    """Выставить плитки Brier по метрикам модели.
+
+    Отсутствующий ключ даёт NaN, а не ноль: «не измерено» не должно
+    выглядеть как «идеально». prometheus_client создаёт Gauge со
+    значением 0.0, и до первого переобучения В ЭТОМ ПРОЦЕССЕ дашборд
+    читал «Brier = 0.0000» и подписывал рядом зелёное «цель ≤ 0.18 ✓».
+    Ложный зелёный на главной метрике проекта — тот же класс отказа, что
+    «пустой скрипт вернул 0, значит успех»: отсутствие данных прошло все
+    проверки как отличный результат. NaN в экспозиции Prometheus
+    легален, и потребитель обязан отличать его от значения.
+    """
+    BRIER_VALID.set(float(metrics.get("brier_calibrated", float("nan"))))
+    BRIER_BENCHMARK.set(
+        float(metrics.get("brier_benchmark_pro", float("nan"))))
+
+
+# Стартовое состояние проходит через ту же функцию, что и рабочее —
+# иначе «как метрики выглядят до первого измерения» осталось бы
+# непротестированной веткой, каковой оно и было.
+_publish_production_metrics({})
+PSI_MAX.set(float("nan"))
+
 _notifier = TelegramNotifier()
 
 # Размер датасета последнего переобучения В ЭТОМ ПРОЦЕССЕ. Триггер считает
@@ -185,6 +208,11 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     reg = registry_from_env()
     prod = reg.stage_metadata(MODEL_NAME)
     PROD_MATCHES.set((prod or {}).get("dataset", {}).get("matches", 0))
+    # Публикуем метрики production КАЖДЫЙ цикл, а не только после
+    # переобучения. Иначе после перезапуска процесса (а его перезапускает
+    # каждый make recover) дашборд стоял бы пустым до первого обучения —
+    # то есть ровно тогда, когда на него и смотрят.
+    _publish_production_metrics((prod or {}).get("metrics") or {})
 
     # Дрейф фич: PSI текущей витрины против референса production-модели
     # (компактные децильные гистограммы в метаданных версии). Старые версии
@@ -225,15 +253,18 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     joblib.dump(artifact, out_path)
     logger.info("metrics: %s", artifact["metrics"])
     m = artifact["metrics"]
-    BRIER_VALID.set(m.get("brier_calibrated", 0))
-    if "brier_benchmark_pro" in m:
-        BRIER_BENCHMARK.set(m["brier_benchmark_pro"])
     for phase in ("early", "mid", "late"):
         if f"brier_{phase}" in m:
             BRIER_PHASE.labels(phase).set(m[f"brier_{phase}"])
     # Честный гейт: обе модели пересчитываются на общем holdout текущих данных
     # (evaluate_gate внутри push_with_gate) — устойчиво к «удачному» prod.
     _, promoted, reason = push_with_gate(artifact, out_path, logger, ds=ds)
+    # Плитки Brier показывают модель, которая СЕЙЧАС ОБСЛУЖИВАЕТ запросы, а
+    # не последнего кандидата: отклонённый гейтом кандидат хуже production
+    # по определению, и показывать его цифру как «метрику модели» значило
+    # бы врать в худшую сторону при каждом отказе гейта.
+    if promoted:
+        _publish_production_metrics(m)
     RETRAINS.labels("promoted" if promoted else "rejected").inc()
     # D2: реестр растёт на ~4 версии/день — держим последние N + все
     # продвигавшиеся. MLflow-бэкенд управляет хранением сам (cleanup нет).

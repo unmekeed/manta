@@ -88,8 +88,20 @@ def _sum(metrics: dict, name: str) -> float:
 
 
 def _pick(metrics: dict, name: str, **labels) -> float | None:
+    """Значение метрики или None, если её нет ЛИБО она равна NaN.
+
+    NaN в экспозиции Prometheus означает «не измерено», и путать его со
+    значением нельзя. Инцидент 2026-08-03: prometheus_client создаёт
+    Gauge со значением 0.0, поэтому до первого переобучения в процессе
+    дашборд показывал «Brier 0.0000» и рисовал рядом зелёную подпись
+    «цель ≤ 0.18 ✓» — отсутствие данных выглядело как идеальный
+    результат. Плитка обязана в этом случае показывать прочерк.
+    """
     key = (name, tuple(sorted(labels.items())))
-    return metrics.get(key)
+    val = metrics.get(key)
+    if val is None or val != val:      # val != val истинно только для NaN
+        return None
+    return val
 
 
 def _scrape(port: int) -> dict | None:
@@ -116,7 +128,10 @@ def _clickhouse_matches() -> int | None:
 
 
 def _record(key: str, value):
-    if value is not None:
+    # NaN сюда попасть не должен (его отсекает _pick), но история живёт
+    # весь срок процесса: один просочившийся NaN испортил бы спарклайн
+    # навсегда — масштаб графика считается по min/max.
+    if value is not None and value == value:
         _history[key].append(round(float(value), 6))
 
 
