@@ -493,6 +493,9 @@ class StratzTimelineSource:
         self._id_lag = max(int(id_lag), 0)
         self._id_lag_min = max(int(id_lag_min), 0)
         self._id_lag_max = max(int(id_lag_max), self._id_lag_min)
+        # Состояние проверки гипотезы «промахи лечатся глубиной отступа».
+        self._lag_probe: tuple[int, float] | None = None
+        self._lag_frozen = False
         # Справочник патчей OpenDota [(дата, id)]; читается лениво.
         self._patches: list[tuple[int, int]] = []
         self._patch_map_at = -PATCH_MAP_RETRY_S
@@ -591,7 +594,31 @@ class StratzTimelineSource:
             return
         rate = misses / calls
         before = self._id_lag
-        if rate > 0.5:
+
+        # ПРОВЕРКА ГИПОТЕЗЫ (спринт 116). Регулятор, который умеет только
+        # наращивать, всегда доезжает до потолка — даже когда его рычаг ни
+        # на что не влияет. Замер 2026-08-05: отступ прошёл 90 000 →
+        # 400 000 (2 часа → 8.4 часа игрового потока), а промахи остались
+        # 75–88%. Глубина не лечила НИЧЕГО, и без этой проверки источник
+        # так и работал бы на потолке, собирая матчи восьмичасовой
+        # давности без всякой пользы.
+        if self._lag_probe is not None:
+            probe_lag, probe_rate = self._lag_probe
+            self._lag_probe = None
+            if self._id_lag > probe_lag and rate > probe_rate - 0.05:
+                # Подняли отступ — промахи не упали. Рычаг не работает:
+                # возвращаемся и больше не растём. Уменьшаться при этом
+                # по-прежнему можно: вдруг причина исчезнет сама.
+                self._id_lag = probe_lag
+                self._lag_frozen = True
+                logger.info("отступ STRATZ заморожен на %d: подъём с %d не "
+                            "снизил промахи (%.0f%% против %.0f%%) — причина "
+                            "НЕ в свежести кандидатов",
+                            probe_lag, probe_lag, rate * 100, probe_rate * 100)
+                return
+
+        if rate > 0.5 and not self._lag_frozen:
+            self._lag_probe = (self._id_lag, rate)
             self._id_lag = int(self._id_lag * 1.5) or self._id_lag_min
         elif rate < 0.1:
             self._id_lag = int(self._id_lag * 0.9)
@@ -725,7 +752,7 @@ class StratzTimelineSource:
             # бы к неверному числу.
             self._adapt_lag(calls, stats["ждут парсинга"] + stats["нет данных"])
 
-        def defer(mid: int) -> None:
+        def defer(mid: int, kind: str = "нет матча") -> None:
             """Матч без данных — причина ВРЕМЕННАЯ, не повод хоронить.
 
             STRATZ парсит матч с задержкой, а кандидаты берутся с вершины
@@ -748,6 +775,12 @@ class StratzTimelineSource:
                 stats["нет данных"] += 1
             else:
                 stats["ждут парсинга"] += 1
+            # Разделение видов — спринт 116. Прежде оба случая падали в
+            # один счётчик, и по нему нельзя было отличить «STRATZ не
+            # знает матч» от «знает, но поминутных рядов нет». Разница
+            # решающая: первое отступом НЕ лечится вовсе (матча у STRATZ
+            # просто не будет), второе — вопрос времени.
+            stats[f"  ~ {kind}"] = stats.get(f"  ~ {kind}", 0) + 1
 
         # try/finally, а не report() перед каждым return: выходов из
         # цикла пять (лимит, бюджет, исчерпание кандидатов, ошибка
@@ -796,7 +829,7 @@ class StratzTimelineSource:
                     continue
                 m = data.get("match")
                 if not m:
-                    defer(mid)          # STRATZ ещё не видел этот матч
+                    defer(mid, "нет матча")
                     continue
                 # Разбор ОДНОГО матча не имеет права ронять цикл: STRATZ меняет
                 # формат полей (2026-07-31 — lobbyType приехал строкой-энумом
@@ -815,7 +848,7 @@ class StratzTimelineSource:
                             # Матч у STRATZ есть, а поминутных рядов ещё нет —
                             # он в очереди на парсинг. Такая же временная
                             # причина, как отсутствие самого матча.
-                            defer(mid)
+                            defer(mid, "нет рядов")
                             continue
                         stats["фильтр"] += 1
                         stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
@@ -828,7 +861,7 @@ class StratzTimelineSource:
                     self._rejected.add(mid)
                     continue
                 if not rows:
-                    defer(mid)          # ряды ещё не наполнились
+                    defer(mid, "нет рядов")
                     continue
                 yielded += 1
                 yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,

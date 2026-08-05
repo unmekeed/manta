@@ -790,26 +790,28 @@ def _lag_src(monkeypatch, ids, ready=None, **kw):
     return src
 
 
+def _bare(lag=100_000, lo=1000, hi=400_000):
+    """Источник без конструктора: нужен только регулятор отступа."""
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = lag, lo, hi
+    src._lag_probe, src._lag_frozen = None, False
+    return src
+
+
 def test_lag_measured_in_match_ids_not_entries():
     """Отступ «в записях» означал то полчаса, то три: плотность листинга
     зависит от того, сколько матчей успел распарсить OpenDota, а не от
     того, сколько времени было у STRATZ. Замер 2026-08-05: id растут
     ~789/мин, 100 записей /parsedMatches укладываются в ~30 000 id."""
-    src = OBJ = None
-    from collector.sources.stratz import StratzTimelineSource
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
-    src._id_lag, src._id_lag_min, src._id_lag_max = 0, 1000, 400_000
-    # Пустой цикл при нулевых вызовах обязан ужимать отступ, а не залипать.
-    src._id_lag = 50_000
+    src = _bare(50_000)
     src._adapt_lag(calls=0, misses=0)
     assert src._id_lag == 25_000
 
 
 def test_lag_grows_fast_on_misses():
     """Каждый цикл с промахами — сожжённая квота. Растём ×1.5."""
-    from collector.sources.stratz import StratzTimelineSource
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
-    src._id_lag, src._id_lag_min, src._id_lag_max = 40_000, 1000, 400_000
+    src = _bare(40_000)
     src._adapt_lag(calls=100, misses=90)
     assert src._id_lag == 60_000
 
@@ -818,9 +820,7 @@ def test_lag_shrinks_slowly_when_clean():
     """Слишком глубокий отступ матчей не теряет (листинг — движущееся
     окно), он лишь добавляет дубликатов. Ошибка вверх дешевле, поэтому
     убываем медленно (×0.9)."""
-    from collector.sources.stratz import StratzTimelineSource
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
-    src._id_lag, src._id_lag_min, src._id_lag_max = 100_000, 1000, 400_000
+    src = _bare(100_000)
     src._adapt_lag(calls=100, misses=2)
     assert src._id_lag == 90_000
 
@@ -829,17 +829,13 @@ def test_lag_holds_in_the_middle_band():
     """Между 10% и 50% промахов не дёргаемся: STRATZ парсит не мгновенно
     и не строго по порядку, единичные промахи неустранимы, и гнаться за
     нулём значит уползать всё глубже."""
-    from collector.sources.stratz import StratzTimelineSource
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
-    src._id_lag, src._id_lag_min, src._id_lag_max = 100_000, 1000, 400_000
+    src = _bare(100_000)
     src._adapt_lag(calls=100, misses=30)
     assert src._id_lag == 100_000
 
 
 def test_lag_is_clamped():
-    from collector.sources.stratz import StratzTimelineSource
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
-    src._id_lag, src._id_lag_min, src._id_lag_max = 390_000, 1000, 400_000
+    src = _bare(390_000)
     src._adapt_lag(calls=10, misses=10)
     assert src._id_lag == 400_000
     # Снизу зажим тоже держит: с минимума дальше не уползаем.
@@ -876,8 +872,63 @@ def test_lag_never_starves_the_source(monkeypatch):
 def test_zero_call_cycle_shrinks_the_lag():
     """Вторая половина той же защиты: если вызовов не было, «нет
     промахов» выглядит как здоровье. Отступ обязан ужиматься сам."""
-    from collector.sources.stratz import StratzTimelineSource
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
-    src._id_lag, src._id_lag_min, src._id_lag_max = 200_000, 1000, 400_000
+    src = _bare(200_000)
     src._adapt_lag(calls=0, misses=0)
     assert src._id_lag == 100_000
+
+
+# -- регулятор обязан признавать, что его рычаг не работает (спринт 116) ------
+
+def test_climb_stops_when_it_does_not_help():
+    """Регулятор, умеющий только наращивать, всегда доезжает до потолка —
+    даже когда его рычаг ни на что не влияет.
+
+    Замер 2026-08-05: отступ прошёл 90 000 → 400 000 (2 часа → 8.4 часа
+    игрового потока), а промахи остались 75–88%. Глубина не лечила
+    НИЧЕГО, и без проверки гипотезы источник так и работал бы на потолке,
+    собирая матчи восьмичасовой давности без всякой пользы.
+    """
+    src = _bare(100_000)
+    src._adapt_lag(calls=100, misses=85)         # пробуем подъём
+    assert src._id_lag == 150_000
+    src._adapt_lag(calls=100, misses=84)         # не помогло
+    assert src._id_lag == 100_000, "откат к прежнему отступу не произошёл"
+    assert src._lag_frozen is True
+    src._adapt_lag(calls=100, misses=90)         # дальше не растём
+    assert src._id_lag == 100_000
+
+
+def test_climb_continues_when_it_helps():
+    """Обратная сторона: если промахи заметно упали, гипотеза жива и
+    подъём продолжается. Иначе регулятор замерзал бы на первом же шаге и
+    настоящая задержка парсинга осталась бы неисправленной."""
+    src = _bare(100_000)
+    src._adapt_lag(calls=100, misses=85)
+    assert src._id_lag == 150_000
+    src._adapt_lag(calls=100, misses=60)         # −25 п.п. — помогло
+    assert src._id_lag == 225_000
+    assert src._lag_frozen is False
+
+
+def test_frozen_lag_can_still_shrink():
+    """Заморозка запрещает только РОСТ. Причина может исчезнуть сама
+    (STRATZ разгрёб очередь), и тогда отступ обязан уметь вернуться —
+    иначе мы навсегда останемся на матчах многочасовой давности."""
+    src = _bare(200_000)
+    src._lag_frozen = True
+    src._adapt_lag(calls=100, misses=2)
+    assert src._id_lag == 180_000
+
+
+def test_defer_reasons_are_separated(monkeypatch, caplog):
+    """«Ждут парсинга» склеивал два разных случая: STRATZ не знает матч
+    вовсе и знает, но поминутных рядов нет. Разница решающая — первое
+    отступом НЕ лечится в принципе, второе вопрос времени. Пока они в
+    одном счётчике, отличить одно от другого нечем, и именно поэтому
+    гипотеза про свежесть прожила два спринта."""
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    import inspect
+    src_code = inspect.getsource(StratzTimelineSource.fetch_new)
+    assert 'defer(mid, "нет матча")' in src_code
+    assert 'defer(mid, "нет рядов")' in src_code
+    assert 'stats[f"  ~ {kind}"]' in src_code
