@@ -27,6 +27,15 @@ class ClickHouse:
         resp.raise_for_status()
         return [json.loads(line) for line in resp.text.splitlines() if line]
 
+    def execute(self, query: str, params: dict | None = None) -> None:
+        """DDL/DML без результата (DELETE, ALTER)."""
+        q = {"database": self.database}
+        for k, v in (params or {}).items():
+            q[f"param_{k}"] = str(v)
+        resp = requests.post(self.url, params=q, data=query,
+                             headers=self._headers, timeout=self.timeout_s)
+        resp.raise_for_status()
+
     def insert_rows(self, table: str, rows: list[dict]) -> None:
         if not rows:
             return

@@ -112,6 +112,73 @@ done
 # OSError: Address already in use ещё до начала работы. Коллекторы стояли
 # неделю из-за Prometheus-эндпоинта. Явное присваивание перекрывает
 # унаследованную переменную и делает конфигурацию env-файла безопасной.
+# 3.5. Свежесть кода (спринт 106) ----------------------------------------------
+#
+# recover запускает сервис, только если тот ещё не жив (`if ! pgrep`).
+# Поэтому после `git pull` он честно докладывает «уже работает, пропуск»
+# — и стек продолжает крутить код, загруженный ДО правки, а doctor при
+# этом рапортует ЗДОРОВ. Ловушка описана в runbook 5 словами со спринта
+# 101, но в коде была закрыта только для дашборда.
+#
+# 2026-08-05 это стоило двух ложных заходов подряд: спринт 104 добавил
+# лигам лог причин отказа — лога не появилось; спринт 105 починил
+# справочник предметов — имена не изменились. Обе правки были верны,
+# просто стек их не видел.
+#
+# Решение: до старта сервисов убиваем те, что стартовали РАНЬШЕ последней
+# правки исходников. Дальше обычные блоки `if ! pgrep` поднимают их сами,
+# отдельной логики запуска не нужно.
+#
+# Отметка ОДНА на всё дерево, а не по сервису. Точная привязка «какой
+# файл чей» — это карта, которая молча устареет при первом рефакторе, и
+# тогда часть сервисов останется на старом коде, а выглядеть всё будет
+# исправно. Лишний перезапуск стоит секунд; незамеченная старая версия —
+# суток отладки.
+newest_code=$(find apps libs scripts \
+        \( -name node_modules -o -name __pycache__ -o -name .git \
+           -o -name dist -o -name build -o -name models \) -prune -o \
+        -type f \( -name '*.py' -o -name '*.go' -o -name '*.sh' \) \
+        -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+newest_code=${newest_code%%.*}
+
+restart_if_stale() {   # имя  шаблон-pgrep
+    local name="$1" pat="$2" pid age started
+    [ -n "${newest_code:-}" ] || return 0
+    pid=$(pgrep -f "$pat" | head -1 || true)
+    [ -n "$pid" ] || return 0
+    age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    # Процесс мог исчезнуть между pgrep и ps: пустой возраст значит «не
+    # знаем», и тогда считаем код новее — перезапуск дешевле, чем ещё
+    # сутки на устаревшей версии.
+    started=$(( $(date +%s) - ${age:-0} ))
+    [ "$newest_code" -gt "$started" ] || return 0
+    say "$name старее своего кода — перезапускаю"
+    pkill -f "$pat" 2>/dev/null || true
+    sleep 1
+}
+
+# Дашборд здесь НЕ трогаем: у него отдельный блок ниже, с защитой от
+# самоубийства, когда recover запущен его же кнопкой.
+for svc in \
+    "parser-svc|^/tmp/parser-svc" \
+    "feature-extractor|python3 -u -m extractor" \
+    "data-collector|collector --source opendota-public" \
+    "timeline-coll.|collector --source opendota-timeline --interval" \
+    "pro-timeline|collector --source opendota-timeline-pro" \
+    "league-coll.|collector --source opendota-league" \
+    "pro-replay|collector --source opendota --interval" \
+    "ml-service|python3 -u -m app" \
+    "similarity|python3 -u -m serve$" \
+    "draft|python3 -u -m serve_draft" \
+    "coach|python3 -u -m serve_coach" \
+    "feature-store|python3 -u -m serve_features" \
+    "report-generator|python3 -u -m reportgen" \
+    "auto-train|python3 -u -m training.auto" \
+    "api-gateway|^/tmp/api-gateway" \
+    "frontend|vite --host" ; do
+    restart_if_stale "${svc%%|*}" "${svc#*|}"
+done
+
 # 4. Хост-сервисы конвейера ----------------------------------------------------
 if ! pgrep -f "^/tmp/parser-svc" >/dev/null; then
     say "запускаю parser-svc (лог: $LOG_DIR/parser-svc.log)"

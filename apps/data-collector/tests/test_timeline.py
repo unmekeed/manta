@@ -532,6 +532,8 @@ def test_league_cycle_distinguishes_empty_leagues(monkeypatch, caplog):
         if path == "proMatches":
             return _R([{"match_id": 1, "leagueid": 7},
                        {"match_id": 2, "leagueid": 8}])
+        if path == "leagues":
+            return _R([])                  # каталог пуст — только активные
         return _R([])                      # leagues/{id}/matches — пусто
 
     monkeypatch.setattr(src, "_get", fake_get)
@@ -552,6 +554,8 @@ def test_league_cycle_reports_filter_breakdown(monkeypatch, caplog):
     def fake_get(path, **params):
         if path == "proMatches":
             return _R([{"match_id": 1, "leagueid": 7}])
+        if path == "leagues":
+            return _R([])
         if path.startswith("leagues/"):
             return _R([{"match_id": 41}, {"match_id": 42}])
         m = _parsed_match(mid=int(path.split("/")[1]))
@@ -619,3 +623,143 @@ def test_public_cycle_hides_league_counters(monkeypatch, caplog):
     with caplog.at_level("INFO", logger="collector.opendota_timeline"):
         assert list(src.fetch_new()) == []
     assert "лиг найдено" not in _cycle_line(caplog)
+
+
+# -- лиги берутся из каталога, а не из окна /proMatches (спринт 106) ----------
+
+def _league_src(**kw):
+    kw.setdefault("limit_per_cycle", 50)
+    kw.setdefault("min_patch", 60)
+    kw.setdefault("api_delay_s", 0)
+    kw.setdefault("mode", "league")
+    return OpenDotaTimelineSource(**kw)
+
+
+def test_catalog_leagues_extend_beyond_active_window():
+    """Смысл спринта 96 — обойти окно /proMatches. Но `_active_leagues`
+    брал лиги ИЗ ЭТОГО ЖЕ окна: 4 лиги по ~50 матчей, потолок ~200, и он
+    выбирался за сутки (замер 2026-08-05: собрано 1 из 205, дубликатов
+    89). В каталоге /leagues таких лиг 2681."""
+    src = _league_src(league_batch=3)
+    calls = []
+
+    def fake_get(path, **params):
+        calls.append(path)
+        if path == "proMatches":
+            return _R([{"match_id": 1, "leagueid": 7}])
+        if path == "leagues":
+            return _R([{"leagueid": i, "tier": "professional"}
+                       for i in (100, 101, 102, 103)]
+                      + [{"leagueid": 999, "tier": "excluded"}])
+        return _R([])
+
+    src._get = fake_get
+    got = src._league_batch()
+    assert got[0] == 7, "активная лига обязана опрашиваться всегда"
+    assert len(got) == 1 + 3, f"пачка каталога не добрана: {got}"
+    assert 999 not in got, "лига чужого тира просочилась"
+
+
+def test_catalog_walk_advances_between_cycles():
+    """Порядок в каталоге произволен (65019 — это TI 2013, а турниры
+    2026 идут под ~20000), поэтому сортировать по id бесполезно и обход
+    круговой. Если позиция не двигается, каждый цикл смотрит одни и те же
+    лиги — то есть глубины не прибавляется вовсе."""
+    src = _league_src(league_batch=2)
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([])
+        if path == "leagues":
+            return _R([{"leagueid": i, "tier": "premium"}
+                       for i in (10, 11, 12, 13)])
+        return _R([])
+
+    src._get = fake_get
+    first, second = src._league_batch(), src._league_batch()
+    assert first != second, f"обход стоит на месте: {first}"
+    assert set(first) | set(second) == {10, 11, 12, 13}
+
+
+def test_old_matches_dropped_before_detail_call():
+    """Отсев по дате обязан происходить ДО /matches/{id}: именно он
+    делает обход тысяч завершённых турниров дешёвым. Если он съедет в
+    match_passes, каждый древний матч будет стоить detail-вызова."""
+    import time as _t
+
+    src = _league_src(league_max_age_days=30)
+    details = []
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([{"match_id": 1, "leagueid": 7}])
+        if path == "leagues":
+            return _R([])
+        if path.startswith("leagues/"):
+            return _R([{"match_id": 41, "start_time": int(_t.time()) - 5,
+                        "duration": 2000},
+                       {"match_id": 43, "start_time": int(_t.time()) - 400 * 86400,
+                        "duration": 2000}])
+        details.append(path)
+        return _R(_parsed_match(mid=int(path.split("/")[1])))
+
+    src._get = fake_get
+    got = [t.match_id for t in src.fetch_new()]
+    assert got == [41]
+    assert details == ["matches/41"], f"древний матч стоил вызова: {details}"
+
+
+def test_missing_fields_are_not_a_verdict():
+    """Пустое start_time — это «дата неизвестна», а не «матч древний»;
+    пустое duration — «неизвестна», а не «ноль секунд». Первая версия
+    отсева считала отсутствие поля нулём и молча выбрасывала кандидата —
+    ровно та подмена, из-за которой спринт 99 потерял все покупки."""
+    src = _league_src()
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([{"match_id": 1, "leagueid": 7}])
+        if path == "leagues":
+            return _R([])
+        if path.startswith("leagues/"):
+            return _R([{"match_id": 41}])      # ни даты, ни длительности
+        return _R(_parsed_match(mid=41))
+
+    src._get = fake_get
+    assert [t.match_id for t in src.fetch_new()] == [41]
+
+
+def test_exhausted_league_is_not_polled_again(caplog):
+    """Турнир без единого свежего матча закончился и новых не даст.
+    Помнить это надо — иначе каждый цикл платит вызов за одни и те же
+    мёртвые лиги, а их тысячи."""
+    import time as _t
+
+    src = _league_src(league_batch=2)
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([])
+        if path == "leagues":
+            return _R([{"leagueid": i, "tier": "premium"} for i in (10, 11)])
+        return _R([{"match_id": 900, "start_time": int(_t.time()) - 400 * 86400,
+                    "duration": 2000}])
+
+    src._get = fake_get
+    with caplog.at_level("INFO", logger="collector.opendota_timeline"):
+        assert list(src.fetch_new()) == []
+    assert "лиг выдохлось: 2" in _cycle_line(caplog)
+    assert src._dead_leagues == {10, 11}
+    assert src._league_batch() == [], "мёртвые лиги снова в опросе"
+
+
+def test_catalog_refresh_forgets_dead_leagues():
+    """Вердикт «свежих матчей нет» верен на момент проверки. Держать его
+    вечно — это ошибка STRATZ из спринта 87, где транзиентная причина
+    попала в постоянный кэш и задушила источник."""
+    src = _league_src()
+    src._dead_leagues = {10, 11}
+    src._get = lambda path, **p: _R(
+        [{"leagueid": 10, "tier": "premium"}] if path == "leagues" else [])
+    src._catalog_leagues()
+    assert src._dead_leagues == set()

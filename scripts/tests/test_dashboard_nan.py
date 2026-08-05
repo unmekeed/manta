@@ -140,3 +140,67 @@ def test_dashboard_probe_survives_missing_process():
         r = subprocess.run(["bash", str(f)], capture_output=True, text=True)
     assert r.returncode == 0, f"строка роняет скрипт: {r.stderr}"
     assert "ДОШЛИ" in r.stdout
+
+
+# -- recover сверяет свежесть кода у ВСЕХ процессов (спринт 106) --------------
+
+def test_recover_restarts_every_stale_service():
+    """Спринт 101 закрыл ловушку `if ! pgrep` только для дашборда, а она
+    общая: после git pull recover докладывает «уже работает, пропуск», и
+    стек крутит код, загруженный ДО правки, пока doctor рапортует ЗДОРОВ.
+
+    2026-08-05 это стоило двух ложных заходов подряд — спринты 104 и 105
+    выглядели неработающими, хотя обе правки были верны.
+    """
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    assert "restart_if_stale" in src
+    # Сверка обязана охватывать коллекторы и экстрактор — именно на них
+    # сегодня и обожглись.
+    for pat in ("collector --source opendota-league",
+                "python3 -u -m extractor",
+                "python3 -u -m training.auto"):
+        assert pat in src.split("restart_if_stale()")[1], (
+            f"сервис не попал в сверку свежести: {pat}")
+
+
+def test_stale_check_runs_before_services_start():
+    """Порядок решает: если убивать устаревшие ПОСЛЕ блоков запуска, они
+    останутся лежать до следующего recover — то есть стек окажется без
+    сервисов вместо обновлённых."""
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    assert (src.index("restart_if_stale \"${svc%%|*}\"")
+            < src.index("# 4. Хост-сервисы конвейера"))
+
+
+def test_stale_probe_survives_missing_process():
+    """Та же грабля, что в спринте 102: под `set -euo pipefail` pgrep без
+    совпадений возвращает 1 и роняет весь скрипт. Проверка ИСПОЛНЯЕТ
+    функцию с заведомо отсутствующим процессом."""
+    import subprocess
+    import tempfile
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    body = src.split("restart_if_stale() {", 1)[1].split("\n}", 1)[0]
+    fn = "say() { printf '>> %s\\n' \"$*\"; }\nnewest_code=9999999999\n" \
+         "restart_if_stale() {" + body + "\n}\n"
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "probe.sh"
+        f.write_text("set -euo pipefail\n" + fn
+                     + 'restart_if_stale тест "процесса-нет-9z9z"\n'
+                       'echo ДОШЛИ\n', encoding="utf-8")
+        r = subprocess.run(["bash", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, f"функция роняет скрипт: {r.stderr}"
+    assert "ДОШЛИ" in r.stdout
+
+
+def test_dashboard_kept_out_of_the_generic_loop():
+    """У дашборда отдельный блок с защитой от самоубийства: recover может
+    быть запущен ЕГО кнопкой. Попади он в общий список — задача обрывалась
+    бы на середине."""
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    loop = src.split("restart_if_stale()")[1].split("# 4. Хост-сервисы")[0]
+    assert "dashboard.py" not in loop

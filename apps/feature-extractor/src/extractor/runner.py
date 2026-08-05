@@ -200,7 +200,7 @@ class Extractor:
                                 roster.hero_team)
             for r in crows:
                 r["match_id"] = match_id
-            self.ch.insert_rows("MatchMapCells", crows)
+            self._replace_rows("MatchMapCells", match_id, crows)
         except Exception:  # noqa: BLE001
             logger.warning("матч %s: карты не сохранены", match_id,
                         exc_info=True)
@@ -211,7 +211,7 @@ class Extractor:
             hrows = build_timings(raw_events, roster.hero_team)
             for r in hrows:
                 r["match_id"] = match_id
-            self.ch.insert_rows("MatchHeroTimings", hrows)
+            self._replace_rows("MatchHeroTimings", match_id, hrows)
         except Exception:  # noqa: BLE001
             logger.warning("матч %s: тайминги не сохранены", match_id,
                         exc_info=True)
@@ -233,6 +233,57 @@ class Extractor:
         logger.info("features calculated: match=%s players=%d timeline=%d",
                     match_id, len(prows), len(trows))
         return payload
+
+    # -- идемпотентная запись агрегатов (спринт 106) ---------------------------
+
+    def _replace_rows(self, table: str, match_id: int,
+                      rows: list[dict]) -> None:
+        """Записать строки матча, убрав прежние.
+
+        Почему нельзя просто вставить. Обе таблицы — ReplacingMergeTree, и
+        миграции обещают «переразбор матча ЗАМЕЩАЕТ строку». Это верно
+        ровно до тех пор, пока пересчёт даёт ТЕ ЖЕ значения ключа
+        сортировки, а в него входят hero/kind/name (тайминги) и координаты
+        клетки (карты). Стоит поменяться справочнику предметов,
+        нормализации героев или классификации — и строка получает НОВЫЙ
+        ключ, ложась РЯДОМ со старой, а не поверх неё.
+
+        Инцидент 2026-08-05: правка справочника предметов (спринт 105)
+        оставила 8764 строки-призрака со старыми именами вида `item_49`.
+        Заметить их нечем: агрегат выглядит полным, просто строк в нём
+        больше, чем было событий, — а значит любой счётчик поверх него
+        завышен, и завышен незаметно.
+
+        Удаление СИНХРОННОЕ (`lightweight_deletes_sync = 2`): порядок
+        «удалить, потом вставить» разваливается, если удаление применится
+        позже вставки — маска по match_id снесёт и только что записанные
+        строки. Полагаться на то, что дефолт и сегодня равен 2, нельзя.
+
+        Пустой `rows` — не повод пропустить удаление: матч мог законно
+        лишиться строк (например, все события оказались браком), и тогда
+        старые обязаны уйти.
+        """
+        try:
+            got = self.ch.select(
+                f"SELECT count() AS n FROM {table}"    # noqa: S608 — имя
+                " WHERE match_id = {match_id:UInt64}",  # из литералов кода
+                {"match_id": match_id})
+            existing = int(got[0]["n"]) if got else 0
+        except Exception:  # noqa: BLE001
+            # Не смогли посчитать — вставляем как раньше. Дубль хуже
+            # пропуска данных, но потеря матча хуже дубля.
+            logger.warning("матч %s: не проверил %s на старые строки",
+                           match_id, table, exc_info=True)
+            existing = 0
+        if existing:
+            self.ch.execute(
+                f"DELETE FROM {table}"                  # noqa: S608
+                " WHERE match_id = {match_id:UInt64}"
+                " SETTINGS lightweight_deletes_sync = 2",
+                {"match_id": match_id})
+            logger.info("матч %s: %s — убрано прежних строк %d",
+                        match_id, table, existing)
+        self.ch.insert_rows(table, rows)
 
     # -- бэкфилл ---------------------------------------------------------------
 

@@ -120,6 +120,9 @@ def build_source(name: str):
             detail_budget=int(detail_budget) if detail_budget else None,
             shard=shard,
             split=_detail_split(name),
+            league_tiers=os.getenv("LEAGUE_TIERS", "premium,professional"),
+            league_batch=int(os.getenv("LEAGUE_BATCH", "8")),
+            league_max_age_days=int(os.getenv("LEAGUE_MAX_AGE_DAYS", "30")),
         )
     if name in ("stratz-timeline", "stratz-timeline-pro"):
         # Кандидаты — дешёвый листинг OpenDota, детали — GraphQL STRATZ.

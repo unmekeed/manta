@@ -197,7 +197,11 @@ class OpenDotaTimelineSource:
                  detail_budget: int | None = None,
                  shard: Shard | None = None,
                  split: SourceSplit | None = None,
-                 league_ttl_s: float = 3600.0) -> None:
+                 league_ttl_s: float = 3600.0,
+                 league_tiers: str = "premium,professional",
+                 league_batch: int = 8,
+                 league_max_age_days: int = 30,
+                 league_catalog_ttl_s: float = 86400.0) -> None:
         assert mode in ("public", "pro", "league")
         self._mode = mode
         self.name = {"public": "opendota_timeline",
@@ -211,6 +215,19 @@ class OpenDotaTimelineSource:
         self._league_ttl = league_ttl_s
         self._leagues: list[int] = []
         self._leagues_at = -league_ttl_s
+        # Каталог /leagues: 10036 записей, из них ~2681 нужных тиров.
+        # Меняется раз в недели, поэтому TTL сутки — вызов дорогой только
+        # по объёму ответа, а не по квоте.
+        self._tiers = {t.strip() for t in league_tiers.split(",") if t.strip()}
+        self._catalog: list[int] = []
+        self._catalog_ttl = league_catalog_ttl_s
+        self._catalog_at = -league_catalog_ttl_s
+        self._league_batch_size = max(int(league_batch), 1)
+        self._league_pos = 0
+        self._max_age_days = max(int(league_max_age_days), 1)
+        # Лиги, у которых нет матчей свежее окна. Сбрасывается при каждом
+        # перечитывании каталога — см. _catalog_leagues.
+        self._dead_leagues: set[int] = set()
         self._base = base_url.rstrip("/")
         self._limit = limit_per_cycle
         self._min_rank = min_rank
@@ -299,6 +316,42 @@ class OpenDotaTimelineSource:
             logger.info("активных лиг: %d %s", len(seen), seen[:8])
         return self._leagues
 
+    def _catalog_leagues(self) -> list[int]:
+        """Лиги нужных тиров из каталога /leagues.
+
+        Зачем помимо `_active_leagues`. Активные берутся из окна
+        /proMatches — тех же ~1000 последних матчей мира, обойти которое
+        режим league и затевался (спринт 96). Лиг там оказывается 4, по
+        ~50 матчей каждая: потолок источника ~200 матчей, и он выбирается
+        за сутки. В каталоге же 2681 лига тиров premium/professional.
+
+        Сортировать по leagueid БЕСПОЛЕЗНО: 65019 — это The International
+        2013, а турниры 2026 года идут под ~20000. Порядок в каталоге
+        произволен, поэтому обход круговой: за цикл берётся следующая
+        пачка, позиция сохраняется между циклами.
+        """
+        now = time.monotonic()
+        if self._catalog and now - self._catalog_at < self._catalog_ttl:
+            return self._catalog
+        try:
+            rows = self._get("leagues").json() or []
+        except requests.RequestException:
+            logger.warning("каталог лиг не обновлён — работаю на прежнем",
+                           exc_info=True)
+            return self._catalog
+        ids = [int(r["leagueid"]) for r in rows
+               if r.get("leagueid") and str(r.get("tier")) in self._tiers]
+        if ids:
+            self._catalog, self._catalog_at = ids, now
+            # Каталог перечитан — забываем, какие лиги считались
+            # выдохшимися. Вердикт «матчей свежее порога нет» верен на
+            # момент проверки, и держать его вечно значило бы повторить
+            # ошибку STRATZ из спринта 87.
+            self._dead_leagues.clear()
+            logger.info("каталог лиг: %d тиров %s", len(ids),
+                        sorted(self._tiers))
+        return self._catalog
+
     def _league_candidates(self, stats: dict) -> Iterable[int]:
         """Кандидаты ИЗ ЛИГ — вглубь, а не вширь.
 
@@ -313,8 +366,9 @@ class OpenDotaTimelineSource:
         активные турниры идут первыми; дедуп по CollectedMatches сам
         отсеет уже собранное, а бюджет цикла ограничит глубину.
         """
-        leagues = self._active_leagues()
+        leagues = self._league_batch()
         stats["лиг найдено"] = len(leagues)
+        oldest = time.time() - self._max_age_days * 86400
         for lid in leagues:
             try:
                 batch = self._get(f"leagues/{lid}/matches").json() or []
@@ -327,11 +381,58 @@ class OpenDotaTimelineSource:
                 # Лига без матчей в ответе — отдельная причина: она
                 # неотличима от «все матчи отсеяны» по итоговому нулю.
                 stats["лиг пустых"] += 1
+            fresh = 0
             for entry in batch:
                 mid = entry.get("match_id")
-                if mid is not None:
-                    stats["матчей в лигах"] += 1
-                    yield int(mid)
+                if mid is None:
+                    continue
+                # Отсев по дате ДО дорогого /matches/{id}. В ответе лиги
+                # уже есть start_time и duration — благодаря им обход
+                # тысяч завершённых турниров стоит одного дешёвого вызова
+                # на лигу, а не detail-вызова на каждый их матч.
+                # Оба отсева применяются ТОЛЬКО когда поле есть. Пустое
+                # start_time — это «дата неизвестна», а не «матч древний»;
+                # пустое duration — «длительность неизвестна», а не «матч
+                # длился ноль секунд». Считать отсутствие данных вердиктом
+                # здесь особенно дорого: отброшенный кандидат уходит
+                # молча, и источник выглядел бы исправным.
+                started = entry.get("start_time")
+                if started is not None and int(started) < oldest:
+                    stats["старее окна"] += 1
+                    continue
+                dur = entry.get("duration")
+                if dur is not None and int(dur) < self._min_duration_s:
+                    stats["короткий"] += 1
+                    continue
+                fresh += 1
+                stats["матчей в лигах"] += 1
+                yield int(mid)
+            if not fresh:
+                # Турнир, у которого нет ни одного матча свежее окна,
+                # закончился и новых не даст. Помним это до следующего
+                # перечитывания каталога — иначе каждый цикл платил бы
+                # вызов за одни и те же мёртвые лиги, а их тысячи.
+                self._dead_leagues.add(lid)
+                stats["лиг выдохлось"] += 1
+
+    def _league_batch(self) -> list[int]:
+        """Лиги на этот цикл: активные + следующая пачка из каталога.
+
+        Активные (из /proMatches) опрашиваются ВСЕГДА — там идут матчи
+        прямо сейчас. Каталог обходится по кругу пачками: он большой, и
+        выгребать его целиком за цикл значило бы сжечь квоту на лиги,
+        закончившиеся годы назад.
+        """
+        active = [lid for lid in self._active_leagues()
+                  if lid not in self._dead_leagues]
+        rest = [lid for lid in self._catalog_leagues()
+                if lid not in self._dead_leagues and lid not in active]
+        if not rest:
+            return active
+        start = self._league_pos % len(rest)
+        batch = (rest + rest)[start:start + self._league_batch_size]
+        self._league_pos = (start + self._league_batch_size) % len(rest)
+        return active + batch
 
     def _candidates(self, stats: dict) -> Iterable[int]:
         if self._mode == "league":
@@ -367,7 +468,8 @@ class OpenDotaTimelineSource:
                  "дубликат": 0, "кэш отказов": 0, "фильтр": 0,
                  "нет строк": 0, "ошибка запроса": 0, "бюджет вызовов": 0,
                  "страниц листинга": 0, "лиг найдено": 0, "лиг опрошено": 0,
-                 "матчей в лигах": 0, "лиг пустых": 0, "лиг сорвалось": 0}
+                 "матчей в лигах": 0, "лиг пустых": 0, "лиг сорвалось": 0,
+                 "старее окна": 0, "короткий": 0, "лиг выдохлось": 0}
 
         # Нулевые счётчики из отчёта убраны, иначе строка нечитаема. Но у
         # режима league ноль — САМОЕ ИНФОРМАТИВНОЕ значение: «лиг найдено:
