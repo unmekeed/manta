@@ -201,7 +201,8 @@ class OpenDotaTimelineSource:
                  league_tiers: str = "premium,professional",
                  league_batch: int = 8,
                  league_max_age_days: int = 30,
-                 league_catalog_ttl_s: float = 86400.0) -> None:
+                 league_catalog_ttl_s: float = 86400.0,
+                 league_id_margin: int = 1000) -> None:
         assert mode in ("public", "pro", "league")
         self._mode = mode
         self.name = {"public": "opendota_timeline",
@@ -223,7 +224,9 @@ class OpenDotaTimelineSource:
         self._catalog_ttl = league_catalog_ttl_s
         self._catalog_at = -league_catalog_ttl_s
         self._league_batch_size = max(int(league_batch), 1)
-        self._league_pos = 0
+        # Запас над самой свежей активной лигой: турнир мог быть заведён
+        # чуть позже тех, чьи матчи уже идут.
+        self._league_id_margin = max(int(league_id_margin), 0)
         self._max_age_days = max(int(league_max_age_days), 1)
         # Лиги, у которых нет матчей свежее окна. Сбрасывается при каждом
         # перечитывании каталога — см. _catalog_leagues.
@@ -416,23 +419,43 @@ class OpenDotaTimelineSource:
                 stats["лиг выдохлось"] += 1
 
     def _league_batch(self) -> list[int]:
-        """Лиги на этот цикл: активные + следующая пачка из каталога.
+        """Лиги на этот цикл: активные + ближайшая пачка из каталога.
 
         Активные (из /proMatches) опрашиваются ВСЕГДА — там идут матчи
-        прямо сейчас. Каталог обходится по кругу пачками: он большой, и
-        выгребать его целиком за цикл значило бы сжечь квоту на лиги,
+        прямо сейчас. Каталог берётся пачками: он большой, и выгребать
+        его целиком за цикл значило бы сжечь квоту на турниры,
         закончившиеся годы назад.
+
+        Порядок — УБЫВАЮЩИЙ leagueid, то есть ход назад по времени от
+        текущих турниров. Id выдаются по мере создания лиги, поэтому в
+        современном пространстве больший id значит более поздний турнир:
+        активные сейчас — 19917…20030, а основная масса каталога сидит в
+        10000–19999. Первая версия обходила каталог в порядке ответа
+        API — и первые же восемь лиг оказались турнирами прошлых лет
+        (замер 2026-08-05: «старее окна: 422, лиг выдохлось: 8, собрано
+        0»). Полный круг по 2681 лиге пачками по 8 занял бы две недели,
+        и всё это время источник давал бы ноль.
+
+        Потолок отсекает ЛЕГАСИ-блок: 11 лиг с id 60000+ — это The
+        International 2013 и его современники, другое пространство id.
+        Потолок берётся от активных лиг, а не константой: константа
+        протухнет через год и молча выкинет весь свежий диапазон.
+
+        Без активных лиг каталог не обходится вовсе: ориентира нет, а
+        обходить 2681 запись вслепую — это гадание за счёт квоты.
+        Прокрутки позиции здесь нет намеренно: выдохшиеся лиги выпадают
+        из списка навсегда, поэтому фронт сам съезжает вглубь, а живые
+        остаются в начале — их и надо опрашивать каждый цикл.
         """
         active = [lid for lid in self._active_leagues()
                   if lid not in self._dead_leagues]
-        rest = [lid for lid in self._catalog_leagues()
-                if lid not in self._dead_leagues and lid not in active]
-        if not rest:
-            return active
-        start = self._league_pos % len(rest)
-        batch = (rest + rest)[start:start + self._league_batch_size]
-        self._league_pos = (start + self._league_batch_size) % len(rest)
-        return active + batch
+        if not active:
+            return []
+        ceiling = max(active) + self._league_id_margin
+        rest = [lid for lid in sorted(self._catalog_leagues(), reverse=True)
+                if lid <= ceiling and lid not in self._dead_leagues
+                and lid not in active]
+        return active + rest[:self._league_batch_size]
 
     def _candidates(self, stats: dict) -> Iterable[int]:
         if self._mode == "league":

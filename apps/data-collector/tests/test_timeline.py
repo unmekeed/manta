@@ -660,25 +660,64 @@ def test_catalog_leagues_extend_beyond_active_window():
     assert 999 not in got, "лига чужого тира просочилась"
 
 
-def test_catalog_walk_advances_between_cycles():
-    """Порядок в каталоге произволен (65019 — это TI 2013, а турниры
-    2026 идут под ~20000), поэтому сортировать по id бесполезно и обход
-    круговой. Если позиция не двигается, каждый цикл смотрит одни и те же
-    лиги — то есть глубины не прибавляется вовсе."""
-    src = _league_src(league_batch=2)
+def test_catalog_walked_newest_first():
+    """Порядок обхода — убывающий leagueid, то есть ход НАЗАД ПО ВРЕМЕНИ
+    от текущих турниров: id выдаются по мере создания лиги.
+
+    Первая версия шла в порядке ответа API, и первые же восемь лиг
+    оказались турнирами прошлых лет (замер 2026-08-05: «старее окна: 422,
+    лиг выдохлось: 8, собрано 0»). Полный круг по 2681 лиге пачками по 8
+    занял бы две недели, и всё это время источник давал бы ноль.
+    """
+    src = _league_src(league_batch=3)
 
     def fake_get(path, **params):
         if path == "proMatches":
-            return _R([])
+            return _R([{"match_id": 1, "leagueid": 19900}])
         if path == "leagues":
             return _R([{"leagueid": i, "tier": "premium"}
-                       for i in (10, 11, 12, 13)])
+                       for i in (11000, 19800, 15000, 19850, 12000)])
         return _R([])
 
     src._get = fake_get
-    first, second = src._league_batch(), src._league_batch()
-    assert first != second, f"обход стоит на месте: {first}"
-    assert set(first) | set(second) == {10, 11, 12, 13}
+    assert src._league_batch() == [19900, 19850, 19800, 15000]
+
+
+def test_legacy_league_block_is_cut_off():
+    """11 лиг с id 60000+ — это The International 2013 и современники,
+    другое пространство id. Без потолка обход начинался бы с них.
+
+    Потолок берётся ОТ АКТИВНЫХ лиг, а не константой: константа протухнет
+    через год и молча выкинет весь свежий диапазон — а выглядело бы это
+    как «в каталоге ничего нет»."""
+    src = _league_src(league_batch=5)
+
+    def fake_get(path, **params):
+        if path == "proMatches":
+            return _R([{"match_id": 1, "leagueid": 20030}])
+        if path == "leagues":
+            return _R([{"leagueid": i, "tier": "premium"}
+                       for i in (65019, 60001, 19917, 15000)])
+        return _R([])
+
+    src._get = fake_get
+    got = src._league_batch()
+    assert 65019 not in got and 60001 not in got, got
+    assert got == [20030, 19917, 15000]
+
+
+def test_no_active_leagues_means_no_blind_walk():
+    """Без активных лиг ориентира нет, а обходить 2681 запись вслепую —
+    это гадание за счёт квоты."""
+    src = _league_src()
+
+    def fake_get(path, **params):
+        if path == "leagues":
+            return _R([{"leagueid": 15000, "tier": "premium"}])
+        return _R([])
+
+    src._get = fake_get
+    assert src._league_batch() == []
 
 
 def test_old_matches_dropped_before_detail_call():
@@ -739,17 +778,20 @@ def test_exhausted_league_is_not_polled_again(caplog):
 
     def fake_get(path, **params):
         if path == "proMatches":
-            return _R([])
+            return _R([{"match_id": 1, "leagueid": 19000}])
         if path == "leagues":
-            return _R([{"leagueid": i, "tier": "premium"} for i in (10, 11)])
+            return _R([{"leagueid": i, "tier": "premium"}
+                       for i in (18000, 17000)])
         return _R([{"match_id": 900, "start_time": int(_t.time()) - 400 * 86400,
                     "duration": 2000}])
 
     src._get = fake_get
     with caplog.at_level("INFO", logger="collector.opendota_timeline"):
         assert list(src.fetch_new()) == []
-    assert "лиг выдохлось: 2" in _cycle_line(caplog)
-    assert src._dead_leagues == {10, 11}
+    assert "лиг выдохлось: 3" in _cycle_line(caplog)
+    assert src._dead_leagues == {19000, 18000, 17000}
+    # Фронт съезжает вглубь сам: выбывшие больше не опрашиваются, и
+    # прокрутка позиции для этого не нужна.
     assert src._league_batch() == [], "мёртвые лиги снова в опросе"
 
 
