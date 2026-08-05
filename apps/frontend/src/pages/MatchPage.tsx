@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
 import DeathMap, { type DeathPoint } from "../components/DeathMap";
+import HeatMapPanel from "../components/HeatMapPanel";
 import WpChart from "../components/WpChart";
 import {
   api,
@@ -163,6 +164,10 @@ export default function MatchPage() {
           </div>
         </>
       )}
+
+      <div className="panel">
+        <HeatMapPanel maps={a.heatmaps} />
+      </div>
 
       <h2>Ключевые ошибки (ΔWP)</h2>
       {errors.length === 0 ? (

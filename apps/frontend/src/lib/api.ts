@@ -44,6 +44,28 @@ export interface PlayerAnalysis {
   errors: GameError[];
 }
 
+// Тепловые карты (спринт 110/111). Клетки разрежены: [gx, gy, n], где
+// gx/gy — индексы сетки maps.grid (0,0 — юго-запад, база Radiant).
+export type HeatmapPhase = "early" | "mid" | "late";
+export type HeatmapKind =
+  | "presence"
+  | "farm"
+  | "death"
+  | "ward"
+  | "smoke"
+  | "fight";
+
+export interface HeatmapBlock {
+  max_n: number; // нормировка внутри пары (фаза, вид), общая для сторон
+  radiant: [number, number, number][];
+  dire: [number, number, number][];
+}
+
+export interface Heatmaps {
+  grid: number;
+  phases: Partial<Record<HeatmapPhase, Partial<Record<HeatmapKind, HeatmapBlock>>>>;
+}
+
 export interface MatchAnalysis {
   match_id: number;
   status: string;
@@ -53,6 +75,10 @@ export interface MatchAnalysis {
   partial: boolean;
   report_version: string;
   model_version: string;
+  heatmaps?: Heatmaps;
+  // Отдельный флаг: пустая секция и отсутствующая выглядят одинаково, а
+  // причины разные (у JSON-матчей координат нет в принципе).
+  heatmaps_available?: boolean;
 }
 
 export interface MatchListItem {

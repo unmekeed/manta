@@ -15,7 +15,7 @@ const S = 100; // сторона viewBox
 export default function DeathMap({ deaths }: { deaths: DeathPoint[] }) {
   return (
     <svg
-      className="death-map"
+      className="death-map map-frame"
       viewBox={`0 0 ${S} ${S}`}
       role="img"
       aria-label="Карта смертей"
