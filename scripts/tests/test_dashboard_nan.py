@@ -204,3 +204,32 @@ def test_dashboard_kept_out_of_the_generic_loop():
            ).read_text(encoding="utf-8")
     loop = src.split("restart_if_stale()")[1].split("# 4. Хост-сервисы")[0]
     assert "dashboard.py" not in loop
+
+
+def test_recover_defaults_to_the_env_file(tmp_path):
+    """`make recover` работал БЕЗ токенов (спринт 107).
+
+    Makefile передаёт `MANTA_TRAIN_ENV=` пустым — переменная в нём не
+    определена. scripts/manta дефолт подставляет, Makefile нет, и
+    env-файл не читался вовсе: ключ OpenDota, токен STRATZ и Telegram
+    выключены. До спринта 106 это сходило с рук, потому что recover
+    пропускал живые сервисы; теперь он их ПЕРЕЗАПУСКАЕТ, то есть отобрал
+    бы токены у работающих коллекторов — и выглядело бы как обычный
+    рестарт.
+
+    Проверка исполняет строку с ПУСТЫМ значением, как его и передаёт
+    Makefile: `${VAR:-default}` считает пустое отсутствующим, а
+    `${VAR-default}` — нет, и разница здесь решает всё.
+    """
+    import subprocess
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    line = next(l for l in src.splitlines() if l.startswith("TRAIN_ENV="))
+    probe = tmp_path / "probe.sh"
+    probe.write_text(f'set -euo pipefail\nHOME=/дом\n{line}\n'
+                     'printf "%s" "$TRAIN_ENV"\n', encoding="utf-8")
+    r = subprocess.run(["bash", str(probe)], capture_output=True, text=True,
+                       env={"MANTA_TRAIN_ENV": "", "PATH": "/usr/bin:/bin"})
+    assert r.stdout == "/дом/manta-train.env", (
+        f"пустое значение не заместилось дефолтом: {r.stdout!r}")

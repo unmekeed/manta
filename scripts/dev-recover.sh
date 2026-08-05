@@ -17,7 +17,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 COMPOSE="docker compose -f deployments/docker-compose.yml"
-TRAIN_ENV="${MANTA_TRAIN_ENV:-}"
+# Дефолт — тот же, что у scripts/manta (спринт 107). Без него `make
+# recover` работал БЕЗ токенов: Makefile подставляет MANTA_TRAIN_ENV=
+# пустым (переменная в нём не определена), и env-файл не читался вовсе.
+# До спринта 106 это сходило с рук — recover пропускал живые сервисы, а
+# поднимал их `manta up`, который дефолт подставляет. Теперь recover
+# перезапускает устаревшие процессы, то есть отобрал бы у них ключ
+# OpenDota, токен STRATZ и Telegram, а выглядело бы это как обычный
+# рестарт. Пустое значение `:-` считает отсутствующим — поэтому явная
+# передача пустышки из Makefile тоже лечится здесь.
+TRAIN_ENV="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
 # Логи — вне /tmp (спринт 49, инцидент №8: /tmp гибнет при рестарте WSL,
 # истории для диагностики не остаётся).
 LOG_DIR="${MANTA_LOG_DIR:-$HOME/manta-logs}"
