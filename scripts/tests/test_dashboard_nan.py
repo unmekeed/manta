@@ -233,3 +233,53 @@ def test_recover_defaults_to_the_env_file(tmp_path):
                        env={"MANTA_TRAIN_ENV": "", "PATH": "/usr/bin:/bin"})
     assert r.stdout == "/дом/manta-train.env", (
         f"пустое значение не заместилось дефолтом: {r.stdout!r}")
+
+
+def test_env_file_counts_as_code(tmp_path):
+    """Правка manta-train.env без перезапуска не значит ничего (спринт 109).
+
+    Токены, лимиты циклов и номер шарда сервис читает ОДИН РАЗ при
+    старте. Поменяли COLLECTOR_SHARD_COUNT — recover доложит «уже
+    работает, пропуск», коллектор продолжит делить поток пополам, а
+    выглядеть будет так, будто настройка применена. Та же подмена
+    «изменил» на «подействовало», что и с git pull до спринта 106.
+    """
+    import subprocess
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    i = src.index("newest_code=${newest_code%%.*}")
+    block = src[i:src.index("restart_if_stale()")]
+    assert "$TRAIN_ENV" in block, "env-файл не участвует в сверке свежести"
+
+    env = tmp_path / "manta-train.env"
+    env.write_text("X=1\n", encoding="utf-8")
+    probe = tmp_path / "probe.sh"
+    probe.write_text(
+        f'set -euo pipefail\nTRAIN_ENV="{env}"\nnewest_code=1\n'
+        + block + '\nprintf "%s" "$newest_code"\n', encoding="utf-8")
+    r = subprocess.run(["bash", str(probe)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert int(r.stdout) > 1, (
+        "правка env-файла не двигает отметку свежести")
+
+
+def test_missing_env_file_does_not_break_recover():
+    """Файла может не быть — это штатный режим (машина без секретов).
+    Под `set -euo pipefail` любая небрежность здесь роняет весь recover,
+    как уже было в спринте 102 с pgrep."""
+    import subprocess
+    import tempfile
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    i = src.index("newest_code=${newest_code%%.*}")
+    block = src[i:src.index("restart_if_stale()")]
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "probe.sh"
+        f.write_text('set -euo pipefail\nTRAIN_ENV="/нет-такого-файла-9z9z"\n'
+                     'newest_code=1\n' + block + '\necho ДОШЛИ\n',
+                     encoding="utf-8")
+        r = subprocess.run(["bash", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, f"блок роняет скрипт: {r.stderr}"
+    assert "ДОШЛИ" in r.stdout

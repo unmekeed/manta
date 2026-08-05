@@ -150,6 +150,16 @@ newest_code=$(find apps libs scripts \
         -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
 newest_code=${newest_code%%.*}
 
+# env-файл считается частью «кода» (спринт 109). Токены, лимиты циклов и
+# номер шарда сервис читает ОДИН РАЗ при старте, поэтому правка
+# manta-train.env без перезапуска не значит ничего — а выглядит так, будто
+# настройка применена. Та же подмена «изменил» на «подействовало», что и с
+# git pull до спринта 106.
+if [ -f "$TRAIN_ENV" ]; then
+    env_mtime=$(stat -c %Y "$TRAIN_ENV" 2>/dev/null || echo 0)
+    [ "${env_mtime:-0}" -gt "${newest_code:-0}" ] && newest_code="$env_mtime"
+fi
+
 restart_if_stale() {   # имя  шаблон-pgrep
     local name="$1" pat="$2" pid age started
     [ -n "${newest_code:-}" ] || return 0
