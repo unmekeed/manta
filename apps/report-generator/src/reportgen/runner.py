@@ -58,6 +58,13 @@ WP_PASSTHROUGH_FEATURES = [
     "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
     "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
     "runes_diff", "neutral_tier_diff", "levels_diff", "draft_prior",
+    # Волна 1 (спринты 84, 90, 91). Их добавили в обучение, но забыли
+    # здесь — тест test_wp_features_sync горел с тех самых пор. Пока в
+    # production крутится модель постарше, Predict не спрашивает эти
+    # фичи и всё выглядит рабочим; в день, когда гейт пропустит модель с
+    # ними, отчёты начали бы падать с INVALID_ARGUMENT.
+    "local_manpower_diff", "spread_diff", "vision_coverage_diff",
+    "unspent_gold_diff", "buyback_availability",
 ]
 
 # Колонки витрины для _timeline_rows: сырьё под WP_PASSTHROUGH_FEATURES и
@@ -132,6 +139,18 @@ class ReportGenerator:
             " WHERE match_id = {match_id:UInt64} AND event_type = 'KILL'"
             "   AND target LIKE 'npc_dota_hero_%'"
             " ORDER BY game_time", match_id)
+
+    def _map_cell_rows(self, match_id: int) -> list[dict]:
+        """Клетки тепловых карт матча (спринт 110).
+
+        FINAL обязателен: MatchMapCells — ReplacingMergeTree, и до
+        слияния кусков переразобранный матч отдаёт клетки дважды. На
+        карте это выглядело бы как удвоенная интенсивность в части
+        клеток — правдоподобно и незаметно.
+        """
+        return self._ch_select(
+            "SELECT phase, team, kind, gx, gy, n FROM MatchMapCells FINAL"
+            " WHERE match_id = {match_id:UInt64}", match_id)
 
     def _position_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
@@ -283,7 +302,8 @@ class ReportGenerator:
                                   positions=positions,
                                   risk_fn=self._risk_fn(),
                                   laning_fn=self._laning_fn(),
-                                  early_combat=self._early_combat(match_id))
+                                  early_combat=self._early_combat(match_id),
+                                  map_cells=self._map_cell_rows(match_id))
 
         self.db.execute(
             """INSERT INTO MatchReports

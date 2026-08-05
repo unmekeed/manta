@@ -20,6 +20,8 @@ REPORT_VERSION = "0.2.0"  # 0.2.0: hero_id из словаря, errors (ΔWP)
 # поэтому кандидаты перебираются; HEROES_PATH переопределяет.
 
 
+from .heatmaps import build_heatmaps, heatmaps_available
+
 def _load_heroes() -> dict:
     import os
     here = Path(__file__).resolve()
@@ -445,12 +447,14 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
                    kills: list[dict] | None = None,
                    positions: list[dict] | None = None,
                    risk_fn=None, laning_fn=None,
-                   early_combat: dict[str, dict] | None = None) -> dict:
+                   early_combat: dict[str, dict] | None = None,
+                   map_cells: list[dict] | None = None) -> dict:
     """Схема MatchAnalysis (+ hero/player_name — аддитивные поля).
 
     early_combat: hero (npc_dota_hero_*) → {dealt, taken, kills, deaths}
     за первые 5 минут — фичи Laning-модели (laning_fn); без них/без
     модели laning_score считает эвристика."""
+    heatmaps = build_heatmaps(map_cells or [])
     points = timeline["points"]
     final_wp = points[-1]["radiant_wp"] if points else 0.5
     turning = _turning_point(points)
@@ -498,4 +502,10 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
         "partial": True,
         "report_version": REPORT_VERSION,
         "model_version": model_version,
+        # Тепловые карты (спринт 110). heatmaps_available отделяет
+        # «карт нет» от «карты пустые»: у JSON-матчей координат нет
+        # в принципе, и без флага потребитель не отличит это от
+        # матча, где никто не ставил вардов.
+        "heatmaps": heatmaps,
+        "heatmaps_available": heatmaps_available(heatmaps),
     }

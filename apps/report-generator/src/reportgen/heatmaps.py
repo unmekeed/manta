@@ -1,0 +1,89 @@
+"""Тепловые карты матча для отчёта (спринт 110).
+
+Запрошено владельцем: карты присутствия, фарм-маршруты, варды, смоки,
+смерти и важные драки — по разделам игры (эрлигейм, мид, лейтгейм).
+Спринты 97–99 добывали для этого сырьё (координаты событий, агрегат
+MatchMapCells); здесь оно превращается в готовую секцию отчёта.
+
+Формат — РАЗРЕЖЕННЫЙ: только непустые клетки списком [gx, gy, n].
+Сетка 32×32 даёт 1024 клетки на каждую комбинацию фазы, стороны и вида,
+то есть 1024 × 3 × 2 × 6 ≈ 37 тысяч чисел на матч, из которых заполнена
+малая часть. Отчёт лежит в Postgres одним JSON, и плотная форма раздула
+бы его на порядок без единого нового факта.
+
+Нормировка (`max_n`) считается ЗДЕСЬ, а не на клиенте: цвет клетки — это
+доля от максимума, и если каждый потребитель будет искать максимум сам,
+две картинки одного матча разойдутся по шкале. Максимум берётся внутри
+(фаза, вид), а НЕ по всей карте: присутствие даёт сотни попаданий в
+клетку, смоки — единицы, и общая шкала превратила бы карту смоков в
+пустой лист.
+"""
+from __future__ import annotations
+
+GRID = 32                      # согласовано с extractor/mapcells.py
+PHASES = ("early", "mid", "late")
+KINDS = ("presence", "farm", "death", "ward", "smoke", "fight")
+TEAMS = (2, 3)                 # 2 Radiant, 3 Dire
+
+
+def build_heatmaps(cells: list[dict]) -> dict:
+    """Секция `heatmaps` отчёта из строк MatchMapCells.
+
+    Возвращает {"grid": 32, "phases": {фаза: {вид: {"max_n": N,
+    "radiant": [[gx, gy, n], …], "dire": […]}}}}.
+
+    Пустые сочетания НЕ включаются: отсутствие вардов в лейтгейме — это
+    факт, и он честнее читается как отсутствующий ключ, чем как пустой
+    список рядом с непустыми (по пустому списку не отличить «не было» от
+    «не посчитали»). Вызывающий сообщает об этом явным `available`.
+    """
+    out: dict[str, dict] = {}
+    for row in cells or []:
+        phase = str(row.get("phase") or "")
+        kind = str(row.get("kind") or "")
+        if phase not in PHASES or kind not in KINDS:
+            continue
+        try:
+            team = int(row.get("team") or 0)
+            gx, gy = int(row.get("gx")), int(row.get("gy"))
+            n = int(row.get("n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if team not in TEAMS or n <= 0:
+            continue
+        # Клетка вне сетки — испорченная строка, а не край карты:
+        # extractor такие отбрасывает, но агрегат мог приехать из
+        # бэкфилла более старой версии.
+        if not (0 <= gx < GRID and 0 <= gy < GRID):
+            continue
+        side = "radiant" if team == 2 else "dire"
+        block = out.setdefault(phase, {}).setdefault(
+            kind, {"max_n": 0, "radiant": [], "dire": []})
+        block[side].append([gx, gy, n])
+        block["max_n"] = max(block["max_n"], n)
+
+    # Порядок клеток фиксируем: отчёт пересобирается при переразборе
+    # матча, и плавающий порядок давал бы «изменившийся» отчёт там, где
+    # ничего не менялось.
+    for kinds in out.values():
+        for block in kinds.values():
+            for side in ("radiant", "dire"):
+                block[side].sort(key=lambda c: (c[0], c[1]))
+
+    return {"grid": GRID,
+            "phases": {p: out[p] for p in PHASES if p in out}}
+
+
+def heatmaps_available(section: dict) -> bool:
+    """Есть ли в секции хоть одна клетка.
+
+    Нужно отдельным флагом, потому что пустая секция и отсутствующая
+    выглядят одинаково у потребителя, а причины разные: у JSON-матчей
+    (источник opendota_timeline) координат нет в принципе, у реплейных
+    они появляются только после разбора. Молчаливая пустота уже стоила
+    нам спринтов 92 и 99.
+    """
+    return any(block[side]
+               for kinds in section.get("phases", {}).values()
+               for block in kinds.values()
+               for side in ("radiant", "dire"))
