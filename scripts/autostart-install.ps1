@@ -3,7 +3,9 @@
 # Создаёт две задачи:
 #   Manta-Recover  — при входе в систему: поднять Docker Desktop, дождаться
 #                    демона и выполнить `make recover` в WSL (идемпотентно);
-#   Manta-Backup   — ежедневно: слепок датасета с ротацией (scripts/backup.sh).
+#   Manta-Backup   — ежедневно: слепок датасета с ротацией (scripts/backup.sh);
+#   Manta-Report   — ежедневно: снимок диагностики за день, хранится 30 дней
+#                    (scripts/daily-report.sh).
 #
 # Запускать в PowerShell ОТ ИМЕНИ АДМИНИСТРАТОРА, из Windows (не из WSL):
 #   powershell -ExecutionPolicy Bypass -File \\wsl$\Ubuntu\home\<user>\manta\scripts\autostart-install.ps1
@@ -12,6 +14,7 @@
 #   -Distro     имя дистрибутива WSL (wsl -l -q покажет список)
 #   -WslUser    пользователь внутри WSL (whoami в WSL)
 #   -BackupAt   время ежедневного бэкапа, ЧЧ:ММ
+#   -ReportAt   время ежедневного отчёта, ЧЧ:ММ
 #   -Uninstall  удалить обе задачи
 #
 # Проверить после установки:  Get-ScheduledTask -TaskName 'Manta-*'
@@ -21,13 +24,16 @@ param(
     [string]$Distro   = 'Ubuntu',
     [string]$WslUser  = $env:USERNAME,
     [string]$BackupAt = '05:30',
+    # Отчёт снимается ПОСЛЕ бэкапа: если бэкап сломается, это попадёт
+    # в отчёт того же дня, а не следующего.
+    [string]$ReportAt = '06:00',
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
 
 if ($Uninstall) {
-    foreach ($name in 'Manta-Recover', 'Manta-Backup') {
+    foreach ($name in 'Manta-Recover', 'Manta-Backup', 'Manta-Report') {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
             Write-Host "удалена задача $name"
@@ -57,6 +63,7 @@ wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && MANTA_TRAIN_ENV=~/manta-tr
 "@
 
 $backupCmd = "wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && ./scripts/backup.sh'"
+$reportCmd = "wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && ./scripts/daily-report.sh'"
 
 function New-MantaTask($name, $command, $trigger, $description) {
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
@@ -78,6 +85,10 @@ New-MantaTask 'Manta-Recover' $recoverCmd `
 New-MantaTask 'Manta-Backup' $backupCmd `
     (New-ScheduledTaskTrigger -Daily -At $BackupAt) `
     'Manta: ежедневный слепок датасета с ротацией'
+
+New-MantaTask 'Manta-Report' $reportCmd `
+    (New-ScheduledTaskTrigger -Daily -At $ReportAt) `
+    'Manta: ежедневный снимок диагностики (хранится 30 дней)'
 
 Write-Host ''
 Write-Host 'Готово. Проверка:'

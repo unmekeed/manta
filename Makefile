@@ -156,6 +156,9 @@ recover:       ## Восстановить dev-стек после переза�
 stop:          ## Остановить хостовые процессы (контейнеры и данные не трогает)
 	./scripts/dev-stop.sh
 
+daily-report:  ## Снимок doctor+collect-report+ml-audit в MANTA_REPORT_DIR (30 дней)
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/daily-report.sh
+
 doctor:        ## Health-check конвейера по ДАННЫМ (топики, лаг, свежесть, квота)
 	./scripts/doctor.sh
 
