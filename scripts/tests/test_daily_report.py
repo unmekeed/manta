@@ -119,3 +119,26 @@ def test_make_target_exists(target):
     src = (Path(__file__).resolve().parents[2] / "Makefile"
            ).read_text(encoding="utf-8")
     assert f"\n{target}:" in src
+
+
+def test_powershell_scripts_have_utf8_bom():
+    """Windows PowerShell 5.1 без BOM читает .ps1 в ANSI-кодировке системы
+    (для русской локали — Windows-1251).
+
+    Инцидент 2026-08-05: установка задач планировщика падала на РАЗБОРЕ
+    файла, не дойдя до первой команды — «Непредвиденная лексема "wsl"»,
+    «в строке отсутствует завершающий символ». Причина не в логике: в
+    тексте ошибки видно `РїСЂРѕРіРЅР°С‚СЊ` — это UTF-8, прочитанный как
+    1251. Мангленные байты рвали кавычки, и скрипт становился
+    синтаксически неверным.
+
+    BOM теряется молча: любой редактор, сохранивший файл «просто в
+    UTF-8», вернёт поломку, а увидеть её можно только на Windows.
+    """
+    root = Path(__file__).resolve().parents[2]
+    scripts = list((root / "scripts").glob("*.ps1"))
+    assert scripts, "не найдено ни одного .ps1 — проверка бессмысленна"
+    for f in scripts:
+        raw = f.read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf"), f"{f.name}: нет UTF-8 BOM"
+        raw[3:].decode("utf-8")          # и содержимое валидно
