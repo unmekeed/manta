@@ -32,6 +32,40 @@ TRAIN_ENV="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
 LOG_DIR="${MANTA_LOG_DIR:-$HOME/manta-logs}"
 mkdir -p "$LOG_DIR"
 
+# ТАБЛИЦА СЕРВИСОВ — единственная на весь скрипт (спринт 115).
+#
+# Раньше их было две: список в цикле сверки свежести и вызовы `check` в
+# статусе. 2026-08-05 они разошлись — `check stratz-coll.` стоит внутри
+# `if [ -n "$STRATZ_API_TOKEN" ]`, поэтому не попал в список свежести, и
+# stratz-коллектор сутки крутил старый код, пока остальные обновлялись.
+# Внешне всё было исправно: статус OK, процесс жив, лог пишется.
+#
+# Ровно об этом предупреждал комментарий в спринте 106 — «карта, какой
+# файл чей, молча устареет». Устарела не карта файлов, а карта сервисов,
+# и за один спринт. Поэтому источник теперь один.
+#
+# Дашборда здесь нет НАМЕРЕННО: у него отдельный блок с защитой от
+# самоубийства, когда recover запущен его же кнопкой.
+SERVICES=(
+    "parser-svc|^/tmp/parser-svc"
+    "feature-extractor|python3 -u -m extractor"
+    "data-collector|collector --source opendota-public"
+    "timeline-coll.|collector --source opendota-timeline --interval"
+    "pro-timeline|collector --source opendota-timeline-pro"
+    "league-coll.|collector --source opendota-league"
+    "pro-replay|collector --source opendota --interval"
+    "stratz-coll.|collector --source stratz-timeline --interval"
+    "ml-service|python3 -u -m app"
+    "similarity|python3 -u -m serve$"
+    "draft|python3 -u -m serve_draft"
+    "coach|python3 -u -m serve_coach"
+    "feature-store|python3 -u -m serve_features"
+    "report-generator|python3 -u -m reportgen"
+    "auto-train|python3 -u -m training.auto"
+    "api-gateway|^/tmp/api-gateway"
+    "frontend|vite --host"
+)
+
 say()  { printf '>> %s\n' "$*"; }
 skip() { printf '   %s — уже работает, пропуск\n' "$*"; }
 
@@ -178,23 +212,7 @@ restart_if_stale() {   # имя  шаблон-pgrep
 
 # Дашборд здесь НЕ трогаем: у него отдельный блок ниже, с защитой от
 # самоубийства, когда recover запущен его же кнопкой.
-for svc in \
-    "parser-svc|^/tmp/parser-svc" \
-    "feature-extractor|python3 -u -m extractor" \
-    "data-collector|collector --source opendota-public" \
-    "timeline-coll.|collector --source opendota-timeline --interval" \
-    "pro-timeline|collector --source opendota-timeline-pro" \
-    "league-coll.|collector --source opendota-league" \
-    "pro-replay|collector --source opendota --interval" \
-    "ml-service|python3 -u -m app" \
-    "similarity|python3 -u -m serve$" \
-    "draft|python3 -u -m serve_draft" \
-    "coach|python3 -u -m serve_coach" \
-    "feature-store|python3 -u -m serve_features" \
-    "report-generator|python3 -u -m reportgen" \
-    "auto-train|python3 -u -m training.auto" \
-    "api-gateway|^/tmp/api-gateway" \
-    "frontend|vite --host" ; do
+for svc in "${SERVICES[@]}"; do
     restart_if_stale "${svc%%|*}" "${svc#*|}"
 done
 
@@ -445,25 +463,15 @@ echo
 say "статус"
 printf '   %-18s %s\n' clickhouse "$(curl -s http://localhost:8123/ping)"
 check() { printf '   %-18s %s\n' "$1" "$(pgrep -f "$2" >/dev/null && echo OK || echo DOWN)"; }
-check parser-svc "^/tmp/parser-svc"
-check feature-extractor "python3 -u -m extractor"
-check data-collector "collector --source opendota-public"
-check timeline-coll. "collector --source opendota-timeline --interval"
-check pro-timeline "collector --source opendota-timeline-pro"
-check league-coll. "collector --source opendota-league"
-check pro-replay "collector --source opendota --interval"
-if [ -n "${STRATZ_API_TOKEN:-}" ]; then
-    check stratz-coll. "collector --source stratz-timeline --interval"
-fi
-check ml-service "python3 -u -m app"
-check similarity "python3 -u -m serve$"
-check draft "python3 -u -m serve_draft"
-check coach "python3 -u -m serve_coach"
-check feature-store "python3 -u -m serve_features"
-check report-generator "python3 -u -m reportgen"
-check auto-train "python3 -u -m training.auto"
-check api-gateway "^/tmp/api-gateway"
-check frontend "vite --host"
+for svc in "${SERVICES[@]}"; do
+    name="${svc%%|*}"
+    # STRATZ без токена не запускается вовсе — показывать его DOWN
+    # значило бы объявлять поломкой намеренно выключённый источник.
+    if [ "$name" = "stratz-coll." ] && [ -z "${STRATZ_API_TOKEN:-}" ]; then
+        continue
+    fi
+    check "$name" "${svc#*|}"
+done
 check dashboard "scripts/dashboard.py"
 matches=$(echo "SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL" |
     curl -s "http://localhost:8123/?database=manta" \

@@ -283,3 +283,46 @@ def test_missing_env_file_does_not_break_recover():
         r = subprocess.run(["bash", str(f)], capture_output=True, text=True)
     assert r.returncode == 0, f"блок роняет скрипт: {r.stderr}"
     assert "ДОШЛИ" in r.stdout
+
+
+def test_every_started_service_is_in_the_freshness_table():
+    """Сервис, который recover УМЕЕТ запускать, обязан проверяться на
+    свежесть кода (спринт 115).
+
+    Инцидент 2026-08-05: списков было два — таблица в цикле свежести и
+    вызовы `check` в статусе. `check stratz-coll.` стоит внутри
+    `if [ -n "$STRATZ_API_TOKEN" ]`, поэтому не попал в список свежести
+    (его собирали по `grep '^check '`), и stratz-коллектор сутки крутил
+    код до спринта 114, пока остальные обновлялись. Внешне исправно:
+    статус OK, процесс жив, лог пишется — а поле `отступ` в логе просто
+    не появлялось.
+
+    Проверка идёт от ЗАПУСКА, а не от статуса: запуск — это факт, что
+    сервис существует, а любые списки рядом могут разойтись.
+    """
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    table = src.split("SERVICES=(", 1)[1].split("\n)", 1)[0]
+    patterns = {m.group(1) for m in
+                re.finditer(r'if ! pgrep -f "([^"]+)"', src)}
+    assert patterns, "не нашёл ни одного блока запуска — проверка пуста"
+    missing = [p for p in patterns
+               if p not in table and "dashboard.py" not in p]
+    assert not missing, (
+        f"сервисы запускаются, но не проверяются на свежесть кода: {missing}")
+
+
+def test_service_table_is_the_only_list():
+    """Вторая половина того же: статус тоже обязан читать таблицу, иначе
+    завтра разойдётся он. Прямых `check имя "шаблон"` быть не должно —
+    кроме дашборда, у которого отдельная логика."""
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / "dev-recover.sh"
+           ).read_text(encoding="utf-8")
+    hardcoded = [m.group(1) for m in
+                 re.finditer(r'^check (\S+) "', src, re.M)]
+    assert hardcoded == ["dashboard"], (
+        f"статус снова ведёт свой список сервисов: {hardcoded}")
