@@ -435,7 +435,10 @@ class StratzTimelineSource:
                  split: SourceSplit | None = None,
                  retry_attempts: int = 3,
                  detail_budget: int | None = None,
-                 skip_freshest: int = 0) -> None:
+                 skip_freshest: int = 0,
+                 id_lag: int = 0,
+                 id_lag_min: int = 30_000,
+                 id_lag_max: int = 400_000) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -480,6 +483,16 @@ class StratzTimelineSource:
         self._detail_budget = detail_budget or 4 * limit_per_cycle
         # Сколько самых свежих кандидатов пропустить (см. _candidates).
         self._skip_freshest = skip_freshest
+        # Отступ от вершины листинга в ЕДИНИЦАХ match_id (спринт 114).
+        # Замер 2026-08-05: id растут со скоростью ~789 в минуту, а 100
+        # записей /parsedMatches укладываются в ~30 000 id ≈ 38 минут.
+        # Отступ «в записях» поэтому означает то полчаса, то три — он
+        # зависит от того, сколько матчей OpenDota успел распарсить, а не
+        # от того, сколько времени было у STRATZ. Отступ в id — это
+        # отступ во времени, и он устойчив.
+        self._id_lag = max(int(id_lag), 0)
+        self._id_lag_min = max(int(id_lag_min), 0)
+        self._id_lag_max = max(int(id_lag_max), self._id_lag_min)
         # Справочник патчей OpenDota [(дата, id)]; читается лениво.
         self._patches: list[tuple[int, int]] = []
         self._patch_map_at = -PATCH_MAP_RETRY_S
@@ -551,7 +564,45 @@ class StratzTimelineSource:
 
     # -- цикл -----------------------------------------------------------------
 
-    def _candidates(self, max_pages: int = 10) -> Iterable[int]:
+    def _adapt_lag(self, calls: int, misses: int) -> None:
+        """Подстроить отступ по доле промахов прошедшего цикла.
+
+        Константу здесь угадывали дважды и оба раза мимо: сначала отступа
+        не было вовсе, потом поставили 150 записей — и 87–93 вызова из
+        ста всё равно уходили в «ждут парсинга». Третьей догадки не будет:
+        источник сам знает, сколько раз промахнулся, и двигает отступ.
+
+        Асимметрия намеренная. Растём БЫСТРО (×1.5): каждый цикл с
+        промахами — это сожжённая квота и несобранные матчи. Убываем
+        МЕДЛЕННО (×0.9): слишком глубокий отступ не теряет матчи (листинг
+        — движущееся окно, всё опустится к следующему циклу), он лишь
+        добавляет дубликатов. То есть ошибка вверх дешевле ошибки вниз, и
+        шаги это отражают.
+
+        Порог «мало промахов» — 10%, а не 0: STRATZ парсит матчи не
+        мгновенно и не строго по порядку, поэтому единичные промахи
+        неустранимы, и гнаться за нулём значит уползать всё глубже.
+        """
+        if calls <= 0:
+            # Ни одного вызова — учиться не на чем, но и оставлять отступ
+            # как есть нельзя: если он вырос до недостижимого, источник
+            # молчит, а «нет промахов» выглядит как здоровье. Сжимаем.
+            self._id_lag = max(self._id_lag_min, int(self._id_lag * 0.5))
+            return
+        rate = misses / calls
+        before = self._id_lag
+        if rate > 0.5:
+            self._id_lag = int(self._id_lag * 1.5) or self._id_lag_min
+        elif rate < 0.1:
+            self._id_lag = int(self._id_lag * 0.9)
+        self._id_lag = max(self._id_lag_min, min(self._id_lag, self._id_lag_max))
+        if self._id_lag != before:
+            logger.info("отступ STRATZ: %d -> %d (промахов %.0f%% из %d "
+                        "вызовов, ~%d мин игрового потока)",
+                        before, self._id_lag, rate * 100, calls,
+                        self._id_lag // 789)
+
+    def _candidates(self, max_pages: int = 20) -> Iterable[int]:
         """match_id из листинга OpenDota, с пагинацией вглубь.
 
         ОТСТУП ОТ ВЕРШИНЫ (спринт 95). Листинг отдаёт матчи, которые
@@ -583,6 +634,9 @@ class StratzTimelineSource:
         cursor: int | None = None
         seen: set[int] = set()
         skipped = 0
+        head: int | None = None      # самый свежий id листинга этого цикла
+        deep: list[int] = []         # отсеянные отступом, от свежих к старым
+        yielded_any = False
         for _ in range(max_pages):
             params = {}
             if cursor:
@@ -600,17 +654,41 @@ class StratzTimelineSource:
                     continue          # страница повторяет уже выданное
                 seen.add(cursor)
                 fresh += 1
+                if head is None:
+                    head = cursor
                 if skipped < self._skip_freshest:
                     # Самые свежие кандидаты пропускаются НАМЕРЕННО.
                     skipped += 1
                     continue
+                # Отступ в единицах match_id: то же самое, что отступ во
+                # времени, но не зависит от того, с какой скоростью
+                # OpenDota наполняет листинг.
+                if self._id_lag and head - cursor < self._id_lag:
+                    skipped += 1
+                    deep.append(cursor)
+                    continue
+                yielded_any = True
                 yield cursor
             # Страница не дала ни одного нового id — значит API не понял
             # less_than_match_id и отдаёт одно и то же. Дальше листать
             # бессмысленно: без этой проверки цикл жёг бы вызовы, гоняя
             # одни и те же кандидаты по кругу.
             if fresh == 0:
-                return
+                break
+        # СТРАХОВКА ОТ САМОУДУШЕНИЯ. Отступ отсчитывается от вершины
+        # листинга, поэтому при большом значении до кандидатов надо
+        # пролистать несколько страниц. Если листинг оказался короче
+        # отступа (мало распаршенных матчей, лимит страниц, ночной
+        # провал), цикл не сделал бы НИ ОДНОГО вызова — а подстройка,
+        # которой не на чем учиться, оставила бы отступ прежним. Источник
+        # замолчал бы навсегда, ровно как душил себя кэшем отказов до
+        # спринта 87.
+        # Поэтому: не отдали ничего — отдаём самые глубокие из отсеянных.
+        if not yielded_any and deep:
+            logger.info("отступ %d съел весь листинг (%d кандидатов) — "
+                        "беру самые глубокие", self._id_lag, len(deep))
+            for mid in deep[-max(len(deep) // 4, 1):]:
+                yield mid
 
     def fetch_new(self, after_cursor: str | None = None,
                   skip=None) -> Iterable[TimelineMatch]:
@@ -637,10 +715,15 @@ class StratzTimelineSource:
 
         def report() -> None:
             logger.info("цикл STRATZ: собрано %d из %d кандидатов, "
-                        "вызовов %d (%s)",
-                        yielded, stats["кандидатов"], calls,
+                        "вызовов %d, отступ %d (%s)",
+                        yielded, stats["кандидатов"], calls, self._id_lag,
                         ", ".join(f"{k}: {v}" for k, v in stats.items()
                                   if k != "кандидатов" and v))
+            # Подстройка ПОСЛЕ печати: в логе остаётся отступ, с которым
+            # цикл реально работал, а не тот, что применится к следующему.
+            # Иначе разбор постфактум («почему промахов было 87») уводил
+            # бы к неверному числу.
+            self._adapt_lag(calls, stats["ждут парсинга"] + stats["нет данных"])
 
         def defer(mid: int) -> None:
             """Матч без данных — причина ВРЕМЕННАЯ, не повод хоронить.
@@ -666,86 +749,91 @@ class StratzTimelineSource:
             else:
                 stats["ждут парсинга"] += 1
 
-        for mid in self._candidates():
-            stats["кандидатов"] += 1
-            if yielded >= self._limit:
-                report()
-                return
-            if not self._shard.accepts(mid):
-                stats["чужой шард"] += 1
-                continue
-            if not self._split.accepts(mid):
-                stats["не моя доля"] += 1
-                continue
-            if skip(mid):
-                stats["дубликат"] += 1
-                continue
-            if mid in self._rejected:
-                stats["кэш отказов"] += 1
-                continue
-            if calls >= self._detail_budget:
-                # Считаем ВЫЗОВЫ, а не успехи: промах тратит квоту так же,
-                # как попадание. Без этого потолка цикл с высокой долей
-                # промахов перебирал бы все 1000 кандидатов.
-                stats["бюджет вызовов"] += 1
-                report()
-                return
-            calls += 1
-            try:
-                data = self._gql(MATCH_QUERY, {"id": mid})
-            except StratzError as e:
-                # Ошибка схемы повторится на каждом матче — цикл обрывается,
-                # чтобы не сжечь остаток лимита на заведомо битом запросе.
-                logger.error("STRATZ GraphQL: %s — обрываю цикл", e)
-                return
-            except requests.HTTPError as e:
-                if (e.response is not None
-                        and e.response.status_code in (429, 401, 403)):
-                    raise      # квота/токен — обрабатывается в __main__
-                logger.warning("матч %d: %s — пропуск", mid, e)
-                continue
-            except requests.RequestException as e:
-                logger.warning("матч %d: %s — пропуск", mid, e)
-                continue
-            m = data.get("match")
-            if not m:
-                defer(mid)          # STRATZ ещё не видел этот матч
-                continue
-            # Разбор ОДНОГО матча не имеет права ронять цикл: STRATZ меняет
-            # формат полей (2026-07-31 — lobbyType приехал строкой-энумом
-            # вместо числа), и один неожиданный тип обнулял весь проход,
-            # а с ним и половину суточного притока.
-            try:
-                # Патч считается ДО фильтра: min_patch сравнивается с ним,
-                # а не с чужой нумерацией версий STRATZ.
-                patch = self._patch_of(m)
-                ok, why = match_passes(m, self._min_duration_s,
-                                       self._min_patch,
-                                       pro=(self._mode == "pro"), patch=patch,
-                                       min_rank=self._min_rank)
-                if not ok:
-                    if why == "no-timeline":
-                        # Матч у STRATZ есть, а поминутных рядов ещё нет —
-                        # он в очереди на парсинг. Такая же временная
-                        # причина, как отсутствие самого матча.
-                        defer(mid)
+        # try/finally, а не report() перед каждым return: выходов из
+        # цикла пять (лимит, бюджет, исчерпание кандидатов, ошибка
+        # схемы, 429), и на двух из них отчёт терялся вместе с
+        # подстройкой отступа. Ровно эту дыру спринт 104 закрыл у
+        # источника OpenDota, а здесь она осталась.
+        try:
+            for mid in self._candidates():
+                stats["кандидатов"] += 1
+                if yielded >= self._limit:
+                    return
+                if not self._shard.accepts(mid):
+                    stats["чужой шард"] += 1
+                    continue
+                if not self._split.accepts(mid):
+                    stats["не моя доля"] += 1
+                    continue
+                if skip(mid):
+                    stats["дубликат"] += 1
+                    continue
+                if mid in self._rejected:
+                    stats["кэш отказов"] += 1
+                    continue
+                if calls >= self._detail_budget:
+                    # Считаем ВЫЗОВЫ, а не успехи: промах тратит квоту так же,
+                    # как попадание. Без этого потолка цикл с высокой долей
+                    # промахов перебирал бы все 1000 кандидатов.
+                    stats["бюджет вызовов"] += 1
+                    return
+                calls += 1
+                try:
+                    data = self._gql(MATCH_QUERY, {"id": mid})
+                except StratzError as e:
+                    # Ошибка схемы повторится на каждом матче — цикл обрывается,
+                    # чтобы не сжечь остаток лимита на заведомо битом запросе.
+                    logger.error("STRATZ GraphQL: %s — обрываю цикл", e)
+                    return
+                except requests.HTTPError as e:
+                    if (e.response is not None
+                            and e.response.status_code in (429, 401, 403)):
+                        raise      # квота/токен — обрабатывается в __main__
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    continue
+                except requests.RequestException as e:
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    continue
+                m = data.get("match")
+                if not m:
+                    defer(mid)          # STRATZ ещё не видел этот матч
+                    continue
+                # Разбор ОДНОГО матча не имеет права ронять цикл: STRATZ меняет
+                # формат полей (2026-07-31 — lobbyType приехал строкой-энумом
+                # вместо числа), и один неожиданный тип обнулял весь проход,
+                # а с ним и половину суточного притока.
+                try:
+                    # Патч считается ДО фильтра: min_patch сравнивается с ним,
+                    # а не с чужой нумерацией версий STRATZ.
+                    patch = self._patch_of(m)
+                    ok, why = match_passes(m, self._min_duration_s,
+                                           self._min_patch,
+                                           pro=(self._mode == "pro"), patch=patch,
+                                           min_rank=self._min_rank)
+                    if not ok:
+                        if why == "no-timeline":
+                            # Матч у STRATZ есть, а поминутных рядов ещё нет —
+                            # он в очереди на парсинг. Такая же временная
+                            # причина, как отсутствие самого матча.
+                            defer(mid)
+                            continue
+                        stats["фильтр"] += 1
+                        stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
+                        self._rejected.add(mid)
                         continue
-                    stats["фильтр"] += 1
-                    stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
+                    rows = timeline_rows(m, self._kills_cumulative)
+                except (ValueError, TypeError, KeyError) as e:
+                    logger.warning("матч %d: не разобрать ответ STRATZ (%s) — "
+                                   "пропуск", mid, e)
                     self._rejected.add(mid)
                     continue
-                rows = timeline_rows(m, self._kills_cumulative)
-            except (ValueError, TypeError, KeyError) as e:
-                logger.warning("матч %d: не разобрать ответ STRATZ (%s) — "
-                               "пропуск", mid, e)
-                self._rejected.add(mid)
-                continue
-            if not rows:
-                defer(mid)          # ряды ещё не наполнились
-                continue
-            yielded += 1
-            yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
-                                source_cursor=str(mid), patch=patch,
-                                avg_rank=stratz_rank(m),
-                                draft=draft_row(m), raw={})
-        report()
+                if not rows:
+                    defer(mid)          # ряды ещё не наполнились
+                    continue
+                yielded += 1
+                yield TimelineMatch(match_id=mid, tier=self._tier, rows=rows,
+                                    source_cursor=str(mid), patch=patch,
+                                    avg_rank=stratz_rank(m),
+                                    draft=draft_row(m), raw={})
+        finally:
+            report()

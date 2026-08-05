@@ -778,3 +778,106 @@ def test_collected_match_carries_draft(monkeypatch):
     got = list(src.fetch_new())
     assert got[0].draft is not None
     assert got[0].draft["match_id"] == 51
+
+
+# -- отступ в единицах match_id, самонастраивающийся (спринт 114) -------------
+
+def _lag_src(monkeypatch, ids, ready=None, **kw):
+    """Источник с листингом из готовых id и подконтрольным отступом."""
+    src = make_source(monkeypatch, ready if ready is not None else {}, ids)
+    for k, v in kw.items():
+        setattr(src, f"_{k}", v)
+    return src
+
+
+def test_lag_measured_in_match_ids_not_entries():
+    """Отступ «в записях» означал то полчаса, то три: плотность листинга
+    зависит от того, сколько матчей успел распарсить OpenDota, а не от
+    того, сколько времени было у STRATZ. Замер 2026-08-05: id растут
+    ~789/мин, 100 записей /parsedMatches укладываются в ~30 000 id."""
+    src = OBJ = None
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = 0, 1000, 400_000
+    # Пустой цикл при нулевых вызовах обязан ужимать отступ, а не залипать.
+    src._id_lag = 50_000
+    src._adapt_lag(calls=0, misses=0)
+    assert src._id_lag == 25_000
+
+
+def test_lag_grows_fast_on_misses():
+    """Каждый цикл с промахами — сожжённая квота. Растём ×1.5."""
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = 40_000, 1000, 400_000
+    src._adapt_lag(calls=100, misses=90)
+    assert src._id_lag == 60_000
+
+
+def test_lag_shrinks_slowly_when_clean():
+    """Слишком глубокий отступ матчей не теряет (листинг — движущееся
+    окно), он лишь добавляет дубликатов. Ошибка вверх дешевле, поэтому
+    убываем медленно (×0.9)."""
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = 100_000, 1000, 400_000
+    src._adapt_lag(calls=100, misses=2)
+    assert src._id_lag == 90_000
+
+
+def test_lag_holds_in_the_middle_band():
+    """Между 10% и 50% промахов не дёргаемся: STRATZ парсит не мгновенно
+    и не строго по порядку, единичные промахи неустранимы, и гнаться за
+    нулём значит уползать всё глубже."""
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = 100_000, 1000, 400_000
+    src._adapt_lag(calls=100, misses=30)
+    assert src._id_lag == 100_000
+
+
+def test_lag_is_clamped():
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = 390_000, 1000, 400_000
+    src._adapt_lag(calls=10, misses=10)
+    assert src._id_lag == 400_000
+    # Снизу зажим тоже держит: с минимума дальше не уползаем.
+    src._id_lag = 1000
+    src._adapt_lag(calls=10, misses=0)
+    assert src._id_lag == 1000
+
+
+def test_fresh_candidates_are_skipped_by_id_distance(monkeypatch):
+    """Кандидаты ближе отступа к вершине не отдаются вовсе."""
+    ids = [900_000, 880_000, 800_000, 700_000]
+    src = _lag_src(monkeypatch, ids, id_lag=100_000, skip_freshest=0)
+    got = list(src._candidates())
+    assert 900_000 not in got and 880_000 not in got
+    assert got == [800_000, 700_000]
+
+
+def test_lag_never_starves_the_source(monkeypatch):
+    """САМОЕ ВАЖНОЕ. Отступ отсчитывается от вершины листинга, поэтому
+    при большом значении до кандидатов надо пролистать несколько страниц.
+    Если листинг короче отступа (мало распаршенных матчей, ночной провал,
+    лимит страниц), цикл не сделал бы ни одного вызова — а подстройка,
+    которой не на чем учиться, оставила бы отступ прежним, и источник
+    замолчал бы НАВСЕГДА. Ровно так он душил себя кэшем отказов до
+    спринта 87.
+    """
+    ids = [900_000, 899_000, 898_000]          # весь листинг уже отступа
+    src = _lag_src(monkeypatch, ids, id_lag=400_000, skip_freshest=0)
+    got = list(src._candidates())
+    assert got, "отступ съел весь листинг и источник замолчал"
+    assert set(got) <= set(ids)
+
+
+def test_zero_call_cycle_shrinks_the_lag():
+    """Вторая половина той же защиты: если вызовов не было, «нет
+    промахов» выглядит как здоровье. Отступ обязан ужиматься сам."""
+    from collector.sources.stratz import StratzTimelineSource
+    src = StratzTimelineSource.__new__(StratzTimelineSource)
+    src._id_lag, src._id_lag_min, src._id_lag_max = 200_000, 1000, 400_000
+    src._adapt_lag(calls=0, misses=0)
+    assert src._id_lag == 100_000

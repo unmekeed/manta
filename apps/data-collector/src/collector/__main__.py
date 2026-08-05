@@ -152,8 +152,20 @@ def build_source(name: str):
             # без него 87 вызовов из 100 уходили на матчи, которых у
             # него ещё нет (спринт 95). Для pro не нужен: лиговые матчи
             # STRATZ разбирает сразу, а кандидатов там и так дефицит.
-            skip_freshest=0 if name.endswith("-pro") else
-                          int(os.getenv("STRATZ_SKIP_FRESHEST", "150")),
+            # Отступ «в записях» оставлен нулевым: он зависел от того,
+            # сколько матчей успел распарсить OpenDota, а не от того,
+            # сколько времени было у STRATZ (спринт 114).
+            skip_freshest=int(os.getenv("STRATZ_SKIP_FRESHEST", "0")),
+            # Отступ в единицах match_id — это отступ во времени: id
+            # растут ~789 в минуту. Стартовое значение подхватывается из
+            # окружения, дальше источник ведёт его сам по доле промахов;
+            # в лог пишется текущее, чтобы после рестарта можно было
+            # стартовать с уже найденного. Для pro не нужен: лиговые
+            # матчи STRATZ разбирает сразу, а кандидатов там дефицит.
+            id_lag=0 if name.endswith("-pro") else
+                   int(os.getenv("STRATZ_ID_LAG", "90000")),
+            id_lag_min=int(os.getenv("STRATZ_ID_LAG_MIN", "30000")),
+            id_lag_max=int(os.getenv("STRATZ_ID_LAG_MAX", "400000")),
         )
     raise ValueError(f"unknown source {name!r}")
 
