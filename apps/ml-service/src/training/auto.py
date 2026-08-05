@@ -79,6 +79,18 @@ def _publish_production_metrics(metrics: dict) -> None:
     BRIER_VALID.set(float(metrics.get("brier_calibrated", float("nan"))))
     BRIER_BENCHMARK.set(
         float(metrics.get("brier_benchmark_pro", float("nan"))))
+    # Фазовые Brier публикуются ЗДЕСЬ ЖЕ (спринт 117). Раньше они
+    # выставлялись в переобучении, ДО гейта и безусловно — то есть после
+    # первого же отклонённого кандидата описывали модель, которая никогда
+    # не обслуживала запросы, стоя на дашборде рядом с плитками
+    # production. Гейт отклонял пять кандидатов подряд, так что случай не
+    # гипотетический.
+    # Одно место, решающее, что считать «метриками production», надёжнее
+    # порядка строк в вызывающем коде: следующая метрика, добавленная
+    # рядом с train(), снова разъехалась бы с гейтом.
+    for phase in ("early", "mid", "late"):
+        BRIER_PHASE.labels(phase).set(
+            float(metrics.get(f"brier_{phase}", float("nan"))))
 
 
 # Стартовое состояние проходит через ту же функцию, что и рабочее —
@@ -253,9 +265,6 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     joblib.dump(artifact, out_path)
     logger.info("metrics: %s", artifact["metrics"])
     m = artifact["metrics"]
-    for phase in ("early", "mid", "late"):
-        if f"brier_{phase}" in m:
-            BRIER_PHASE.labels(phase).set(m[f"brier_{phase}"])
     # Честный гейт: обе модели пересчитываются на общем holdout текущих данных
     # (evaluate_gate внутри push_with_gate) — устойчиво к «удачному» prod.
     _, promoted, reason = push_with_gate(artifact, out_path, logger, ds=ds)
