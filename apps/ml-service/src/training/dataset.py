@@ -226,6 +226,9 @@ ROW_COLUMNS = [
     "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
     "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
     "runes_diff", "neutral_tier_diff", "levels_diff",
+    # Волна 1 (спринты 90, 91): их добавили в FEATURES и забыли здесь —
+    # обучение падало IndexError на зеркальной аугментации.
+    "vision_coverage_diff", "unspent_gold_diff", "buyback_availability",
 ]
 
 
@@ -261,32 +264,48 @@ def row_to_features(row: dict) -> list[float]:
     total = _f("networth_total")
     rel = (float(row["networth_diff"]) / total
            if total == total and total > 0 else math.nan)
-    return [
-        float(row["game_time"]),
-        float(row["networth_diff"]),
-        float(row["xp_diff"]),
-        kills_r - kills_d,
-        kills_r + kills_d,
-        _f("position_advance"),
-        _f("alive_diff"),
-        _f("towers_diff"),
-        _f("rax_diff"),
-        rel,
-        _f("local_manpower_diff"),
-        _f("spread_diff"),
-        _f("roshan_diff"),
-        _f("aegis_alive"),
-        _f("buybacks_diff"),
-        _f("first_blood"),
-        _f("item_value_diff"),
-        _f("key_items_diff"),
-        _f("obs_wards_diff"),
-        _f("sen_wards_diff"),
-        _f("runes_diff"),
-        _f("neutral_tier_diff"),
-        _f("levels_diff"),
-        _f("draft_prior"),
-    ]
+    # Вектор собирается ПО ИМЕНАМ и раскладывается в порядке FEATURES
+    # (спринт 118). Раньше это был позиционный список, который полагался
+    # на то, что автор правки не забудет вписать новую фичу в ОБА места и
+    # в одинаковом порядке. Не сработало: спринты 90 и 91 добавили три
+    # фичи в FEATURES и не добавили сюда — 27 против 24, и обучение
+    # падало IndexError внутри зеркальной аугментации несколько суток,
+    # пока production стоял на старой модели.
+    #
+    # Проверки длины было бы мало: списки могут совпасть по длине и
+    # разъехаться по ПОРЯДКУ, а это хуже падения — модель молча учится
+    # на перепутанных колонках. Здесь несовпадение имён даёт KeyError
+    # сразу и громко.
+    values = {
+        "game_time": float(row["game_time"]),
+        "networth_diff": float(row["networth_diff"]),
+        "xp_diff": float(row["xp_diff"]),
+        "kills_diff": kills_r - kills_d,
+        "kills_total": kills_r + kills_d,
+        "position_advance": _f("position_advance"),
+        "alive_diff": _f("alive_diff"),
+        "towers_diff": _f("towers_diff"),
+        "rax_diff": _f("rax_diff"),
+        "networth_rel": rel,
+        "local_manpower_diff": _f("local_manpower_diff"),
+        "spread_diff": _f("spread_diff"),
+        "roshan_diff": _f("roshan_diff"),
+        "aegis_alive": _f("aegis_alive"),
+        "buybacks_diff": _f("buybacks_diff"),
+        "first_blood": _f("first_blood"),
+        "item_value_diff": _f("item_value_diff"),
+        "unspent_gold_diff": _f("unspent_gold_diff"),
+        "buyback_availability": _f("buyback_availability"),
+        "key_items_diff": _f("key_items_diff"),
+        "obs_wards_diff": _f("obs_wards_diff"),
+        "vision_coverage_diff": _f("vision_coverage_diff"),
+        "sen_wards_diff": _f("sen_wards_diff"),
+        "runes_diff": _f("runes_diff"),
+        "neutral_tier_diff": _f("neutral_tier_diff"),
+        "levels_diff": _f("levels_diff"),
+        "draft_prior": _f("draft_prior"),
+    }
+    return [values[f] for f in FEATURES]
 
 
 def load_from_clickhouse(url: str, database: str, user: str, password: str) -> Dataset:
