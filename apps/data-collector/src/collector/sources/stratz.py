@@ -189,10 +189,13 @@ MATCH_FIELDS = """
 
 MATCH_QUERY = "query($id: Long!) { match(id: $id) { %s } }" % MATCH_FIELDS
 
-# Пакетная выборка (спринт 121): квота STRATZ считается по HTTP-запросам,
-# и один `matches(ids: [...])` заменяет десятки одиночных `match(id:)`.
-MATCHES_QUERY = ("query($ids: [Long]!) { matches(ids: $ids) { %s } }"
-                 % MATCH_FIELDS)
+# НЕ ПЫТАТЬСЯ СНОВА: корневой `matches(ids: [Long]!)` в схеме есть, тип
+# аргумента верный, но на Default-токене он отвечает
+# `{"message": "User is not an admin."}` — эндпоинт админский (проверено
+# 2026-08-06, спринт 122). Пакетная выборка была бы прямым множителем
+# пропускной способности (квота STRATZ считается по HTTP-запросам, а не
+# по матчам), и именно поэтому соблазн вернуться к ней велик. Нельзя:
+# схема разрешает, авторизация — нет.
 
 
 class StratzError(RuntimeError):
@@ -445,7 +448,7 @@ class StratzTimelineSource:
                  id_lag_min: int = 30_000,
                  id_lag_max: int = 400_000,
                  quota_floor: int = 500,
-                 batch_size: int = 10) -> None:
+                 batch_size: int = 1) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -507,9 +510,10 @@ class StratzTimelineSource:
         # спрашивали. Обновляется в _gql из заголовка.
         self._quota_left: int | None = None
         self._quota_floor = max(int(quota_floor), 0)
-        # Сколько матчей просить одним запросом. Не безгранично: у STRATZ
-        # есть потолок сложности запроса, а поминутные ряды тяжёлые.
-        # Значение подбирается замером — начинаем осторожно.
+        # Матчей на запрос. ВСЕГДА 1: пакетный `matches(ids:)` доступен
+        # только админским токенам (спринт 122). Настройка оставлена,
+        # чтобы при появлении подходящего токена включить пакет одной
+        # переменной, а не переписывать цикл заново.
         self._batch_size = max(int(batch_size), 1)
         # Справочник патчей OpenDota [(дата, id)]; читается лениво.
         self._patches: list[tuple[int, int]] = []
@@ -896,63 +900,63 @@ class StratzTimelineSource:
                 yield mid
 
         def take(ids: list[int]):
-            """Забрать пакет матчей одним запросом и отдать пригодные.
+            """Забрать матчи списка и отдать пригодные.
+
+            Запрос НА КАЖДЫЙ id: пакетный `matches(ids:)` доступен только
+            админским токенам (спринт 122). Проход именно по списку, а не
+            по первому элементу — промежуточная версия брала `ids[0]`, а
+            перебирала все, и остальные молча уходили в «нет матча»: при
+            пакете в десять терялось девять матчей из десяти, а в логе
+            это выглядело как «STRATZ их не знает».
 
             Возвращает через `return` False, если цикл пора закончить
-            (лимит, бюджет, квота, ошибка схемы) — вызывающий обязан
-            это проверить.
+            (лимит, бюджет, квота, ошибка схемы) — вызывающий обязан это
+            проверить.
             """
             nonlocal yielded, calls
-            if yielded >= self._limit:
-                return False
-            # Предохранитель по остатку СУТОЧНОЙ квоты (спринт 120).
-            # Проверка ДО запроса: заголовок отдаёт остаток на момент
-            # ОТВЕТА, и у самой границы легко проскочить.
-            if (self._quota_left is not None
-                    and self._quota_left <= self._quota_floor):
-                stats["квота на исходе"] += 1
-                return False
-            if calls >= self._detail_budget:
-                # Считаем ЗАПРОСЫ, а не матчи: именно они списываются с
-                # квоты. С пакетной выборкой один запрос приносит до
-                # нескольких десятков матчей, поэтому бюджет в вызовах
-                # перестал быть потолком по матчам — им теперь управляет
-                # limit_per_cycle.
-                stats["бюджет вызовов"] += 1
-                return False
-            calls += 1
-            try:
-                data = self._gql(MATCHES_QUERY, {"ids": ids})
-            except StratzError as e:
-                # Ошибка схемы повторится на каждом запросе — цикл
-                # обрывается, чтобы не сжечь остаток лимита.
-                logger.error("STRATZ GraphQL: %s — обрываю цикл", e)
-                return False
-            except requests.HTTPError as e:
-                if (e.response is not None
-                        and e.response.status_code in (429, 401, 403)):
-                    raise      # квота/токен — обрабатывается в __main__
-                logger.warning("пакет из %d: %s — пропуск", len(ids), e)
-                return True
-            except requests.RequestException as e:
-                logger.warning("пакет из %d: %s — пропуск", len(ids), e)
-                return True
-
-            # Ответ сопоставляем ПО id из самих матчей, а не по порядку:
-            # отсутствующие STRATZ просто не вернёт, и позиционное
-            # сопоставление приписало бы данные чужому матчу — ошибка
-            # правдоподобная и почти незаметная.
-            found = {}
-            for m in (data.get("matches") or []):
-                try:
-                    found[int(m["id"])] = m
-                except (TypeError, ValueError, KeyError):
-                    continue
-
             for mid in ids:
                 if yielded >= self._limit:
                     return False
-                m = found.get(mid)
+                # Предохранитель по остатку СУТОЧНОЙ квоты (спринт 120).
+                # Проверка ДО запроса: заголовок отдаёт остаток на момент
+                # ОТВЕТА, и у самой границы легко проскочить.
+                if (self._quota_left is not None
+                        and self._quota_left <= self._quota_floor):
+                    stats["квота на исходе"] += 1
+                    return False
+                if calls >= self._detail_budget:
+                    # Считаем ЗАПРОСЫ: именно они списываются с квоты, и
+                    # промах стоит столько же, сколько попадание.
+                    stats["бюджет вызовов"] += 1
+                    return False
+                calls += 1
+                try:
+                    data = self._gql(MATCH_QUERY, {"id": mid})
+                except StratzError as e:
+                    # Ошибка схемы повторится на каждом запросе — цикл
+                    # обрывается, чтобы не сжечь остаток лимита.
+                    logger.error("STRATZ GraphQL: %s — обрываю цикл", e)
+                    return False
+                except requests.HTTPError as e:
+                    if (e.response is not None
+                            and e.response.status_code in (429, 401, 403)):
+                        raise      # квота/токен — обрабатывается в __main__
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    continue
+                except requests.RequestException as e:
+                    logger.warning("матч %d: %s — пропуск", mid, e)
+                    continue
+
+                # Сверяем id ОТВЕТА с запрошенным. Перепутать сейчас
+                # неоткуда, но проверка стоит копейки, а цена ошибки —
+                # ряды одного матча под id другого: правдоподобно (ряды
+                # настоящие, id настоящий) и почти незаметно.
+                m = data.get("match")
+                try:
+                    if m is not None and int(m["id"]) != mid:
+                        m = None
+                except (TypeError, ValueError, KeyError):
+                    m = None
                 if not m:
                     defer(mid, "нет матча")
                     continue
