@@ -1,0 +1,181 @@
+"""Тесты очереди кандидатов и источника своей разбивки (спринт 126).
+
+Проверяется то, где ошибка была бы тихой и дорогой:
+  * отсутствие соли у свежего матча — НЕ ошибка, а повод отложить; без
+    этого коллектор либо жёг бы квоту на одном матче каждый цикл, либо
+    выбрасывал бы годные матчи;
+  * повторная находка не должна возвращать в очередь уже скачанный матч,
+    иначе перезапуск сканера означает повторную закачку 58 МиБ;
+  * состояние «скачан» ставится ПОСЛЕ скачивания, а не при выдаче.
+"""
+import pathlib
+import sys
+
+import pytest
+import requests
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+from collector.candidates import Candidate  # noqa: E402
+from collector.sources import Shard  # noqa: E402
+from collector.sources.candidates import CandidateSource  # noqa: E402
+
+
+def _cand(mid, seq=1000):
+    return Candidate(match_id=mid, match_seq_num=seq, started_at=None,
+                     known_ranks=3, immortal_ranks=3, avg_known_rank=82)
+
+
+class FakeQueue:
+    """Очередь в памяти с той же семантикой состояний, что в SQL."""
+
+    def __init__(self, ready=()):
+        self.rows = {c.match_id: {"state": "new", "attempts": 0,
+                                  "cand": c, "error": None}
+                     for c in ready}
+        self.expired = 0
+
+    def expire(self, ttl_days=13):
+        return self.expired
+
+    def take(self, limit):
+        return [r["cand"] for r in self.rows.values()
+                if r["state"] == "new"][:limit]
+
+    def mark(self, match_id, state, error=None):
+        self.rows[match_id]["state"] = state
+        self.rows[match_id]["error"] = error
+
+    def defer(self, match_id, minutes=30, error=None, max_attempts=8):
+        row = self.rows[match_id]
+        row["attempts"] += 1
+        row["error"] = error
+        row["state"] = "no_salt" if row["attempts"] >= max_attempts else "new"
+        return row["state"]
+
+
+class FakeOpenDota:
+    def __init__(self, details, payload=b"dem"):
+        self.details = details
+        self.asked = []
+        self.downloaded = []
+        self.payload = payload
+
+    def _match_detail(self, match_id):
+        self.asked.append(match_id)
+        value = self.details.get(match_id)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def download_replay(self, ref):
+        self.downloaded.append(ref.match_id)
+        return self.payload
+
+
+def _source(queue, details, limit=10, **kw):
+    src = CandidateSource(queue, limit_per_cycle=limit, **kw)
+    src._od = FakeOpenDota(details)
+    return src
+
+
+# -- выдача ---------------------------------------------------------------------
+
+def test_yields_match_with_ready_salt():
+    q = FakeQueue([_cand(1)])
+    src = _source(q, {1: {"replay_url": "http://r/1.dem.bz2", "patch": 57}})
+    refs = list(src.fetch_new())
+    assert [r.match_id for r in refs] == [1]
+    assert refs[0].replay_url == "http://r/1.dem.bz2"
+    assert refs[0].patch == 57
+    assert q.rows[1]["state"] == "taken"
+
+
+def test_match_without_salt_is_deferred_not_dropped():
+    """Соль появляется с задержкой — матч обязан вернуться в очередь."""
+    q = FakeQueue([_cand(1)])
+    src = _source(q, {1: {"replay_url": None}})
+    assert list(src.fetch_new()) == []
+    assert q.rows[1]["state"] == "new", "матч потерян"
+    assert q.rows[1]["attempts"] == 1
+    assert src.last_cycle["нет соли"] == 1
+
+
+def test_match_gives_up_after_attempt_budget():
+    q = FakeQueue([_cand(1)])
+    q.rows[1]["attempts"] = 7
+    src = _source(q, {1: {}})
+    list(src.fetch_new())
+    assert q.rows[1]["state"] == "no_salt"
+    assert src.last_cycle["безнадёжных"] == 1
+
+
+def test_network_error_defers_and_continues_with_next():
+    """Сбой сети на одном матче не должен обрывать весь цикл."""
+    q = FakeQueue([_cand(1), _cand(2)])
+    src = _source(q, {1: requests.ConnectionError("обрыв"),
+                      2: {"replay_url": "http://r/2.dem.bz2"}})
+    refs = list(src.fetch_new())
+    assert [r.match_id for r in refs] == [2]
+    assert q.rows[1]["state"] == "new" and q.rows[1]["attempts"] == 1
+
+
+def test_cycle_stops_at_limit():
+    q = FakeQueue([_cand(i) for i in range(10)])
+    src = _source(q, {i: {"replay_url": f"http://r/{i}"} for i in range(10)},
+                  limit=3)
+    assert len(list(src.fetch_new())) == 3
+
+
+def test_takes_with_reserve_so_deferrals_do_not_empty_the_cycle():
+    """Половина кандидатов без соли не должна оставлять цикл пустым."""
+    q = FakeQueue([_cand(i) for i in range(6)])
+    details = {i: ({"replay_url": f"http://r/{i}"} if i % 2 else {"replay_url": None})
+               for i in range(6)}
+    src = _source(q, details, limit=3)
+    refs = list(src.fetch_new())
+    assert len(refs) == 3, "запас не сработал, цикл недобрал"
+
+
+def test_shard_skips_foreign_matches_without_spending_quota():
+    q = FakeQueue([_cand(1), _cand(2)])
+    src = _source(q, {1: {"replay_url": "http://r/1"},
+                      2: {"replay_url": "http://r/2"}},
+                  shard=Shard(shard_id=0, count=2))
+    refs = list(src.fetch_new())
+    assert [r.match_id for r in refs] == [2]
+    assert src._od.asked == [2], "у чужого шарда спрашивали детали"
+
+
+# -- скачивание -----------------------------------------------------------------
+
+def test_done_is_set_only_after_download():
+    """Между выдачей и скачиванием лежат 58 МиБ; обрыв — не успех."""
+    q = FakeQueue([_cand(1)])
+    src = _source(q, {1: {"replay_url": "http://r/1"}})
+    ref = next(iter(src.fetch_new()))
+    assert q.rows[1]["state"] == "taken", "скачан ещё до скачивания"
+    src.download_replay(ref)
+    assert q.rows[1]["state"] == "done"
+
+
+def test_download_failure_leaves_state_not_done():
+    q = FakeQueue([_cand(1)])
+    src = _source(q, {1: {"replay_url": "http://r/1"}})
+    ref = next(iter(src.fetch_new()))
+
+    def boom(_ref):
+        raise requests.ConnectionError("обрыв на 40 МиБ")
+
+    src._od.download_replay = boom
+    with pytest.raises(requests.ConnectionError):
+        src.download_replay(ref)
+    assert q.rows[1]["state"] != "done"
+
+
+def test_expired_are_counted_in_cycle_stats():
+    q = FakeQueue([])
+    q.expired = 4
+    src = _source(q, {})
+    list(src.fetch_new())
+    assert src.last_cycle["просрочено"] == 4

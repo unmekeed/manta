@@ -6,6 +6,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
+.PHONY: candidates-queue
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -180,6 +181,9 @@ ranks-fill:    ## Опросить очередь рангов: ARGS="--budget 5
 
 ranks-scan:    ## Замер отбора: воронка причин + развёртка порогов ARGS="--matches 2000"
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh scan $(ARGS)
+
+candidates-queue: ## Очередь своей разбивки: состояния + выборка для проверки точности
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh queue
 
 ranks-report:  ## Кэш рангов: сколько накоплено и какую долю потока он закрывает
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh report

@@ -55,6 +55,7 @@ SERVICES=(
     "league-coll.|collector --source opendota-league"
     "pro-replay|collector --source opendota --interval"
     "stratz-coll.|collector --source stratz-timeline --interval"
+    "candidates|collector --source candidates"
     "ml-service|python3 -u -m app"
     "similarity|python3 -u -m serve$"
     "draft|python3 -u -m serve_draft"
@@ -313,6 +314,25 @@ if [ -n "${STRATZ_API_TOKEN:-}" ]; then
     # opendota-timeline-pro (см. _detail_split в collector/__main__.py).
 else
     printf '   stratz-collector — STRATZ_API_TOKEN не задан, пропуск\n'
+fi
+
+# Своя разбивка (спринт 126): очередь кандидатов -> соль у OpenDota ->
+# скачивание -> общий конвейер. Под флагом CANDIDATES_ENABLED=1, а не
+# по умолчанию: этот источник качает по 58 МиБ на матч и делит суточную
+# квоту OpenDota с остальными коллекторами. Включать осознанно, когда в
+# очереди есть что брать (make ranks-scan).
+if [ "${CANDIDATES_ENABLED:-0}" = "1" ]; then
+    if ! pgrep -f "collector --source candidates" >/dev/null; then
+        say "запускаю candidates-collector (лог: $LOG_DIR/candidates.log)"
+        (cd apps/data-collector && CANDIDATES_LIMIT="${CANDIDATES_LIMIT:-20}" METRICS_PORT=9116 PYTHONPATH=src:$ROOT/libs \
+            nohup python3 -u -m collector --source candidates \
+                --interval "${CANDIDATES_INTERVAL:-900}" \
+                >"$LOG_DIR/candidates.log" 2>&1 &)
+    else
+        skip "candidates-collector"
+    fi
+else
+    printf '   candidates-collector — CANDIDATES_ENABLED не выставлен, пропуск\n'
 fi
 
 # Про-матчи ВГЛУБЬ по лигам (спринт 96). Окно /proMatches — около тысячи

@@ -37,6 +37,7 @@ from typing import Iterable, Protocol
 import psycopg
 import requests
 
+from .candidates import Candidate, CandidateQueue
 from .sources.steam import (ANONYMOUS_ACCOUNT_ID, SteamAPIError,
                             SteamMatchStream, match_account_stats)
 
@@ -633,9 +634,23 @@ SWEEP_KNOWN = (2, 3, 4, 5)
 SWEEP_SHARE = (0.5, 0.6, 0.75, 1.0)
 
 
+def rank_summary(ranks: dict[int, int | None]) -> tuple[int, int, int]:
+    """(известных рангов, из них immortal, средний известный ранг).
+
+    Сохраняется вместе с кандидатом ради проверки ТОЧНОСТИ правила: оно
+    берёт матч по двум известным рангам из десяти игроков, и это
+    допущение. Без этих чисел проверить его будет нечем.
+    """
+    known = [r for r in ranks.values() if r is not None and r > 0]
+    if not known:
+        return 0, 0, 0
+    high = sum(1 for r in known if r >= IMMORTAL_MIN_RANK)
+    return len(known), high, int(sum(known) / len(known))
+
+
 def scan(cache: RankCache, stream: SteamMatchStream, matches: int,
-         batch: int = 100, min_duration_s: int = MIN_DURATION_S
-         ) -> tuple[dict[str, int], dict[tuple[int, float], int]]:
+         batch: int = 100, min_duration_s: int = MIN_DURATION_S,
+         queue=None) -> tuple[dict[str, int], dict[tuple[int, float], int]]:
     """Пройти по потоку Valve и посчитать, сколько матчей мы бы взяли.
 
     Это замер, а не сбор: ничего не скачивается. Он отвечает на
@@ -675,18 +690,29 @@ def scan(cache: RankCache, stream: SteamMatchStream, matches: int,
             if not ok:
                 funnel[why] = funnel.get(why, 0) + 1
                 continue
-            prepared.append(accounts)
+            prepared.append((m, accounts))
             wanted.update(accounts)
 
         known = cache.ranks_of(wanted) if wanted else {}
-        for accounts in prepared:
+        chosen = []
+        for m, accounts in prepared:
             ranks = {a: known.get(a) for a in accounts}
-            _, why = classify_match(ranks)
+            take, why = classify_match(ranks)
             funnel[why] = funnel.get(why, 0) + 1
+            if take and queue is not None:
+                n_known, n_high, avg = rank_summary(ranks)
+                chosen.append(Candidate(
+                    match_id=int(m.get("match_id") or 0),
+                    match_seq_num=int(m.get("match_seq_num") or 0),
+                    started_at=m.get("start_time"),
+                    known_ranks=n_known, immortal_ranks=n_high,
+                    avg_known_rank=avg))
             for k in SWEEP_KNOWN:
                 for s in SWEEP_SHARE:
                     if classify_match(ranks, min_known=k, min_share=s)[0]:
                         sweep[(k, s)] += 1
+        if chosen:
+            funnel["в очередь"] = funnel.get("в очередь", 0) + queue.add(chosen)
 
     funnel["всего матчей"] = done
     cache.see(seen_all)
@@ -909,7 +935,7 @@ def main(argv: list[str] | None = None) -> int:
                                 description="кэш рангов по account_id")
     p.add_argument("command",
                    choices=("seed", "fill", "report", "probe", "harvest",
-                            "scan"))
+                            "scan", "queue"))
     p.add_argument("--matches", type=int,
                    default=int(os.getenv("RANKS_SEED_MATCHES", "1000")),
                    help="seed: сколько матчей потока просмотреть")
@@ -946,7 +972,12 @@ def main(argv: list[str] | None = None) -> int:
             stream = SteamMatchStream(
                 os.getenv("STEAM_API_KEY", ""),
                 api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
-            funnel, sweep = scan(cache, stream, args.matches)
+            queue = CandidateQueue(dsn)
+            try:
+                funnel, sweep = scan(cache, stream, args.matches, queue=queue)
+                queued = queue.stats()
+            finally:
+                queue.close()
             total = funnel.pop("всего матчей", 0)
             print(f"=== воронка отбора ({total} матчей потока) ===")
             for why, n in sorted(funnel.items(), key=lambda kv: -kv[1]):
@@ -955,6 +986,26 @@ def main(argv: list[str] | None = None) -> int:
             print("=== доля потока при разных порогах ===")
             print(sweep_table(sweep, total))
             print()
+            print("=== очередь кандидатов ===")
+            for state, n in queued.items():
+                print(f"{state:>22}: {n}")
+            print()
+        elif args.command == "queue":
+            q = CandidateQueue(dsn)
+            try:
+                print("=== очередь кандидатов ===")
+                for state, n in q.stats().items():
+                    print(f"{state:>22}: {n}")
+                sample = q.precision_sample()
+                if sample:
+                    print()
+                    print("последние скачанные (match_id, известных рангов,"
+                          " средний ранг) — материал для проверки точности:")
+                    for mid, known, avg in sample:
+                        print(f"  {mid}  known={known}  avg_rank={avg}")
+            finally:
+                q.close()
+            return 0
         elif args.command == "harvest":
             from .rawstore import RawMatchStore
             store = RawMatchStore.from_env()

@@ -119,6 +119,19 @@ def build_source(name: str):
     if name == "opendota":
         return OpenDotaSource(limit_per_cycle=limit, api_key=api_key,
                               shard=shard)
+    if name == "candidates":
+        # Своя разбивка: список матчей — от Valve, ранги — из кэша, у
+        # OpenDota остаётся только соль. Один запрос на матч вместо
+        # прежних двух-трёх.
+        from .candidates import CandidateQueue
+        from .sources.candidates import CandidateSource
+        dsn = os.getenv(
+            "POSTGRES_DSN",
+            "postgresql://dota:dota_dev_password@localhost:5432/manta")
+        return CandidateSource(
+            CandidateQueue(dsn),
+            limit_per_cycle=int(os.getenv("CANDIDATES_LIMIT", "20")),
+            api_key=api_key, shard=shard)
     if name == "opendota-public":
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
         return OpenDotaPublicSource(
@@ -208,6 +221,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
                         choices=["fixture", "opendota", "opendota-public",
+                                 "candidates",
                                  "opendota-timeline", "opendota-timeline-pro",
                                  "opendota-league",
                                  "stratz-timeline", "stratz-timeline-pro"])
