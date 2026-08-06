@@ -192,6 +192,11 @@ def build_source(name: str):
             # Дешевле недобрать полтысячи вызовов, чем получить 429 и
             # потерять час простоя (спринт 119).
             quota_floor=int(os.getenv("STRATZ_QUOTA_FLOOR", "500")),
+            # Матчей на один GraphQL-запрос. Квота STRATZ считается по
+            # запросам, поэтому это прямой множитель пропускной
+            # способности. Потолок сложности запроса у STRATZ есть —
+            # значение подбирается замером, дефолт осторожный.
+            batch_size=int(os.getenv("STRATZ_BATCH_SIZE", "10")),
         )
     raise ValueError(f"unknown source {name!r}")
 

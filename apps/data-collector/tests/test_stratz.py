@@ -196,8 +196,14 @@ def make_source(monkeypatch, matches, candidates, mode="public",
     def fake_gql(query, variables=None):
         if gql_hook:
             gql_hook(query, variables)
-        mid = (variables or {}).get("id")
-        return {"match": matches.get(mid)}
+        v = variables or {}
+        # Пакетный ответ (спринт 121): STRATZ отдаёт ТОЛЬКО те матчи,
+        # которые знает, — отсутствующие просто не приходят. Фикстура
+        # обязана вести себя так же, иначе тесты не увидят главный риск
+        # пакета: сопоставление ответа с запросом.
+        if "ids" in v:
+            return {"matches": [matches[i] for i in v["ids"] if i in matches]}
+        return {"match": matches.get(v.get("id"))}
 
     monkeypatch.setattr(src, "_gql", fake_gql)
     monkeypatch.setattr(src, "_opendota",
@@ -224,7 +230,7 @@ def test_skip_predicate_prevents_api_call(monkeypatch):
     что уже собрано другим источником."""
     asked = []
     src = make_source(monkeypatch, {13: _match(13)}, [13],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     assert list(src.fetch_new(skip=lambda mid: mid == 13)) == []
     assert asked == []
 
@@ -232,7 +238,7 @@ def test_skip_predicate_prevents_api_call(monkeypatch):
 def test_shard_filters_before_api_call(monkeypatch):
     asked = []
     src = make_source(monkeypatch, {14: _match(14), 15: _match(15)}, [14, 15],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     src._shard = Shard(shard_id=1, count=2)
     got = list(src.fetch_new())
     assert [t.match_id for t in got] == [15]      # только нечётный
@@ -245,7 +251,7 @@ def test_rejected_match_not_asked_twice(monkeypatch):
     turbo = _match(16); turbo["gameMode"] = 23
     asked = []
     src = make_source(monkeypatch, {16: turbo}, [16],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     assert list(src.fetch_new()) == []
     assert list(src.fetch_new()) == []
     assert asked == [16]                          # второй цикл не спрашивал
@@ -264,10 +270,11 @@ def test_schema_error_aborts_cycle(monkeypatch):
     asked = []
 
     def boom(query, variables=None):
-        asked.append((variables or {}).get("id"))
+        asked.extend((variables or {}).get("ids") or [])
         raise StratzError("Cannot query field 'radiantKills'")
 
     src = make_source(monkeypatch, {}, [30, 31, 32])
+    src._batch_size = 1                           # по матчу на запрос
     monkeypatch.setattr(src, "_gql", boom)
     assert list(src.fetch_new()) == []
     assert asked == [30]                          # оборвались на первом
@@ -407,7 +414,7 @@ def test_missing_match_is_retried_not_buried(monkeypatch):
     asked = []
     ready = {}
     src = make_source(monkeypatch, ready, [17],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     assert list(src.fetch_new()) == []            # STRATZ ещё не знает матч
     ready[17] = _match(17)                        # распарсился между циклами
     assert [t.match_id for t in src.fetch_new()] == [17]
@@ -419,7 +426,7 @@ def test_missing_match_gives_up_after_attempts(monkeypatch):
     распарсит никогда, обязан осесть в постоянном кэше отказов."""
     asked = []
     src = make_source(monkeypatch, {}, [18],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     src._retry_attempts = 3
     for _ in range(5):
         assert list(src.fetch_new()) == []
@@ -445,22 +452,30 @@ def test_permanent_filter_is_not_retried(monkeypatch):
     turbo = _match(21); turbo["gameMode"] = 23
     asked = []
     src = make_source(monkeypatch, {21: turbo}, [21],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     for _ in range(4):
         assert list(src.fetch_new()) == []
     assert asked == [21]
 
 
 def test_detail_budget_caps_calls_per_cycle(monkeypatch):
-    """Лимит цикла считает УСПЕХИ, а вызов тратится и на промах. Без
-    отдельного потолка цикл с высокой долей промахов перебирал бы все
-    1000 кандидатов и выжигал часовую квоту."""
-    asked = []
+    """Бюджет считает ЗАПРОСЫ, а не матчи: с квоты списывается запрос.
+
+    До пакетной выборки (спринт 121) это было одно и то же — вызов на
+    матч. Теперь один запрос приносит до batch_size матчей, поэтому
+    бюджет перестал быть потолком по матчам; им управляет
+    limit_per_cycle. Проверяем именно запросы — иначе тест закрепил бы
+    старую семантику и мешал бы поднимать пакет.
+    """
+    requests_made = []
     src = make_source(monkeypatch, {}, list(range(100, 200)),
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: requests_made.append(
+                          list((v or {}).get("ids") or [])))
     src._detail_budget = 7
+    src._batch_size = 10
     assert list(src.fetch_new()) == []
-    assert len(asked) == 7
+    assert len(requests_made) == 7, "бюджет считает не запросы"
+    assert all(len(r) == 10 for r in requests_made), "пакет не набирается"
 
 
 def test_default_detail_budget_leaves_room_for_misses(monkeypatch):
@@ -926,12 +941,13 @@ def test_defer_reasons_are_separated(monkeypatch, caplog):
     отступом НЕ лечится в принципе, второе вопрос времени. Пока они в
     одном счётчике, отличить одно от другого нечем, и именно поэтому
     гипотеза про свежесть прожила два спринта."""
-    src = StratzTimelineSource.__new__(StratzTimelineSource)
     import inspect
-    src_code = inspect.getsource(StratzTimelineSource.fetch_new)
-    assert 'defer(mid, "нет матча")' in src_code
-    assert 'defer(mid, "нет рядов")' in src_code
-    assert 'stats[f"  ~ {kind}"]' in src_code
+
+    cycle = inspect.getsource(StratzTimelineSource.fetch_new)
+    consume = inspect.getsource(StratzTimelineSource._consume)
+    assert 'defer(mid, "нет матча")' in cycle
+    assert 'defer(mid, "нет рядов")' in consume
+    assert 'stats[f"  ~ {kind}"]' in cycle
 
 
 # -- открытый дроссель: квота, глубина листинга, замер рангов (спринт 120) ----
@@ -948,7 +964,7 @@ def test_stops_before_burning_the_daily_quota(monkeypatch):
     """
     asked = []
     src = make_source(monkeypatch, {}, [11, 13, 15, 17],
-                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+                      gql_hook=lambda q, v: asked.extend((v or {}).get("ids") or []))
     src._quota_left, src._quota_floor = 10, 500
     assert list(src.fetch_new()) == []
     assert asked == [], f"вызовы при исчерпанной квоте: {asked}"
@@ -995,6 +1011,66 @@ def test_low_rank_rejects_are_measured_by_band():
 
     from collector.sources.stratz import StratzTimelineSource
 
-    code = inspect.getsource(StratzTimelineSource.fetch_new)
+    code = inspect.getsource(StratzTimelineSource._consume)
     assert 'if why == "low-rank":' in code
     assert 'ранг {band}' in code
+
+
+# -- пакетная выборка: один запрос — много матчей (спринт 121) ----------------
+
+def test_batch_fetches_many_matches_per_request(monkeypatch):
+    """Смысл спринта. Квота STRATZ считается по HTTP-ЗАПРОСАМ, а
+    `matches(ids: [...])` отдаёт несколько десятков матчей за один.
+    Раньше на матч уходил свой запрос, и потолок был жёстким: 15 000
+    запросов в сутки при выходе 4–5% — около 700 матчей.
+    """
+    ids = list(range(50, 62))
+    src = make_source(monkeypatch, {i: _match(i) for i in ids}, ids)
+    src._batch_size, src._limit = 12, 100
+    seen = []
+    monkeypatch.setattr(src, "_gql", lambda q, v: seen.append(v["ids"]) or
+                        {"matches": [_match(i) for i in v["ids"]]})
+    got = [t.match_id for t in src.fetch_new()]
+    assert got == ids
+    assert len(seen) == 1, f"матчи запрошены не одним пакетом: {seen}"
+
+
+def test_response_matched_by_id_not_by_position(monkeypatch):
+    """ГЛАВНЫЙ риск пакета. STRATZ возвращает только те матчи, которые
+    знает, — отсутствующие просто не приходят, и порядок ответа не
+    обязан совпадать с порядком запроса. Позиционное сопоставление
+    приписало бы данные ЧУЖОМУ матчу: ошибка правдоподобная (ряды
+    настоящие, id настоящий) и почти незаметная — витрина заполнится
+    перепутанными матчами.
+    """
+    ids = [71, 72, 73]
+    src = make_source(monkeypatch, {}, ids)
+    src._batch_size = 3
+    # Отвечаем ТОЛЬКО про 73, да ещё и одним элементом.
+    monkeypatch.setattr(src, "_gql",
+                        lambda q, v: {"matches": [_match(73)]})
+    got = [t.match_id for t in src.fetch_new()]
+    assert got == [73], f"данные приписаны чужому матчу: {got}"
+
+
+def test_missing_ids_in_batch_are_deferred(monkeypatch, caplog):
+    """Отсутствующие в ответе — это «STRATZ не знает матч», причина
+    временная: они обязаны попасть в отложенные, а не потеряться молча.
+    С пакетом это легко упустить — цикл идёт по ОТВЕТУ, а не по запросу.
+    """
+    ids = [81, 82, 83]
+    src = make_source(monkeypatch, {82: _match(82)}, ids)
+    src._batch_size = 3
+    with caplog.at_level("INFO", logger="collector.stratz"):
+        assert [t.match_id for t in src.fetch_new()] == [82]
+    assert src._pending.keys() == {81, 83}, (
+        f"пропавшие из ответа не отложены: {src._pending}")
+
+
+def test_partial_batch_is_still_fetched(monkeypatch):
+    """Хвост, не добравший до полного пакета, обязан быть запрошен —
+    иначе при малом числе кандидатов источник не собирал бы НИЧЕГО, а
+    выглядело бы это как «STRATZ ничего не отдаёт»."""
+    src = make_source(monkeypatch, {91: _match(91)}, [91])
+    src._batch_size = 50
+    assert [t.match_id for t in src.fetch_new()] == [91]
