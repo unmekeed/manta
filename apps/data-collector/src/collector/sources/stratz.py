@@ -438,7 +438,8 @@ class StratzTimelineSource:
                  skip_freshest: int = 0,
                  id_lag: int = 0,
                  id_lag_min: int = 30_000,
-                 id_lag_max: int = 400_000) -> None:
+                 id_lag_max: int = 400_000,
+                 quota_floor: int = 500) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -496,6 +497,10 @@ class StratzTimelineSource:
         # Состояние проверки гипотезы «промахи лечатся глубиной отступа».
         self._lag_probe: tuple[int, float] | None = None
         self._lag_frozen = False
+        # Остаток суточной квоты по последнему ответу; None — ещё не
+        # спрашивали. Обновляется в _gql из заголовка.
+        self._quota_left: int | None = None
+        self._quota_floor = max(int(quota_floor), 0)
         # Справочник патчей OpenDota [(дата, id)]; читается лениво.
         self._patches: list[tuple[int, int]] = []
         self._patch_map_at = -PATCH_MAP_RETRY_S
@@ -509,6 +514,19 @@ class StratzTimelineSource:
             json={"query": query, "variables": variables or {}},
             headers={"Authorization": f"Bearer {self._token}", **UA},
             timeout=self._timeout)
+        # Остаток суточной квоты — из ЗАГОЛОВКА ОТВЕТА, а не из своего
+        # счётчика (спринт 120). Свой счётчик врёт при рестарте процесса
+        # и не знает про вторую машину с тем же токеном: лимит STRATZ
+        # привязан к ТОКЕНУ, и один токен на двоих означает общую квоту.
+        # Пока бюджет цикла был 100, до потолка мы не доходили и врать
+        # счётчику было негде; с открытым дросселем это уже вопрос
+        # нескольких часов.
+        left = resp.headers.get("x-ratelimit-remaining-day")
+        if left is not None:
+            try:
+                self._quota_left = int(left)
+            except ValueError:
+                pass
         resp.raise_for_status()
         body = resp.json()
         if body.get("errors"):
@@ -629,7 +647,11 @@ class StratzTimelineSource:
                         before, self._id_lag, rate * 100, calls,
                         self._id_lag // 789)
 
-    def _candidates(self, max_pages: int = 20) -> Iterable[int]:
+    def _max_pages(self) -> int:
+        """Сколько страниц листинга листать под текущий бюджет вызовов."""
+        return min(max(self._detail_budget // 10, 20), 60)
+
+    def _candidates(self, max_pages: int | None = None) -> Iterable[int]:
         """match_id из листинга OpenDota, с пагинацией вглубь.
 
         ОТСТУП ОТ ВЕРШИНЫ (спринт 95). Листинг отдаёт матчи, которые
@@ -658,6 +680,17 @@ class StratzTimelineSource:
         уходим вглубь, пока не наберём достаточно или не кончатся
         страницы.
         """
+        # Страниц столько, сколько нужно бюджету вызовов (спринт 120).
+        # Страница даёт 100 id, из них шард и SourceSplit оставляют
+        # четверть, а дедуп срезает ещё. Фиксированные 20 страниц были
+        # рассчитаны на бюджет 100; с бюджетом 300 источник упирался бы
+        # не в квоту, а в НЕХВАТКУ КАНДИДАТОВ — и выглядело бы это как
+        # «STRATZ отдаёт мало», хотя дело в нашем листинге.
+        # Листинг дёшев: один вызов на 100 записей, и он же общий для
+        # всех коллекторов машины, поэтому глубину берём с запасом, но
+        # не безграничную.
+        if max_pages is None:
+            max_pages = self._max_pages()
         cursor: int | None = None
         seen: set[int] = set()
         skipped = 0
@@ -738,7 +771,8 @@ class StratzTimelineSource:
         # фильтр качества — а лечатся эти три случая по-разному.
         stats = {"кандидатов": 0, "чужой шард": 0, "не моя доля": 0,
                  "дубликат": 0, "кэш отказов": 0, "фильтр": 0,
-                 "нет данных": 0, "ждут парсинга": 0, "бюджет вызовов": 0}
+                 "нет данных": 0, "ждут парсинга": 0, "бюджет вызовов": 0,
+                 "квота на исходе": 0}
 
         def report() -> None:
             logger.info("цикл STRATZ: собрано %d из %d кандидатов, "
@@ -804,6 +838,16 @@ class StratzTimelineSource:
                 if mid in self._rejected:
                     stats["кэш отказов"] += 1
                     continue
+                # Предохранитель по остатку СУТОЧНОЙ квоты (спринт 120).
+                # С бюджетом 100 до потолка было не дойти; открыв
+                # дроссель, мы упираемся в него за часы, а дальше идут
+                # 429 — каждый стоит часа простоя. Останавливаемся сами,
+                # оставляя запас: заголовок отдаёт остаток на момент
+                # ОТВЕТА, и у самой границы легко проскочить.
+                if (self._quota_left is not None
+                        and self._quota_left <= self._quota_floor):
+                    stats["квота на исходе"] += 1
+                    return
                 if calls >= self._detail_budget:
                     # Считаем ВЫЗОВЫ, а не успехи: промах тратит квоту так же,
                     # как попадание. Без этого потолка цикл с высокой долей
@@ -852,6 +896,20 @@ class StratzTimelineSource:
                             continue
                         stats["фильтр"] += 1
                         stats[f"  · {why}"] = stats.get(f"  · {why}", 0) + 1
+                        # ЗАМЕР ПРЕДЛОЖЕНИЯ ПО РАНГАМ (спринт 120).
+                        # «low-rank: 17» говорит, что матч не дотянул, но
+                        # не говорит НАСКОЛЬКО. А это решающее число: если
+                        # отсеянные сидят на 75–79, планка отсекает
+                        # соседнюю скобку и её снижение даст кратный
+                        # объём; если на 40–50, то Immortal-матчей просто
+                        # мало, и никакая квота не поможет.
+                        # Без разбивки этот выбор пришлось бы делать на
+                        # глаз — ровно то, чем мы уже трижды платили.
+                        if why == "low-rank":
+                            r = stratz_rank(m)
+                            band = f"{r // 10 * 10}-{r // 10 * 10 + 9}"
+                            key = f"    ранг {band}"
+                            stats[key] = stats.get(key, 0) + 1
                         self._rejected.add(mid)
                         continue
                     rows = timeline_rows(m, self._kills_cumulative)

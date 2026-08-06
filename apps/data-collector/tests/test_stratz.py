@@ -932,3 +932,69 @@ def test_defer_reasons_are_separated(monkeypatch, caplog):
     assert 'defer(mid, "нет матча")' in src_code
     assert 'defer(mid, "нет рядов")' in src_code
     assert 'stats[f"  ~ {kind}"]' in src_code
+
+
+# -- открытый дроссель: квота, глубина листинга, замер рангов (спринт 120) ----
+
+def test_stops_before_burning_the_daily_quota(monkeypatch):
+    """С бюджетом 100 вызовов до суточного потолка было не дойти. Открыв
+    дроссель, мы упираемся в него за часы — а дальше каждый 429 стоит
+    часа простоя (спринт 119). Останавливаемся сами, с запасом: заголовок
+    отдаёт остаток на момент ОТВЕТА, и у границы легко проскочить.
+
+    Проверка ПОВЕДЕНЧЕСКАЯ: при исчерпанной квоте цикл не делает НИ
+    ОДНОГО обращения к STRATZ. Текстовая проверка тут бесполезна —
+    условие можно заменить на `if False`, а строка счётчика останется.
+    """
+    asked = []
+    src = make_source(monkeypatch, {}, [11, 13, 15, 17],
+                      gql_hook=lambda q, v: asked.append((v or {}).get("id")))
+    src._quota_left, src._quota_floor = 10, 500
+    assert list(src.fetch_new()) == []
+    assert asked == [], f"вызовы при исчерпанной квоте: {asked}"
+
+
+def test_collects_normally_while_quota_lasts(monkeypatch):
+    """Обратная сторона: предохранитель не должен глушить работу, пока
+    запас есть. Иначе источник замолчал бы навсегда, а выглядело бы это
+    как исчерпанная квота."""
+    ready = {17: _match(17)}
+    src = make_source(monkeypatch, ready, [17])
+    src._quota_left, src._quota_floor = 9000, 500
+    assert [t.match_id for t in src.fetch_new()] == [17]
+
+
+def test_listing_depth_follows_the_call_budget():
+    """Страница даёт 100 id, шард и SourceSplit оставляют четверть.
+    Фиксированные 20 страниц рассчитаны на бюджет 100; с бюджетом 300
+    источник упёрся бы не в квоту, а в НЕХВАТКУ КАНДИДАТОВ — и выглядело
+    бы это как «STRATZ отдаёт мало», хотя дело в нашем листинге.
+
+    Вызываем НАСТОЯЩИЙ метод: прежняя версия теста повторяла формулу у
+    себя и потому проходила даже с зафиксированной двадцаткой.
+    """
+    from collector.sources.stratz import StratzTimelineSource
+
+    def pages(budget):
+        src = StratzTimelineSource.__new__(StratzTimelineSource)
+        src._detail_budget = budget
+        return src._max_pages()
+
+    assert pages(100) == 20
+    assert pages(300) == 30
+    assert pages(2000) == 60, "глубина обязана быть ограничена сверху"
+
+
+def test_low_rank_rejects_are_measured_by_band():
+    """«low-rank: 17» говорит, что матч не дотянул, но не говорит
+    НАСКОЛЬКО. А это решающее число: отсеянные на 75–79 означают, что
+    планка режет соседнюю скобку и её снижение даст кратный объём;
+    отсеянные на 40–50 — что Immortal-матчей просто мало и квота не
+    поможет. Без разбивки выбор пришлось бы делать на глаз."""
+    import inspect
+
+    from collector.sources.stratz import StratzTimelineSource
+
+    code = inspect.getsource(StratzTimelineSource.fetch_new)
+    assert 'if why == "low-rank":' in code
+    assert 'ранг {band}' in code

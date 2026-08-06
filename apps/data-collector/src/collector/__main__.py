@@ -188,6 +188,10 @@ def build_source(name: str):
                    int(os.getenv("STRATZ_ID_LAG", "90000")),
             id_lag_min=int(os.getenv("STRATZ_ID_LAG_MIN", "30000")),
             id_lag_max=int(os.getenv("STRATZ_ID_LAG_MAX", "400000")),
+            # Запас суточной квоты, на котором цикл останавливается сам.
+            # Дешевле недобрать полтысячи вызовов, чем получить 429 и
+            # потерять час простоя (спринт 119).
+            quota_floor=int(os.getenv("STRATZ_QUOTA_FLOOR", "500")),
         )
     raise ValueError(f"unknown source {name!r}")
 
