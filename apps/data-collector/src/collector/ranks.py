@@ -1019,6 +1019,42 @@ def fill(cache: RankCache, resolver: RankResolver, budget: int,
     return stats
 
 
+def queue_report(queue) -> str:
+    """Текст отчёта по очереди кандидатов.
+
+    Отдельная функция, а не печать внутри CLI, по конкретной причине.
+    Спринт 129 добавлял сюда блок точности скриптовой правкой по шаблону
+    с неверным отступом: str.replace молча ничего не сделал, тесты
+    покрывали precision() на уровне БД и ни одного — вывод команды, и
+    главная поставка спринта уехала в main отсутствующей. Пока отчёт
+    формируется чистой функцией, такое ловится тестом.
+    """
+    lines = ["=== очередь кандидатов ==="]
+    for state, n in queue.stats().items():
+        lines.append(f"{state:>22}: {n}")
+
+    prec = queue.precision()
+    if prec["скачано"]:
+        lines += ["", "=== точность правила отбора ==="]
+        for k, v in prec.items():
+            lines.append(f"{k:>22}: {v}")
+        if prec["факт известен"]:
+            share = 100.0 * prec["из них immortal"] / prec["факт известен"]
+            lines.append(f"{'ТОЧНОСТЬ':>22}: {share:.1f}% скачанного"
+                         " действительно immortal")
+        else:
+            lines.append("  факт ещё не собран: эти матчи скачаны до"
+                         " миграции 009")
+
+    sample = queue.precision_sample()
+    if sample:
+        lines += ["", "последние скачанные (match_id, известных рангов,"
+                      " средний ранг) — это ПРЕДСКАЗАНИЕ кэша, не факт:"]
+        for mid, known, avg in sample:
+            lines.append(f"  {mid}  known={known}  avg_rank={avg}")
+    return "\n".join(lines)
+
+
 def report(cache: RankCache, min_rank: int = IMMORTAL_MIN_RANK) -> str:
     c = cache.counts(min_rank)
     lines = ["=== кэш рангов ==="]
@@ -1183,16 +1219,7 @@ def _run_once(cache: RankCache, dsn: str, args) -> int:
     elif args.command == "queue":
         q = CandidateQueue(dsn)
         try:
-            print("=== очередь кандидатов ===")
-            for state, n in q.stats().items():
-                print(f"{state:>22}: {n}")
-            sample = q.precision_sample()
-            if sample:
-                print()
-                print("последние скачанные (match_id, известных рангов,"
-                      " средний ранг) — материал для проверки точности:")
-                for mid, known, avg in sample:
-                    print(f"  {mid}  known={known}  avg_rank={avg}")
+            print(queue_report(q))
         finally:
             q.close()
         return 0

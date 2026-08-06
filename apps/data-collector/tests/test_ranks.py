@@ -25,7 +25,8 @@ from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
                              STRATZ_HOUR_LIMIT, StratzQuotaExhausted,
                              SWEEP_KNOWN, SWEEP_SHARE, is_admin_only,
                              _verify_forward, lag_seconds,
-                             rawstore_pairs, scan, seed, stream_filter,
+                             queue_report, rawstore_pairs, scan, seed,
+                             stream_filter,
                              stream_rate,
                              sweep_table,
                              take_limit,
@@ -862,6 +863,63 @@ def test_scan_reports_lag_even_without_jump(monkeypatch):
     cache.cursor = base
     funnel, _ = scan(cache, stream, matches=100)
     assert funnel["отставание, ч"] == 1
+
+
+# -- отчёт по очереди -------------------------------------------------------------
+
+class ReportQueue:
+    def __init__(self, states, prec, sample=()):
+        self._states, self._prec, self._sample = states, prec, list(sample)
+
+    def stats(self):
+        return self._states
+
+    def precision(self, min_rank=80):
+        return self._prec
+
+    def precision_sample(self, limit=20):
+        return self._sample
+
+
+def _prec(done=0, known=0, immortal=0, avg=0, ranks=0):
+    return {"скачано": done, "факт известен": known,
+            "из них immortal": immortal, "средний ранг": avg,
+            "рангов на матч": ranks}
+
+
+def test_queue_report_shows_precision_when_matches_downloaded():
+    """Спринт 129 добавлял этот блок скриптовой правкой по шаблону с
+    неверным отступом: str.replace молча не сработал, и главная поставка
+    спринта уехала отсутствующей. Тесты покрывали precision() на уровне
+    БД и ни одного — вывод команды. Этот тест закрывает ровно ту дыру.
+    """
+    q = ReportQueue({"done": 199, "new": 470},
+                    _prec(done=199, known=180, immortal=171, avg=79, ranks=8))
+    out = queue_report(q)
+    assert "точность правила отбора" in out
+    assert "95.0%" in out, out
+
+
+def test_queue_report_hides_precision_until_something_downloaded():
+    q = ReportQueue({"new": 12}, _prec())
+    out = queue_report(q)
+    assert "точность" not in out
+
+
+def test_queue_report_says_when_truth_was_never_recorded():
+    """199 матчей скачаны до миграции 009 — знаменатель ноль, не деление."""
+    q = ReportQueue({"done": 199}, _prec(done=199))
+    out = queue_report(q)
+    assert "факт ещё не собран" in out
+    assert "%" not in out.split("факт ещё не собран")[0].split(
+        "точность правила отбора")[-1]
+
+
+def test_queue_report_marks_sample_as_prediction_not_truth():
+    """Столбец avg_rank в выборке — предсказание кэша; путать их дорого."""
+    q = ReportQueue({"done": 1}, _prec(done=1), [(123, 2, 80)])
+    out = queue_report(q)
+    assert "ПРЕДСКАЗАНИЕ" in out
 
 
 # -- цикл ------------------------------------------------------------------------
