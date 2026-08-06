@@ -512,16 +512,56 @@ def _rank_value(raw) -> int:
 # Решение по матчу
 # =============================================================================
 
+# Ранкед-матчмейкинг и All Pick — те же значения, что фильтрует
+# opendota_public: турбо и прочие режимы ломают экономические
+# закономерности, на которых стоит модель.
+LOBBY_RANKED = 7
+GAME_MODE_ALL_PICK = 22
+MIN_DURATION_S = 900
+
+# Порог «сколько игроков матча должны иметь известный ранг». ДВА, а не
+# четыре: замер на 5000 матчей потока дал 3.8 видимых аккаунта из десяти
+# (62% профилей скрыты), и требование четырёх известных недостижимо для
+# половины матчей в принципе. Опираться на двух не так шатко, как
+# кажется: матчмейкинг Dota однороден по рангу, и два подтверждённых
+# Immortal — сильное свидетельство, что иммортален весь матч.
+MIN_KNOWN_RANKS = 2
+MIN_IMMORTAL_SHARE = 0.6
+
+
+def stream_filter(match: dict, min_duration_s: int = MIN_DURATION_S
+                  ) -> tuple[bool, str]:
+    """Дешёвый отсев ДО обращения к кэшу: режим и длительность.
+
+    Считается по полям, которые Valve уже прислал, поэтому стоит ноль.
+    Порядок важен: сначала выбрасываем турбо и брошенные матчи, и только
+    потом смотрим ранги — иначе воронка отчёта смешает «не наш режим» с
+    «низкий ранг», а это разные болезни с разным лечением.
+    """
+    if match.get("lobby_type") != LOBBY_RANKED:
+        return False, "не ранкед"
+    if match.get("game_mode") != GAME_MODE_ALL_PICK:
+        return False, "не all pick"
+    if int(match.get("duration") or 0) < min_duration_s:
+        return False, "короткий"
+    return True, "годен"
+
+
 def classify_match(ranks: dict[int, int | None], min_rank: int = IMMORTAL_MIN_RANK,
-                   min_known: int = 4, min_share: float = 0.6
-                   ) -> tuple[bool, str]:
+                   min_known: int = MIN_KNOWN_RANKS,
+                   min_share: float = MIN_IMMORTAL_SHARE) -> tuple[bool, str]:
     """Брать ли матч, зная ранги его игроков.
 
-    Требовать все десять известных рангов нельзя: часть профилей закрыта
-    навсегда, часть аккаунтов мы ещё не опрашивали, и такой матч не
-    станет пригодным никогда. Поэтому решение принимается по ДОЛЕ среди
-    известных, при минимуме известных — иначе один случайный Immortal из
-    одного известного игрока протащил бы любой матч.
+    Требовать все десять известных рангов нельзя: 62% профилей скрыты
+    навсегда, и такой матч не станет пригодным никогда. Поэтому решение
+    принимается по ДОЛЕ среди известных, при минимуме известных — иначе
+    один случайный Immortal из одного известного игрока протащил бы
+    любой матч.
+
+    Отсутствие ранга — НЕ свидетельство низкого ранга. Кэш заполняется
+    сверху вниз (посев из архива дал именно Immortal), поэтому «нет в
+    кэше» означает «ещё не спрашивали», и трактовать это как отказ
+    значило бы отбраковывать по собственному незнанию.
 
     Возвращает (брать, причина). Причина — для посуточной статистики
     циклов: молчаливый отказ мы уже проходили, он стоил недели.
@@ -577,6 +617,86 @@ def seed(cache: RankCache, stream: SteamMatchStream, matches: int,
 def visible_per_match(stats: dict[str, int]) -> float:
     """Сколько игроков матча видны по account_id. Ключевое для отбора."""
     return (stats["слотов"] - stats["скрытых"]) / max(stats["матчей"], 1)
+
+
+# Сетка порогов для развёртки. Выбирать порог на глаз мы уже пробовали
+# (min_known=4 оказался недостижим), поэтому scan печатает ВСЮ сетку и
+# решение принимается по числам.
+SWEEP_KNOWN = (2, 3, 4, 5)
+SWEEP_SHARE = (0.5, 0.6, 0.75, 1.0)
+
+
+def scan(cache: RankCache, stream: SteamMatchStream, matches: int,
+         batch: int = 100, min_duration_s: int = MIN_DURATION_S
+         ) -> tuple[dict[str, int], dict[tuple[int, float], int]]:
+    """Пройти по потоку Valve и посчитать, сколько матчей мы бы взяли.
+
+    Это замер, а не сбор: ничего не скачивается. Он отвечает на
+    единственный вопрос, от которого зависит вся своя разбивка — сколько
+    матчей в сутки кэш способен отобрать. Заодно пополняет кэш
+    встреченными аккаунтами: проход по потоку всё равно сделан, не
+    воспользоваться им было бы расточительно.
+
+    Ранги запрашиваются ОДНИМ запросом на пачку матчей, а не на матч:
+    четыреста аккаунтов в одном IN дешевле сотни round-trip'ов.
+    """
+    seq = cache.get_cursor()
+    if seq is None:
+        seq = stream.tip_seq()
+    funnel: dict[str, int] = {}
+    sweep: dict[tuple[int, float], int] = {
+        (k, s): 0 for k in SWEEP_KNOWN for s in SWEEP_SHARE}
+    seen_all: list[int] = []
+    done = 0
+    while done < matches:
+        try:
+            got = stream.batch(seq, count=min(batch, matches - done))
+        except SteamAPIError as exc:
+            logger.warning("поток Valve: %s", exc)
+            break
+        if not got:
+            break
+        done += len(got)
+
+        prepared = []
+        wanted: set[int] = set()
+        for m in got:
+            seq = max(seq, int(m.get("match_seq_num") or seq) + 1)
+            accounts, _, _ = match_account_stats(m)
+            seen_all.extend(accounts)
+            ok, why = stream_filter(m, min_duration_s)
+            if not ok:
+                funnel[why] = funnel.get(why, 0) + 1
+                continue
+            prepared.append(accounts)
+            wanted.update(accounts)
+
+        known = cache.ranks_of(wanted) if wanted else {}
+        for accounts in prepared:
+            ranks = {a: known.get(a) for a in accounts}
+            _, why = classify_match(ranks)
+            funnel[why] = funnel.get(why, 0) + 1
+            for k in SWEEP_KNOWN:
+                for s in SWEEP_SHARE:
+                    if classify_match(ranks, min_known=k, min_share=s)[0]:
+                        sweep[(k, s)] += 1
+
+    funnel["всего матчей"] = done
+    cache.see(seen_all)
+    cache.set_cursor(seq)
+    return funnel, sweep
+
+
+def sweep_table(sweep: dict[tuple[int, float], int], total: int) -> str:
+    """Развёртка порогов: строки — известных рангов, столбцы — доля."""
+    head = "известных \\ доля  " + "".join(f"{s:>8.0%}" for s in SWEEP_SHARE)
+    lines = [head]
+    for k in SWEEP_KNOWN:
+        cells = "".join(
+            f"{100.0 * sweep[(k, s)] / max(total, 1):>7.2f}%"
+            for s in SWEEP_SHARE)
+        lines.append(f"{k:>16}  {cells}")
+    return "\n".join(lines)
 
 
 def rawstore_pairs(match: dict) -> list[tuple[int, int, datetime]]:
@@ -776,7 +896,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="collector.ranks",
                                 description="кэш рангов по account_id")
     p.add_argument("command",
-                   choices=("seed", "fill", "report", "probe", "harvest"))
+                   choices=("seed", "fill", "report", "probe", "harvest",
+                            "scan"))
     p.add_argument("--matches", type=int,
                    default=int(os.getenv("RANKS_SEED_MATCHES", "1000")),
                    help="seed: сколько матчей потока просмотреть")
@@ -809,6 +930,19 @@ def main(argv: list[str] | None = None) -> int:
                       f"{visible_per_match(stats):.1f} из 10 "
                       f"(скрытых профилей "
                       f"{100.0 * stats['скрытых'] / stats['слотов']:.0f}%)")
+        elif args.command == "scan":
+            stream = SteamMatchStream(
+                os.getenv("STEAM_API_KEY", ""),
+                api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
+            funnel, sweep = scan(cache, stream, args.matches)
+            total = funnel.pop("всего матчей", 0)
+            print(f"=== воронка отбора ({total} матчей потока) ===")
+            for why, n in sorted(funnel.items(), key=lambda kv: -kv[1]):
+                print(f"{why:>22}: {n:>6}  {100.0 * n / max(total, 1):5.2f}%")
+            print()
+            print("=== доля потока при разных порогах ===")
+            print(sweep_table(sweep, total))
+            print()
         elif args.command == "harvest":
             from .rawstore import RawMatchStore
             store = RawMatchStore.from_env()

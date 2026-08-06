@@ -5,7 +5,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
-.PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest
+.PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -177,6 +177,9 @@ ranks-seed:    ## Набрать account_id из потока Valve: ARGS="--mat
 
 ranks-fill:    ## Опросить очередь рангов: ARGS="--budget 500 --resolver stratz"
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh fill $(ARGS)
+
+ranks-scan:    ## Замер отбора: воронка причин + развёртка порогов ARGS="--matches 2000"
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh scan $(ARGS)
 
 ranks-report:  ## Кэш рангов: сколько накоплено и какую долю потока он закрывает
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh report

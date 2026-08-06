@@ -22,7 +22,9 @@ from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
                              OpenDotaRankResolver, StratzRankError,
                              StratzRankResolver, _rank_value, build_resolver,
                              classify_match, fill, harvest_rawstore,
-                             is_admin_only, rawstore_pairs, seed,
+                             SWEEP_KNOWN, SWEEP_SHARE, is_admin_only,
+                             rawstore_pairs, scan, seed, stream_filter,
+                             sweep_table,
                              take_limit,
                              visible_per_match)
 from collector.sources.steam import (ANONYMOUS_ACCOUNT_ID,  # noqa: E402
@@ -555,6 +557,101 @@ def test_seed_counts_hidden_profiles_across_stream():
     stats = seed(cache, stream, matches=10)
     assert stats["слотов"] == 3 and stats["скрытых"] == 2
     assert visible_per_match(stats) == 1.0
+
+
+# -- отбор матчей ---------------------------------------------------------------
+
+def _stream_match(seq, accounts, lobby=7, mode=22, duration=2000):
+    return {"match_seq_num": seq, "lobby_type": lobby, "game_mode": mode,
+            "duration": duration,
+            "players": [{"account_id": a} for a in accounts]}
+
+
+def test_stream_filter_rejects_turbo_and_short():
+    assert stream_filter(_stream_match(1, [1], lobby=0)) == (False, "не ранкед")
+    assert stream_filter(_stream_match(1, [1], mode=23)) == (False, "не all pick")
+    assert stream_filter(_stream_match(1, [1], duration=300))[1] == "короткий"
+    assert stream_filter(_stream_match(1, [1]))[0]
+
+
+def test_default_threshold_is_reachable_at_measured_visibility():
+    """3.8 видимых игрока из 10 — порог обязан быть достижим."""
+    ranks = {1: 85, 2: 84, 3: None}
+    assert classify_match(ranks)[0], "умолчание требует больше рангов, чем видно"
+
+
+class ScanCache(FakeCache):
+    def __init__(self, ranks):
+        super().__init__()
+        self._ranks = ranks
+        self.rank_queries = 0
+
+    def ranks_of(self, ids):
+        self.rank_queries += 1
+        return {a: self._ranks[a] for a in ids if a in self._ranks}
+
+
+def _scan_stream(batches):
+    return FakeStream(tip=10**9, batches=batches)
+
+
+def test_scan_counts_funnel_by_reason():
+    cache = ScanCache({1: 85, 2: 84, 5: 40, 6: 41})
+    cache.cursor = 10
+    stream = _scan_stream({
+        10: [_stream_match(10, [1, 2]),          # берём
+             _stream_match(11, [5, 6]),          # низкий ранг
+             _stream_match(12, [7, 8]),          # рангов не знаем
+             _stream_match(13, [1, 2], lobby=0)],  # не ранкед
+        14: [],
+    })
+    funnel, _ = scan(cache, stream, matches=100)
+    assert funnel["берём"] == 1
+    assert funnel["низкий ранг"] == 1
+    assert funnel["мало известных рангов"] == 1
+    assert funnel["не ранкед"] == 1
+    assert funnel["всего матчей"] == 4
+
+
+def test_scan_asks_ranks_once_per_batch_not_per_match():
+    """Сотня round-trip'ов вместо одного IN — разница в разы на длинном прогоне."""
+    cache = ScanCache({})
+    cache.cursor = 10
+    stream = _scan_stream({
+        10: [_stream_match(10 + i, [i]) for i in range(20)],
+        30: [],
+    })
+    scan(cache, stream, matches=100)
+    assert cache.rank_queries == 1, cache.rank_queries
+
+
+def test_scan_feeds_cache_even_with_rejected_matches():
+    """Проход по потоку сделан — аккаунты забирать надо все, а не только годных."""
+    cache = ScanCache({})
+    cache.cursor = 10
+    stream = _scan_stream({
+        10: [_stream_match(10, [111, 222], lobby=0)],   # отбракован режимом
+        11: [],
+    })
+    scan(cache, stream, matches=100)
+    assert set(cache.seen) == {111, 222}
+
+
+def test_sweep_shows_stricter_thresholds_pass_fewer():
+    cache = ScanCache({1: 85, 2: 84, 3: 40})
+    cache.cursor = 10
+    stream = _scan_stream({10: [_stream_match(10, [1, 2, 3])], 11: []})
+    _, sweep = scan(cache, stream, matches=100)
+    # 2 из 3 известных — immortal: доля 0.67
+    assert sweep[(2, 0.5)] == 1 and sweep[(2, 0.75)] == 0
+    assert sweep[(4, 0.5)] == 0, "четырёх известных тут нет"
+
+
+def test_sweep_table_renders_percentages():
+    sweep = {(k, s): 0 for k in SWEEP_KNOWN for s in SWEEP_SHARE}
+    sweep[(2, 0.5)] = 25
+    out = sweep_table(sweep, 100)
+    assert "25.00%" in out and "50%" in out
 
 
 # -- посев из сохранённого JSON ------------------------------------------------
