@@ -122,6 +122,12 @@ class RankCache:
         Свежий ответ не перезаписывается старым — условие в ON CONFLICT.
         Без него посев из архива затирал бы только что полученные ранги, а
         повторный запуск посева был бы небезопасен.
+
+        seen_count у НОВОЙ строки — ноль, а не единица по умолчанию.
+        Строку здесь создаёт ОТВЕТ о ранге, а ответ не является
+        наблюдением в потоке. Единица раздувала метрику «доля потока»
+        фантомными встречами: посев 9698 архивных аккаунтов поднял её до
+        31.73% при в разы меньшей реальной узнаваемости (миграция 007).
         """
         if not resolved:
             return 0
@@ -131,8 +137,8 @@ class RankCache:
         with self._db.cursor() as cur:
             cur.execute(
                 "INSERT INTO PlayerRanks (account_id, rank_tier, source,"
-                "                         checked_at) "
-                "SELECT u.a, u.r, %s, coalesce(u.t, NOW()) "
+                "                         checked_at, seen_count) "
+                "SELECT u.a, u.r, %s, coalesce(u.t, NOW()), 0 "
                 "  FROM unnest(%s::bigint[], %s::smallint[],"
                 "              %s::timestamptz[]) AS u(a, r, t) "
                 "ON CONFLICT (account_id) DO UPDATE "
@@ -190,11 +196,12 @@ class RankCache:
                 "       count(*) FILTER (WHERE rank_tier >= %s),"
                 "       coalesce(sum(seen_count), 0),"
                 "       coalesce(sum(seen_count) FILTER"
-                "                (WHERE rank_tier >= %s), 0)"
+                "                (WHERE rank_tier >= %s), 0),"
+                "       count(*) FILTER (WHERE seen_count = 0)"
                 "  FROM PlayerRanks", (min_rank, min_rank))
             row = cur.fetchone()
         keys = ("всего", "не опрошено", "без ранга", "immortal",
-                "встреч всего", "встреч immortal")
+                "встреч всего", "встреч immortal", "только из архива")
         return dict(zip(keys, [int(v) for v in row]))
 
     def bands(self) -> list[tuple[int, int]]:
@@ -811,19 +818,24 @@ def fill(cache: RankCache, resolver: RankResolver, budget: int,
 def report(cache: RankCache, min_rank: int = IMMORTAL_MIN_RANK) -> str:
     c = cache.counts(min_rank)
     lines = ["=== кэш рангов ==="]
-    for key in ("всего", "не опрошено", "без ранга", "immortal"):
-        lines.append(f"{key:>14}: {c[key]}")
+    for key in ("всего", "не опрошено", "без ранга", "immortal",
+                "только из архива"):
+        lines.append(f"{key:>16}: {c[key]}")
     asked = c["всего"] - c["не опрошено"]
     if asked:
-        lines.append(f"{'доля immortal':>14}: "
-                     f"{100.0 * c['immortal'] / asked:.1f}% от опрошенных")
-    # Ключевое число всего спринта: какую долю ПОТОКА (а не словаря)
-    # закрывают известные Immortal. Оно и решает, сколько матчей в сутки
-    # своя разбивка сможет отобрать.
+        lines.append(f"{'доля immortal':>16}: "
+                     f"{100.0 * c['immortal'] / asked:.1f}% от опрошенных "
+                     f"(смещено: посев из архива — это заведомо Immortal)")
+    # Какую долю ПОТОКА закрывают известные Immortal. Считается только по
+    # встречам в потоке Valve: у строк, созданных ответом о ранге,
+    # seen_count = 0, иначе посев из архива раздувал бы числитель
+    # фантомными встречами (миграция 007).
     if c["встреч всего"]:
-        lines.append(f"{'доля потока':>14}: "
+        lines.append(f"{'доля потока':>16}: "
                      f"{100.0 * c['встреч immortal'] / c['встреч всего']:.2f}% "
-                     f"встреч приходится на известных immortal")
+                     f"встреч в потоке Valve — известные immortal")
+    lines.append("Настоящий ответ про отбор даёт make ranks-scan: "
+                 "воронка по матчам, а не по игрокам.")
     bands = cache.bands()
     if bands:
         lines.append("тиры: " + "  ".join(f"{t}:{n}" for t, n in bands))
