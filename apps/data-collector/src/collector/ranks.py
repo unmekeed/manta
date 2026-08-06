@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import time
 from collections import Counter
 from typing import Iterable, Protocol
@@ -290,28 +291,61 @@ def is_admin_only(message: str) -> bool:
     return "not an admin" in message.lower()
 
 
-class StratzRankResolver:
-    """Ранг из player/players STRATZ. Быстрый путь — если пустят.
+# «You have surpassed the maximum take value of : 5» — STRATZ сообщает
+# предел пачки прямо в тексте ошибки. Не захардкожен: предел у них уже
+# отличается между запросами (у матчей он другой), и вычитать его из
+# ответа надёжнее, чем держать в константе, которая протухнет молча.
+_TAKE_LIMIT_RE = re.compile(r"maximum take value of\s*:?\s*(\d+)")
 
-    Пакетный `players(steamAccountIds:)` был бы прямым множителем: квота
-    считается по HTTP-запросам, а не по игрокам. Но ровно такой же
-    пакетный `matches(ids:)` оказался админским (спринт 121/122), поэтому
-    пакет здесь НЕ предполагается, а ПРОВЕРЯЕТСЯ: первый отказ вида «User
-    is not an admin» навсегда переводит резолвер на одиночные запросы и
-    пишет об этом в лог. Гадать мы уже пробовали, вышло дорого.
+
+def take_limit(message: str) -> int | None:
+    """Предел размера пачки из текста ошибки STRATZ; None — не про это."""
+    m = _TAKE_LIMIT_RE.search(message)
+    return int(m.group(1)) if m else None
+
+
+class _BatchShrunk(Exception):
+    """Внутренний сигнал: пачка ужата, тот же кусок надо повторить."""
+
+
+class StratzRankResolver:
+    """Ранг из player/players STRATZ.
+
+    Пакетный `players(steamAccountIds:)` — множитель квоты: она считается
+    по HTTP-запросам, а не по игрокам. Ровно такой же пакетный
+    `matches(ids:)` оказался админским (спринты 121/122), поэтому пакет
+    здесь НЕ предполагается, а ПРОВЕРЯЕТСЯ: отказ «User is not an admin»
+    навсегда переводит резолвер на одиночные запросы.
+
+    Живая проверка 2026-08-06 дала третий, неожиданный исход: пакет
+    разрешён, но ограничен ПЯТЬЮ id — «You have surpassed the maximum
+    take value of : 5». Предел вычитывается из текста ошибки и пачка
+    ужимается на лету: держать его константой значило бы протухнуть
+    молча в день, когда STRATZ его изменит.
     """
 
     name = "stratz"
 
+    # Предел пачки, измеренный на живом токене. Значение по умолчанию, а
+    # не истина: настоящий предел приходит из ответа сервера.
+    DEFAULT_BATCH = 5
+
     def __init__(self, token: str, api_url: str = STRATZ_API_URL,
-                 timeout: float = 30.0, batch_size: int = 50,
-                 rank_field: str | None = None) -> None:
+                 timeout: float = 30.0, batch_size: int = DEFAULT_BATCH,
+                 rank_field: str | None = None, api_delay_s: float = 0.2,
+                 retries: int = 4, backoff_base_s: float = 2.0) -> None:
         if not token:
             raise ValueError("stratz: пустой токен")
         self._token = token
         self._url = api_url
         self._timeout = timeout
         self._batch_size = max(1, batch_size)
+        # Лимиты STRATZ: 8/с, 150/мин. Резолвер молотит пачками без пауз
+        # и в первом же прогоне поймал 429 — темп задаётся здесь.
+        self._api_delay_s = api_delay_s
+        self._retries = max(0, retries)
+        self._backoff_base_s = backoff_base_s
+        self._last_call = 0.0
         self._field = rank_field or STRATZ_RANK_FIELD
         # None — не проверяли, True — пакет работает, False — админский.
         # Живая проверка 2026-08-06: пакет РАЗРЕШЁН на нашем токене, в
@@ -324,10 +358,24 @@ class StratzRankResolver:
     # -- транспорт -------------------------------------------------------------
 
     def _gql(self, query: str, variables: dict) -> dict:
-        resp = self._session.post(
-            self._url, json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {self._token}", **STRATZ_UA},
-            timeout=self._timeout)
+        for attempt in range(self._retries + 1):
+            gap = self._api_delay_s - (time.monotonic() - self._last_call)
+            if gap > 0:
+                time.sleep(gap)
+            resp = self._session.post(
+                self._url, json={"query": query, "variables": variables},
+                headers={"Authorization": f"Bearer {self._token}", **STRATZ_UA},
+                timeout=self._timeout)
+            self._last_call = time.monotonic()
+            if resp.status_code != 429:
+                break
+            if attempt == self._retries:
+                raise StratzRankError(
+                    f"HTTP 429 после {self._retries} отступлений")
+            wait = self._backoff_base_s * (2 ** attempt)
+            logger.info("STRATZ 429 — ждём %.0f с (попытка %d/%d)",
+                        wait, attempt + 1, self._retries)
+            time.sleep(wait)
         body = resp.json() if resp.content else {}
         errors = body.get("errors") if isinstance(body, dict) else None
         if errors:
@@ -359,6 +407,12 @@ class StratzRankResolver:
                     "STRATZ: пакетный players(steamAccountIds:) закрыт "
                     "(%s) — переходим на одиночные запросы", exc)
                 return None
+            limit = take_limit(str(exc))
+            if limit and limit < len(ids):
+                self._batch_size = limit
+                logger.warning("STRATZ: предел пачки %d — ужимаемся "
+                               "и повторяем тот же кусок", limit)
+                raise _BatchShrunk from exc
             raise
         self.batch_allowed = True
         out: dict[int, int] = {}
@@ -374,14 +428,33 @@ class StratzRankResolver:
 
     def resolve(self, account_ids: list[int]) -> dict[int, int]:
         out: dict[int, int] = {}
-        for start in range(0, len(account_ids), self._batch_size):
+        start = 0
+        while start < len(account_ids):
             chunk = account_ids[start:start + self._batch_size]
+            before = self._batch_size
             try:
                 batched = self._try_batch(chunk)
+            except _BatchShrunk:
+                # Повторяем тот же кусок — но ТОЛЬКО если пачка правда
+                # уменьшилась. Без этой проверки сервер, повторяющий один
+                # и тот же предел, вешал бы процесс намертво: обнаружено
+                # мутационным тестом, а не в проде.
+                if self._batch_size < before:
+                    continue
+                self.failures["предел пачки не уменьшился"] += len(chunk)
+                start += len(chunk)
+                continue
             except StratzRankError as exc:
-                self.failures[f"пакет: {exc}"] += len(chunk)
+                # НЕ откатываемся на одиночные: сбой пачки из-за квоты
+                # или сети превратился бы в полсотни запросов вместо
+                # одного и добил бы лимит окончательно. Ровно это и
+                # случилось в первом живом прогоне. Одиночные — только
+                # когда пакет закрыт админски, то есть навсегда.
+                self.failures[str(exc)] += len(chunk)
                 logger.warning("STRATZ пакет %d id: %s", len(chunk), exc)
-                batched = None
+                start += len(chunk)
+                continue
+            start += len(chunk)
             if batched is not None:
                 out.update(batched)
                 continue
@@ -597,7 +670,8 @@ def build_resolver(name: str | None = None) -> RankResolver:
     if name == "stratz":
         return StratzRankResolver(
             os.getenv("STRATZ_API_TOKEN", ""),
-            batch_size=int(os.getenv("RANKS_BATCH_SIZE", "50")))
+            batch_size=int(os.getenv("RANKS_BATCH_SIZE",
+                                     str(StratzRankResolver.DEFAULT_BATCH))))
     return OpenDotaRankResolver(
         api_key=os.getenv("OPENDOTA_API_KEY") or None,
         api_delay_s=float(os.getenv("OPENDOTA_DELAY_S", "1.1")))

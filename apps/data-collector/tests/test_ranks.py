@@ -18,9 +18,11 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
+                             _BatchShrunk,
                              OpenDotaRankResolver, StratzRankError,
                              StratzRankResolver, _rank_value, build_resolver,
                              classify_match, fill, is_admin_only, seed,
+                             take_limit,
                              visible_per_match)
 from collector.sources.steam import (ANONYMOUS_ACCOUNT_ID,  # noqa: E402
                                      SEQ_TIP_PRECISION, SteamAPIError,
@@ -303,6 +305,86 @@ def test_stratz_does_not_retry_batch_after_refusal():
     r.resolve([1])
     r.resolve([2])
     assert [k for k, _ in r.queries].count("batch") == 1
+
+
+def test_take_limit_read_from_stratz_message():
+    assert take_limit("You have surpassed the maximum take value of : 5") == 5
+    assert take_limit("Rate limit exceeded") is None
+
+
+def test_stratz_shrinks_batch_and_retries_same_chunk():
+    """Пакет разрешён, но не больше пяти — предел приходит из ответа."""
+    calls = []
+
+    class Limited(FakeStratz):
+        def _gql(self, query, variables):
+            ids = variables.get("ids", [])
+            calls.append(len(ids))
+            if len(ids) > 5:
+                raise StratzRankError(
+                    "You have surpassed the maximum take value of : 5")
+            return {"players": [_account(i, 85) for i in ids]}
+
+    r = Limited({}, )
+    r._batch_size = 10
+    got = r.resolve(list(range(1, 11)))
+    assert set(got) == set(range(1, 11)), "ужатая пачка обязана добрать всех"
+    assert calls == [10, 5, 5], calls
+
+
+def test_stratz_gives_up_when_limit_does_not_shrink_batch():
+    """Сервер, повторяющий один и тот же предел, не должен вешать процесс."""
+    class Stuck(FakeStratz):
+        def _gql(self, query, variables):
+            self.queries.append(("batch", variables))
+            raise StratzRankError(
+                "You have surpassed the maximum take value of : 5")
+
+    r = Stuck({})
+    r._batch_size = 10
+    r._try_batch = lambda ids: (_ for _ in ()).throw(_BatchShrunk())
+    assert r.resolve(list(range(20))) == {}
+    assert any("не уменьшилась" in k or "не уменьшился" in k
+               for k in r.failures), r.failures
+
+
+def test_stratz_does_not_flood_singles_on_transient_batch_error():
+    """Сбой пачки из-за квоты не должен превращаться в 50 одиночных."""
+    r = FakeStratz({"batch": StratzRankError("HTTP 429 после отступлений"),
+                    "single": lambda v: {"player": _account(v["id"], 85)}})
+    r._batch_size = 50
+    assert r.resolve(list(range(50))) == {}
+    assert [k for k, _ in r.queries] == ["batch"], r.queries
+
+
+def test_stratz_backs_off_on_429():
+    class Resp:
+        def __init__(self, code, body):
+            self.status_code = code
+            self.content = b"x"
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    seq = [Resp(429, {}), Resp(429, {}),
+           Resp(200, {"data": {"players": [_account(1, 85)]}})]
+    posted = []
+
+    class Session:
+        def post(self, url, **kwargs):
+            posted.append(kwargs)
+            return seq.pop(0)
+
+    import collector.ranks as ranks_mod
+    r = StratzRankResolver("токен", api_delay_s=0.0, backoff_base_s=0.0)
+    r._session = Session()
+    saved, ranks_mod.time.sleep = ranks_mod.time.sleep, lambda s: None
+    try:
+        assert r.resolve([1]) == {1: 85}
+    finally:
+        ranks_mod.time.sleep = saved
+    assert len(posted) == 3, "два отступления и успех"
 
 
 def test_stratz_single_failure_omits_account():
