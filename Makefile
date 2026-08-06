@@ -5,7 +5,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
-.PHONY: ranks-seed ranks-fill ranks-report ranks-probe
+.PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -168,6 +168,9 @@ collect-report: ## Почему упал темп сбора + покрытие 
 
 backfill:      ## Пересчёт фич по сохранённому JSON, без вызовов API: ARGS="--limit 50"
 	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs python3 -m collector.backfill $(ARGS)
+
+ranks-harvest: ## Посеять кэш рангов из сохранённого JSON в MinIO, без вызовов API
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh harvest $(ARGS)
 
 ranks-seed:    ## Набрать account_id из потока Valve: ARGS="--matches 2000"
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh seed $(ARGS)

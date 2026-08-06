@@ -31,6 +31,7 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Iterable, Protocol
 
 import psycopg
@@ -104,28 +105,43 @@ class RankCache:
                 (ids, counts))
         return len(ids)
 
-    def save(self, resolved: dict[int, int], source: str) -> int:
-        """Записать ответы резолвера. Ключ есть — значит ответ ПОЛУЧЕН.
+    def save(self, resolved: dict[int, int], source: str,
+             dates: dict[int, datetime] | None = None) -> int:
+        """Записать ответы. Ключ есть — значит ответ ПОЛУЧЕН.
 
         Отсутствие аккаунта в resolved и rank_tier=0 — разные вещи: первое
         означает «спросить не удалось, вернёмся позже», второе — «спросили,
         ранга нет». Резолвер обязан соблюдать это различие, иначе сетевой
         сбой навсегда пометит живого Immortal как безрангового.
+
+        `dates` — когда ответ был АКТУАЛЕН, не когда его записали. Нужно
+        для посева из сохранённого JSON: ранг из матча трёхмесячной
+        давности нельзя выдавать за сегодняшний, иначе TTL никогда его не
+        обновит и кэш будет уверенно врать.
+
+        Свежий ответ не перезаписывается старым — условие в ON CONFLICT.
+        Без него посев из архива затирал бы только что полученные ранги, а
+        повторный запуск посева был бы небезопасен.
         """
         if not resolved:
             return 0
         ids = list(resolved)
         ranks = [int(resolved[a]) for a in ids]
+        stamps = [(dates or {}).get(a) for a in ids]
         with self._db.cursor() as cur:
             cur.execute(
                 "INSERT INTO PlayerRanks (account_id, rank_tier, source,"
                 "                         checked_at) "
-                "SELECT u.a, u.r, %s, NOW() "
-                "  FROM unnest(%s::bigint[], %s::smallint[]) AS u(a, r) "
+                "SELECT u.a, u.r, %s, coalesce(u.t, NOW()) "
+                "  FROM unnest(%s::bigint[], %s::smallint[],"
+                "              %s::timestamptz[]) AS u(a, r, t) "
                 "ON CONFLICT (account_id) DO UPDATE "
                 "  SET rank_tier = EXCLUDED.rank_tier, "
-                "      source = EXCLUDED.source, checked_at = NOW()",
-                (source, ids, ranks))
+                "      source = EXCLUDED.source, "
+                "      checked_at = EXCLUDED.checked_at "
+                "  WHERE PlayerRanks.checked_at IS NULL "
+                "     OR PlayerRanks.checked_at < EXCLUDED.checked_at",
+                (source, ids, ranks, stamps))
         return len(ids)
 
     # -- чтение ---------------------------------------------------------------
@@ -563,6 +579,82 @@ def visible_per_match(stats: dict[str, int]) -> float:
     return (stats["слотов"] - stats["скрытых"]) / max(stats["матчей"], 1)
 
 
+def rawstore_pairs(match: dict) -> list[tuple[int, int, datetime]]:
+    """(account_id, ранг, момент актуальности) из сохранённого JSON матча.
+
+    В сыром JSON OpenDota ранг лежит У КАЖДОГО ИГРОКА (`rank_tier`), а не
+    средним по матчу — то есть каждый сохранённый матч это до десяти пар
+    «аккаунт → ранг», уже скачанных и уже оплаченных квотой.
+
+    Матч без `start_time` пропускается целиком: ранг без даты пришлось бы
+    выдать за сегодняшний, а это ровно та ложь, из-за которой TTL
+    перестанет обновлять запись. Лучше не знать, чем знать неверно.
+
+    Игроки без ранга (закрытый профиль на момент матча) НЕ записываются:
+    трёхмесячной давности «ранга нет» почти ничего не говорит, зато забило
+    бы очередь обновления мусором.
+    """
+    started = match.get("start_time")
+    if not started:
+        return []
+    try:
+        when = datetime.fromtimestamp(int(started), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return []
+    out = []
+    for p in match.get("players") or []:
+        rank = _rank_value(p.get("rank_tier"))
+        if rank <= 0:
+            continue
+        try:
+            aid = int(p.get("account_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0 or aid == ANONYMOUS_ACCOUNT_ID:
+            continue
+        out.append((aid, rank, when))
+    return out
+
+
+def harvest_rawstore(cache: RankCache, store, limit: int | None = None,
+                     chunk: int = 500) -> dict[str, int]:
+    """Посеять кэш из сохранённого JSON. Ноль вызовов внешних API.
+
+    Для одного аккаунта в архиве может быть несколько матчей с разными
+    рангами — берём САМЫЙ СВЕЖИЙ. Иначе порядок обхода бакета решал бы,
+    какой ранг победит, и результат посева зависел бы от того, в каком
+    порядке MinIO вернул объекты.
+    """
+    best: dict[int, tuple[datetime, int]] = {}
+    stats = {"матчей": 0, "без даты": 0, "пар": 0, "аккаунтов": 0,
+             "immortal": 0}
+    for n, mid in enumerate(store.iter_match_ids()):
+        if limit is not None and n >= limit:
+            break
+        match = store.get(mid)
+        if not match:
+            continue
+        stats["матчей"] += 1
+        pairs = rawstore_pairs(match)
+        if not pairs and match.get("players"):
+            stats["без даты"] += 1
+        for aid, rank, when in pairs:
+            stats["пар"] += 1
+            known = best.get(aid)
+            if known is None or when > known[0]:
+                best[aid] = (when, rank)
+
+    ids = list(best)
+    for start in range(0, len(ids), chunk):
+        part = ids[start:start + chunk]
+        cache.save({a: best[a][1] for a in part}, "opendota-json",
+                   dates={a: best[a][0] for a in part})
+    stats["аккаунтов"] = len(ids)
+    stats["immortal"] = sum(1 for _, r in best.values()
+                            if r >= IMMORTAL_MIN_RANK)
+    return stats
+
+
 def fill(cache: RankCache, resolver: RankResolver, budget: int,
          ttl_days: int = DEFAULT_TTL_DAYS, chunk: int = 50,
          stale_share: float = STALE_SHARE) -> dict[str, int]:
@@ -683,7 +775,8 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     p = argparse.ArgumentParser(prog="collector.ranks",
                                 description="кэш рангов по account_id")
-    p.add_argument("command", choices=("seed", "fill", "report", "probe"))
+    p.add_argument("command",
+                   choices=("seed", "fill", "report", "probe", "harvest"))
     p.add_argument("--matches", type=int,
                    default=int(os.getenv("RANKS_SEED_MATCHES", "1000")),
                    help="seed: сколько матчей потока просмотреть")
@@ -693,6 +786,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--resolver", default=None, choices=("opendota", "stratz"),
                    help="по умолчанию stratz при наличии токена")
     p.add_argument("--ttl-days", type=int, default=DEFAULT_TTL_DAYS)
+    p.add_argument("--limit", type=int, default=None,
+                   help="harvest: сколько матчей архива прочитать")
     args = p.parse_args(argv)
 
     if args.command == "probe":
@@ -714,6 +809,15 @@ def main(argv: list[str] | None = None) -> int:
                       f"{visible_per_match(stats):.1f} из 10 "
                       f"(скрытых профилей "
                       f"{100.0 * stats['скрытых'] / stats['слотов']:.0f}%)")
+        elif args.command == "harvest":
+            from .rawstore import RawMatchStore
+            store = RawMatchStore.from_env()
+            if store is None:
+                print("хранилище сырого JSON недоступно (RAW_MATCH_STORE=0"
+                      " или S3 не поднят)")
+                return 1
+            stats = harvest_rawstore(cache, store, limit=args.limit)
+            print("harvest:", ", ".join(f"{k} {v}" for k, v in stats.items()))
         elif args.command == "fill":
             resolver = build_resolver(args.resolver)
             logger.info("резолвер: %s", resolver.name)

@@ -21,7 +21,8 @@ from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
                              _BatchShrunk,
                              OpenDotaRankResolver, StratzRankError,
                              StratzRankResolver, _rank_value, build_resolver,
-                             classify_match, fill, is_admin_only, seed,
+                             classify_match, fill, harvest_rawstore,
+                             is_admin_only, rawstore_pairs, seed,
                              take_limit,
                              visible_per_match)
 from collector.sources.steam import (ANONYMOUS_ACCOUNT_ID,  # noqa: E402
@@ -554,6 +555,87 @@ def test_seed_counts_hidden_profiles_across_stream():
     stats = seed(cache, stream, matches=10)
     assert stats["слотов"] == 3 and stats["скрытых"] == 2
     assert visible_per_match(stats) == 1.0
+
+
+# -- посев из сохранённого JSON ------------------------------------------------
+
+def _json_match(start_time, players):
+    return {"start_time": start_time,
+            "players": [{"account_id": a, "rank_tier": r} for a, r in players]}
+
+
+def test_rawstore_pairs_reads_per_player_rank():
+    """В сыром JSON ранг лежит у КАЖДОГО игрока, а не средним по матчу."""
+    pairs = rawstore_pairs(_json_match(1_700_000_000, [(11, 80), (22, 54)]))
+    assert [(a, r) for a, r, _ in pairs] == [(11, 80), (22, 54)]
+    assert all(w.year >= 2023 for _, _, w in pairs)
+
+
+def test_rawstore_pairs_skips_match_without_date():
+    """Ранг без даты пришлось бы выдать за сегодняшний — это ложь."""
+    assert rawstore_pairs({"players": [{"account_id": 11, "rank_tier": 80}]}) == []
+
+
+def test_rawstore_pairs_skips_players_without_rank():
+    pairs = rawstore_pairs(_json_match(1_700_000_000,
+                                       [(11, None), (22, 0), (33, 81)]))
+    assert [a for a, _, _ in pairs] == [33]
+
+
+def test_rawstore_pairs_skips_anonymous():
+    pairs = rawstore_pairs(_json_match(1_700_000_000,
+                                       [(ANONYMOUS_ACCOUNT_ID, 80), (33, 81)]))
+    assert [a for a, _, _ in pairs] == [33]
+
+
+class FakeStore:
+    def __init__(self, matches):
+        self._m = matches
+
+    def iter_match_ids(self):
+        return iter(self._m)
+
+    def get(self, mid):
+        return self._m[mid]
+
+
+class DatedCache(FakeCache):
+    def __init__(self):
+        super().__init__()
+        self.dated = []
+
+    def save(self, resolved, source, dates=None):
+        self.dated.append((dict(resolved), dict(dates or {})))
+        return len(resolved)
+
+
+def test_harvest_keeps_freshest_rank_per_account():
+    """Порядок обхода бакета не должен решать, какой ранг победит."""
+    store = FakeStore({
+        1: _json_match(1_600_000_000, [(7, 70)]),   # старый матч
+        2: _json_match(1_700_000_000, [(7, 82)]),   # свежий
+        3: _json_match(1_650_000_000, [(7, 75)]),   # промежуточный, после свежего
+    })
+    cache = DatedCache()
+    stats = harvest_rawstore(cache, store)
+    saved, dates = cache.dated[0]
+    assert saved == {7: 82}, saved
+    assert dates[7].timestamp() == 1_700_000_000
+    assert stats["пар"] == 3 and stats["аккаунтов"] == 1
+
+
+def test_harvest_counts_immortals():
+    store = FakeStore({1: _json_match(1_700_000_000,
+                                      [(1, 80), (2, 85), (3, 55)])})
+    stats = harvest_rawstore(DatedCache(), store)
+    assert stats["immortal"] == 2 and stats["аккаунтов"] == 3
+
+
+def test_harvest_respects_limit():
+    store = FakeStore({i: _json_match(1_700_000_000, [(i, 80)])
+                       for i in range(10)})
+    stats = harvest_rawstore(DatedCache(), store, limit=3)
+    assert stats["матчей"] == 3
 
 
 def test_seed_keeps_repeat_encounters_for_priority():
