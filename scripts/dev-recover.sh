@@ -56,6 +56,8 @@ SERVICES=(
     "pro-replay|collector --source opendota --interval"
     "stratz-coll.|collector --source stratz-timeline --interval"
     "candidates|collector --source candidates"
+    "ranks-scan|collector.ranks scan"
+    "ranks-fill|collector.ranks fill"
     "ml-service|python3 -u -m app"
     "similarity|python3 -u -m serve$"
     "draft|python3 -u -m serve_draft"
@@ -333,6 +335,43 @@ if [ "${CANDIDATES_ENABLED:-0}" = "1" ]; then
     fi
 else
     printf '   candidates-collector — CANDIDATES_ENABLED не выставлен, пропуск\n'
+fi
+
+# Сканер потока Valve (спринт 127): непрерывно наполняет очередь
+# кандидатов. Без него очередь пополняется только руками, а конвейер
+# своей разбивки простаивает — ровно та форма поломки, которую видно
+# лишь по остановившемуся притоку.
+if [ -n "${STEAM_API_KEY:-}" ]; then
+    if ! pgrep -f "collector.ranks scan" >/dev/null; then
+        say "запускаю ranks-scan (лог: $LOG_DIR/ranks-scan.log)"
+        (cd apps/data-collector && PYTHONPATH=src:$ROOT/libs \
+            nohup python3 -u -m collector.ranks scan \
+                --matches "${RANKS_SCAN_MATCHES:-2000}" \
+                --interval "${RANKS_SCAN_INTERVAL:-600}" \
+                >"$LOG_DIR/ranks-scan.log" 2>&1 &)
+    else
+        skip "ranks-scan"
+    fi
+else
+    printf '   ranks-scan — STEAM_API_KEY не задан, пропуск\n'
+fi
+
+# Опрос очереди рангов. Интервал час, а не меньше: квота STRATZ — 1500
+# запросов в час, и бюджет прогона подобран так, чтобы оставить долю
+# коллектору матчей.
+if [ -n "${STRATZ_API_TOKEN:-}" ]; then
+    if ! pgrep -f "collector.ranks fill" >/dev/null; then
+        say "запускаю ranks-fill (лог: $LOG_DIR/ranks-fill.log)"
+        (cd apps/data-collector && PYTHONPATH=src:$ROOT/libs \
+            nohup python3 -u -m collector.ranks fill \
+                --budget "${RANKS_FILL_BUDGET:-5000}" \
+                --interval "${RANKS_FILL_INTERVAL:-3600}" \
+                >"$LOG_DIR/ranks-fill.log" 2>&1 &)
+    else
+        skip "ranks-fill"
+    fi
+else
+    printf '   ranks-fill — STRATZ_API_TOKEN не задан, пропуск\n'
 fi
 
 # Про-матчи ВГЛУБЬ по лигам (спринт 96). Окно /proMatches — около тысячи

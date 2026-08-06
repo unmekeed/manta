@@ -888,12 +888,19 @@ def fill(cache: RankCache, resolver: RankResolver, budget: int,
     if len(pending) + len(stale) < budget:
         stale = cache.stale(budget - len(pending), ttl_days)
     todo = list(dict.fromkeys(pending + stale))[:budget]
-    stats = {"спрошено": len(todo), "получено": 0, "immortal": 0}
+    # «спрошено» — сколько аккаунтов РЕАЛЬНО отправлено резолверу, а не
+    # сколько запланировано. Прогон 2026-08-06 напечатал «спрошено 5000,
+    # получено 0» после остановки на первом же куске, и это читалось как
+    # пять тысяч потраченных впустую запросов вместо пятидесяти.
+    stats = {"в очереди": len(todo), "спрошено": 0, "получено": 0,
+             "immortal": 0}
     for start in range(0, len(todo), chunk):
         part = todo[start:start + chunk]
         try:
             resolved = resolver.resolve(part)
+            stats["спрошено"] += len(part)
         except StratzQuotaExhausted as exc:
+            stats["спрошено"] += len(part)
             # Прогон закончился не по нашей воле — но закончился ЧЕСТНО:
             # то, что успели опросить, уже записано, а остаток очереди
             # никуда не денется до следующего часа.
@@ -1021,6 +1028,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ttl-days", type=int, default=DEFAULT_TTL_DAYS)
     p.add_argument("--limit", type=int, default=None,
                    help="harvest: сколько матчей архива прочитать")
+    p.add_argument("--interval", type=int, default=0,
+                   help="повторять команду каждые N секунд (0 — один раз)")
     args = p.parse_args(argv)
 
     if args.command == "probe":
@@ -1031,73 +1040,121 @@ def main(argv: list[str] | None = None) -> int:
                     "postgresql://dota:dota_dev_password@localhost:5432/manta")
     cache = RankCache(dsn)
     try:
-        if args.command == "seed":
-            stream = SteamMatchStream(
-                os.getenv("STEAM_API_KEY", ""),
-                api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
-            stats = seed(cache, stream, args.matches)
-            print("seed:", ", ".join(f"{k} {v}" for k, v in stats.items()))
-            if stats["слотов"]:
-                print(f"      видимых игроков на матч: "
-                      f"{visible_per_match(stats):.1f} из 10 "
-                      f"(скрытых профилей "
-                      f"{100.0 * stats['скрытых'] / stats['слотов']:.0f}%)")
-        elif args.command == "scan":
-            stream = SteamMatchStream(
-                os.getenv("STEAM_API_KEY", ""),
-                api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
-            queue = CandidateQueue(dsn)
-            try:
-                funnel, sweep = scan(cache, stream, args.matches, queue=queue)
-                queued = queue.stats()
-            finally:
-                queue.close()
-            total = funnel.pop("всего матчей", 0)
-            print(f"=== воронка отбора ({total} матчей потока) ===")
-            for why, n in sorted(funnel.items(), key=lambda kv: -kv[1]):
-                print(f"{why:>22}: {n:>6}  {100.0 * n / max(total, 1):5.2f}%")
-            print()
-            print("=== доля потока при разных порогах ===")
-            print(sweep_table(sweep, total))
-            print()
-            print("=== очередь кандидатов ===")
-            for state, n in queued.items():
-                print(f"{state:>22}: {n}")
-            print()
-        elif args.command == "queue":
-            q = CandidateQueue(dsn)
-            try:
-                print("=== очередь кандидатов ===")
-                for state, n in q.stats().items():
-                    print(f"{state:>22}: {n}")
-                sample = q.precision_sample()
-                if sample:
-                    print()
-                    print("последние скачанные (match_id, известных рангов,"
-                          " средний ранг) — материал для проверки точности:")
-                    for mid, known, avg in sample:
-                        print(f"  {mid}  known={known}  avg_rank={avg}")
-            finally:
-                q.close()
-            return 0
-        elif args.command == "harvest":
-            from .rawstore import RawMatchStore
-            store = RawMatchStore.from_env()
-            if store is None:
-                print("хранилище сырого JSON недоступно (RAW_MATCH_STORE=0"
-                      " или S3 не поднят)")
-                return 1
-            stats = harvest_rawstore(cache, store, limit=args.limit)
-            print("harvest:", ", ".join(f"{k} {v}" for k, v in stats.items()))
-        elif args.command == "fill":
-            resolver = build_resolver(args.resolver)
-            logger.info("резолвер: %s", resolver.name)
-            stats = fill(cache, resolver, args.budget, ttl_days=args.ttl_days)
-            print("fill:", ", ".join(f"{k} {v}" for k, v in stats.items()))
-        print(report(cache))
+        if args.interval:
+            return _loop(cache, dsn, args)
+        return _run_once(cache, dsn, args)
     finally:
         cache.close()
+
+
+def _run_once(cache: RankCache, dsn: str, args) -> int:
+    """Один прогон команды. Вынесено ради --interval: цикл не должен
+    знать, что именно он повторяет."""
+    if args.command == "seed":
+        stream = SteamMatchStream(
+            os.getenv("STEAM_API_KEY", ""),
+            api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
+        stats = seed(cache, stream, args.matches)
+        print("seed:", ", ".join(f"{k} {v}" for k, v in stats.items()))
+        if stats["слотов"]:
+            print(f"      видимых игроков на матч: "
+                  f"{visible_per_match(stats):.1f} из 10 "
+                  f"(скрытых профилей "
+                  f"{100.0 * stats['скрытых'] / stats['слотов']:.0f}%)")
+    elif args.command == "scan":
+        stream = SteamMatchStream(
+            os.getenv("STEAM_API_KEY", ""),
+            api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
+        queue = CandidateQueue(dsn)
+        try:
+            funnel, sweep = scan(cache, stream, args.matches, queue=queue)
+            queued = queue.stats()
+        finally:
+            queue.close()
+        total = funnel.pop("всего матчей", 0)
+        print(f"=== воронка отбора ({total} матчей потока) ===")
+        for why, n in sorted(funnel.items(), key=lambda kv: -kv[1]):
+            print(f"{why:>22}: {n:>6}  {100.0 * n / max(total, 1):5.2f}%")
+        print()
+        print("=== доля потока при разных порогах ===")
+        print(sweep_table(sweep, total))
+        print()
+        print("=== очередь кандидатов ===")
+        for state, n in queued.items():
+            print(f"{state:>22}: {n}")
+        print()
+    elif args.command == "queue":
+        q = CandidateQueue(dsn)
+        try:
+            print("=== очередь кандидатов ===")
+            for state, n in q.stats().items():
+                print(f"{state:>22}: {n}")
+            sample = q.precision_sample()
+            if sample:
+                print()
+                print("последние скачанные (match_id, известных рангов,"
+                      " средний ранг) — материал для проверки точности:")
+                for mid, known, avg in sample:
+                    print(f"  {mid}  known={known}  avg_rank={avg}")
+        finally:
+            q.close()
+        return 0
+    elif args.command == "harvest":
+        from .rawstore import RawMatchStore
+        store = RawMatchStore.from_env()
+        if store is None:
+            print("хранилище сырого JSON недоступно (RAW_MATCH_STORE=0"
+                  " или S3 не поднят)")
+            return 1
+        stats = harvest_rawstore(cache, store, limit=args.limit)
+        print("harvest:", ", ".join(f"{k} {v}" for k, v in stats.items()))
+    elif args.command == "fill":
+        resolver = build_resolver(args.resolver)
+        logger.info("резолвер: %s", resolver.name)
+        stats = fill(cache, resolver, args.budget, ttl_days=args.ttl_days)
+        print("fill:", ", ".join(f"{k} {v}" for k, v in stats.items()))
+    print(report(cache))
     return 0
+
+
+def _loop(cache: RankCache, dsn: str, args) -> int:
+    """Повторять команду вечно. Единственная задача — НЕ УМИРАТЬ.
+
+    Сбой одного прогона (сеть отвалилась, Valve отдал 429, Postgres
+    перезапустился) не должен останавливать конвейер: следующий заход
+    через интервал почти всегда проходит. Молча ронять фоновый процесс мы
+    уже проходили — реплейный путь простоял так 82 часа при зелёном
+    pgrep, и стоило это недели данных.
+    """
+    logger.info("цикл %s каждые %d с", args.command, args.interval)
+    while True:
+        started = time.monotonic()
+        try:
+            _run_once(cache, dsn, args)
+        except KeyboardInterrupt:
+            return 0
+        except Exception:  # noqa: BLE001 — цикл обязан пережить всё
+            logger.exception("прогон %s упал, продолжаем", args.command)
+            cache = _reconnect(cache, dsn)
+        sleep_s = max(args.interval - (time.monotonic() - started), 1.0)
+        time.sleep(sleep_s)
+
+
+def _reconnect(cache: RankCache, dsn: str) -> RankCache:
+    """Пересоздать соединение с Postgres после его перезапуска.
+
+    Инцидент 2026-07-20: коллекторы держали мёртвое соединение и падали
+    на первом же запросе каждого цикла до ручного перезапуска процесса.
+    """
+    try:
+        cache.close()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return RankCache(dsn)
+    except Exception:  # noqa: BLE001 — попробуем в следующем цикле
+        logger.warning("Postgres недоступен, повтор в следующем цикле")
+        return cache
 
 
 if __name__ == "__main__":  # pragma: no cover

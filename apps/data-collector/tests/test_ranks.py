@@ -444,6 +444,11 @@ def test_fill_stops_on_quota_and_keeps_what_it_got():
     assert stats.get("остановлен") == 1
     assert stats["получено"] == 2, "потеряли уже полученные ранги"
     assert len(cache.saved) == 1
+    # «спрошено» — сколько РЕАЛЬНО отправлено, а не сколько запланировано.
+    # Иначе отчёт «спрошено 5000, получено 0» после остановки на первом
+    # куске читается как пять тысяч потраченных впустую запросов.
+    assert stats["в очереди"] == 20
+    assert stats["спрошено"] == 4, stats
 
 
 def test_stratz_backs_off_on_429():
@@ -729,6 +734,81 @@ def test_sweep_table_renders_percentages():
     sweep[(2, 0.5)] = 25
     out = sweep_table(sweep, 100)
     assert "25.00%" in out and "50%" in out
+
+
+# -- цикл ------------------------------------------------------------------------
+
+class _Args:
+    command = "scan"
+    interval = 5
+    matches = 10
+    budget = 10
+    resolver = None
+    ttl_days = 30
+    limit = None
+
+
+def test_loop_survives_a_failing_run(monkeypatch):
+    """Сбой одного прогона не должен останавливать конвейер.
+
+    Реплейный путь однажды простоял 82 часа при зелёном pgrep — цена
+    молча умершего фонового процесса измеряется неделями данных.
+    """
+    import collector.ranks as ranks_mod
+    runs = []
+
+    def flaky(cache, dsn, args):
+        runs.append(len(runs))
+        if len(runs) == 1:
+            raise RuntimeError("сеть отвалилась")
+        if len(runs) >= 3:
+            raise KeyboardInterrupt
+        return 0
+
+    monkeypatch.setattr(ranks_mod, "_run_once", flaky)
+    monkeypatch.setattr(ranks_mod.time, "sleep", lambda s: None)
+    assert ranks_mod._loop(object(), "dsn", _Args()) == 0
+    assert len(runs) == 3, "цикл умер на первом же сбое"
+
+
+def test_loop_reconnects_after_database_failure(monkeypatch):
+    """Инцидент 2026-07-20: мёртвое соединение с PG после его рестарта."""
+    import collector.ranks as ranks_mod
+    reconnects = []
+    runs = []
+
+    def flaky(cache, dsn, args):
+        runs.append(1)
+        if len(runs) == 1:
+            raise RuntimeError("connection already closed")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ranks_mod, "_run_once", flaky)
+    monkeypatch.setattr(ranks_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ranks_mod, "_reconnect",
+                        lambda c, d: reconnects.append(1) or c)
+    ranks_mod._loop(object(), "dsn", _Args())
+    assert reconnects, "соединение не пересоздано"
+
+
+def test_loop_subtracts_run_time_from_the_interval(monkeypatch):
+    """Интервал — период, а не пауза сверху: иначе долгий прогон растягивает
+    цикл вдвое и темп сбора молча падает."""
+    import collector.ranks as ranks_mod
+    slept = []
+    clock = {"t": 0.0}
+
+    def run(cache, dsn, args):
+        clock["t"] += 4.0
+        if slept:
+            raise KeyboardInterrupt
+        return 0
+
+    monkeypatch.setattr(ranks_mod, "_run_once", run)
+    monkeypatch.setattr(ranks_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(ranks_mod.time, "sleep", lambda s: slept.append(s))
+    ranks_mod._loop(object(), "dsn", _Args())
+    assert slept and abs(slept[0] - 1.0) < 1e-6, slept
 
 
 # -- посев из сохранённого JSON ------------------------------------------------

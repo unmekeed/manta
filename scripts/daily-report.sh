@@ -71,6 +71,8 @@ run() {   # заголовок  команда...
 
     run "doctor — конвейер жив?"            ./scripts/doctor.sh
     run "collect-report — темп и покрытие"  ./scripts/collect-report.sh
+    run "кэш рангов и очередь разбивки"     ./scripts/ranks.sh report
+    run "очередь кандидатов"                ./scripts/ranks.sh queue
     run "ml-status — что в production"      make ml-status
     run "ml-audit — качество датасета"      make ml-audit
 
