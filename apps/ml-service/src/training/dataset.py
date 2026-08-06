@@ -17,6 +17,15 @@ from dataclasses import dataclass
 import numpy as np
 import requests
 
+# Трек G, G1 (спринт 131): производные. Контракт лежит в libs/wp_rates.py,
+# потому что фичи модели считаются В ДВУХ сервисах — здесь и в
+# report-generator, который шлёт вектор по именам через gRPC. Списки уже
+# расходились дважды (спринты 90 и 91), а с производными расхождение было
+# бы хуже обычного: не падение, а РАЗНЫЕ ЧИСЛА у одной модели в обучении
+# и в проде.
+from wp_rates import (RATE_METRICS, RATE_WINDOWS,  # noqa: E402
+                      rate_name, rates_for_row, window_columns)
+
 FEATURES = [
     "game_time",
     "networth_diff",
@@ -48,6 +57,35 @@ FEATURES = [
     "neutral_tier_diff",  # сумма тиров нейтралок R−D (F6)
     "levels_diff",        # сумма уровней героев R−D (F6)
     "draft_prior",        # P(win) по составам, Draft Prior Model (F3)
+    # G1 (спринт 131): производные — темп изменения метрики за окно,
+    # единиц метрики в минуту. Дописаны В КОНЕЦ намеренно: артефакты
+    # моделей хранят свой список фич, и старая модель (27 фич) обязана
+    # продолжать работать на новом коде. Порядок при этом больше не
+    # является гарантией — колонки под артефакт отбираются по ИМЕНАМ
+    # (align_to_artifact), потому что трек G предполагает УДАЛЕНИЕ не
+    # оправдавших себя фич, а удаление из середины ломает позиционную
+    # логику молча, подсунув модели сдвинутые колонки.
+    #
+    # Имена выписаны, а не сгенерированы, по одной внешней причине:
+    # report-generator читает этот список ТЕКСТОМ через ast (ставить
+    # numpy/lightgbm в его окружение ради одной константы — плохой
+    # обмен), и вычисляемый список сделал бы его страж рассинхрона
+    # слепым. Совпадение с wp_rates.RATE_FEATURES закреплено тестом.
+    "networth_diff_rate_1m",
+    "xp_diff_rate_1m",
+    "towers_diff_rate_1m",
+    "vision_coverage_diff_rate_1m",
+    "levels_diff_rate_1m",
+    "networth_diff_rate_3m",
+    "xp_diff_rate_3m",
+    "towers_diff_rate_3m",
+    "vision_coverage_diff_rate_3m",
+    "levels_diff_rate_3m",
+    "networth_diff_rate_5m",
+    "xp_diff_rate_5m",
+    "towers_diff_rate_5m",
+    "vision_coverage_diff_rate_5m",
+    "levels_diff_rate_5m",
 ]
 
 # Фичи, меняющие знак при зеркалировании сторон Radiant↔Dire (все
@@ -63,6 +101,16 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  "buyback_availability",
                  "sen_wards_diff", "runes_diff", "neutral_tier_diff",
                  "levels_diff"}
+
+# Производная разностной величины меняет знак вместе с ней: если при
+# зеркалировании networth_diff становится −networth_diff, то и «сколько
+# золота в минуту набегает Radiant» становится тем же со знаком минус.
+# Выражение выведено из MIRROR_NEGATE, а не выписано руками: список
+# метрик может пополниться симметричной величиной, и тогда её производную
+# зеркалить будет НЕЛЬЗЯ. Забытое зеркалирование не падает — оно молча
+# учит модель на несогласованных данных.
+MIRROR_NEGATE |= {rate_name(m, w) for m in RATE_METRICS
+                  for w in RATE_WINDOWS if m in MIRROR_NEGATE}
 
 # draft_prior — вероятность, а не разность: при зеркалировании сторон
 # она переходит в 1 − p, а не в −p. Обрабатывается отдельно в mirror_xy.
@@ -238,13 +286,42 @@ def match_rows_sql(extra: tuple[str, ...] = (), where: str = "") -> str:
     `extra` — дополнительные колонки витрины (например radiant_win, tier),
     `where` — условие внутри подзапроса (например
     "WHERE match_id = {match_id:UInt64}").
+
+    Производные (G1) считаются здесь же оконными функциями, а не при
+    сборе. Это принципиально: все двенадцать фич трека F писались в
+    момент сбора, у исторических матчей остались пустыми и потому не
+    дали ничего. Оконные колонки считаются РЕТРОАКТИВНО — на всех уже
+    собранных матчах, без миграции и без пересбора.
     """
-    cols = ", ".join(("match_id", *ROW_COLUMNS, *extra))
+    cols = ", ".join(("match_id", *ROW_COLUMNS, *extra, window_columns()))
     return (f"SELECT t.*, d.prior AS draft_prior"
             f"  FROM (SELECT {cols}"
             f"          FROM MatchTimelineFeatures FINAL {where}) AS t"
             f"  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
             f"    USING (match_id)")
+
+
+def align_to_artifact(X: np.ndarray, names: list[str]) -> np.ndarray:
+    """Переставить колонки матрицы (в порядке FEATURES) под набор артефакта.
+
+    Раньше это была позиционная обрезка `X[:, :len(art["features"])]`. Она
+    верна ровно до тех пор, пока FEATURES только пополняется с конца.
+    Трек G прямо предполагает УДАЛЕНИЕ не оправдавших себя фич, а удаление
+    из середины списка обрезку не ломает — оно молча скармливает модели
+    сдвинутые колонки: networth туда, где ожидался xp. Такая ошибка не
+    падает и не видна в метриках инференса.
+
+    Фича, которой в текущем FEATURES больше нет, отдаётся как NaN —
+    нативный пропуск LightGBM. Это честнее, чем падать: старый артефакт
+    должен доживать свой век в проде, пока новый не пройдёт гейт.
+    """
+    idx = {f: i for i, f in enumerate(FEATURES)}
+    out = np.full((X.shape[0], len(names)), np.nan)
+    for j, name in enumerate(names):
+        i = idx.get(name)
+        if i is not None:
+            out[:, j] = X[:, i]
+    return out
 
 
 def row_to_features(row: dict) -> list[float]:
@@ -305,6 +382,9 @@ def row_to_features(row: dict) -> list[float]:
         "levels_diff": _f("levels_diff"),
         "draft_prior": _f("draft_prior"),
     }
+    # G1: производные (арифметика — в libs/wp_rates.py, чтобы у
+    # report-generator была ровно та же).
+    values.update(rates_for_row(row, values))
     return [values[f] for f in FEATURES]
 
 

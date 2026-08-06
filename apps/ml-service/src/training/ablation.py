@@ -41,6 +41,8 @@ import time
 
 import numpy as np
 
+from wp_rates import RATE_FEATURES, RATE_METRICS, RATE_WINDOWS, rate_name
+
 from .dataset import FEATURES, Dataset, load_from_clickhouse
 
 logger = logging.getLogger("ablation")
@@ -56,6 +58,14 @@ GROUPS: dict[str, list[str]] = {
     "F3_драфт_прайор": ["draft_prior"],
     "база_экономика": ["networth_diff", "xp_diff", "networth_rel"],
     "база_объекты": ["towers_diff", "rax_diff", "alive_diff"],
+    # G1 (спринт 131). Четыре группы, а не одна, потому что вопросов два
+    # и они разные. «G1_производные_все» отвечает на главный: несут ли
+    # производные сигнал вообще. Три семейства окон отвечают на второй:
+    # какое окно работает. Скорее всего работает одно из трёх — мерить
+    # их скопом значило бы утопить сработавшее в двух несработавших.
+    "G1_производные_все": list(RATE_FEATURES),
+    **{f"G1_окно_{w // 60}мин": [rate_name(m, w) for m in RATE_METRICS]
+       for w in RATE_WINDOWS},
 }
 
 # Порог «фича неизмерима»: меньше этой доли непропущенных значений — данных

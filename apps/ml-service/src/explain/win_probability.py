@@ -16,7 +16,7 @@ import numpy as np
 import requests
 
 from predictors.win_probability import DEFAULT_MODEL, WinProbability
-from training.dataset import match_rows_sql, row_to_features
+from training.dataset import align_to_artifact, match_rows_sql, row_to_features
 
 from .winprob_shap import contributions, top_drivers
 
@@ -46,7 +46,12 @@ def main() -> int:
         print(f"нет таймлайна для матча {args.match_id}")
         return 1
 
-    X = np.array([row_to_features(r) for r in rows])[:, :len(model.features)]
+    # По именам, а не позиционной обрезкой: здесь имена колонок идут
+    # прямо в вывод (top_drivers), и сдвиг колонок дал бы объяснение,
+    # уверенно называющее не ту фичу — ошибка тем опаснее, что выглядит
+    # совершенно правдоподобно.
+    X = align_to_artifact(np.array([row_to_features(r) for r in rows]),
+                          model.features)
     wp = model.predict(X)
     contribs, _ = contributions(model.booster, X)
     drivers = top_drivers(contribs, model.features, args.top)

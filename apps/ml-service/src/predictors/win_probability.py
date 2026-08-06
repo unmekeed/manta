@@ -16,7 +16,7 @@ import numpy as np
 import requests
 
 from calibration import register_legacy_aliases
-from training.dataset import match_rows_sql, row_to_features
+from training.dataset import align_to_artifact, match_rows_sql, row_to_features
 
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "win_probability.pkl"
 
@@ -57,8 +57,12 @@ class WinProbability:
         if not rows:
             return []
         X = np.array([row_to_features(r) for r in rows])
-        # Старый артефакт (меньше фич) — режем вектор до его набора.
-        X = X[:, :len(self.features)]
+        # Колонки под набор артефакта — ПО ИМЕНАМ. Позиционная обрезка
+        # верна лишь пока FEATURES только пополняется с конца; удаление
+        # фичи из середины (трек G прямо этого требует) обрезку не ломает,
+        # а молча сдвигает колонки — модель получает не те числа и не
+        # падает.
+        X = align_to_artifact(X, self.features)
         wp = self.predict(X)
         return [{"game_time": int(r["game_time"]), "wp_radiant": round(float(p), 4)}
                 for r, p in zip(rows, wp)]

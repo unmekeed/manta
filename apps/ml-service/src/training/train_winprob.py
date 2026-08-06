@@ -29,6 +29,8 @@ from sklearn.metrics import brier_score_loss, log_loss
 
 from calibration import PlattCalibrator
 
+from wp_rates import RATE_FEATURES
+
 from .dataset import (FEATURES, PRO_TIER, Dataset, dataset_hash,
                       load_from_clickhouse, merge, mirror_xy, synth_matches)
 from .drift import compute_reference
@@ -85,6 +87,17 @@ MONOTONE = {
     "sen_wards_diff": 0,
     "runes_diff": 0,
 }
+
+# G1 (спринт 131): производные идут БЕЗ монотонных ограничений, хотя
+# направление выглядит бесспорным («разрыв растёт — растут шансы»).
+#
+# Причина методическая, а не доменная. Спринт вводит производные, чтобы
+# ПРОВЕРИТЬ, несут ли они сигнал. Монотонное ограничение — это доменное
+# утверждение, заданное модели заранее; окажись оно неверным хотя бы в
+# части режимов, абляция покажет «семейство бесполезно», и мы не сумеем
+# отличить «идея не работает» от «мы связали модель неверной гипотезой».
+# Сначала измерение, ограничения — после вердикта.
+MONOTONE.update({name: 0 for name in RATE_FEATURES})
 
 # Базовые (ручные) параметры. Если training.tune нашёл лучшие и записал
 # models/lgb_params.json — они накладываются поверх (см. ниже).

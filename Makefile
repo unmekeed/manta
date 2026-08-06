@@ -6,7 +6,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
-.PHONY: candidates-queue candidates-sql-test
+.PHONY: candidates-queue candidates-sql-test wp-rates-sql-test
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -148,6 +148,10 @@ ml-status:     ## Статус обучения: production-версия, раз
 
 ml-ablation:   ## Ablation фич WP: какая заслужила место (ARGS="--each")
 	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.ablation $(ARGS)
+
+wp-rates-sql-test: ## Проверить окна производных (G1) на живом ClickHouse
+	cd apps/ml-service && MANTA_TEST_CH=1 \
+	PYTHONPATH=src:$(CURDIR)/libs python3 -m pytest tests/test_rates_sql.py -v
 
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
 	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.audit

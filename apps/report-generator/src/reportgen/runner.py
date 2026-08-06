@@ -24,6 +24,7 @@ import psycopg
 import requests
 from confluent_kafka import Consumer, Producer
 from prometheus_client import Counter, Histogram
+from wp_rates import RATE_FEATURES, rates_for_row, window_columns
 
 from . import retention
 from .builder import build_analysis, build_timeline
@@ -67,11 +68,63 @@ WP_PASSTHROUGH_FEATURES = [
     "unspent_gold_diff", "buyback_availability",
 ]
 
+# G1 (спринт 131): производные. Не колонки витрины и не локальный счёт —
+# и SQL оконных колонок, и арифметика темпа берутся из общего
+# libs/wp_rates.py. Свою копию здесь заводить нельзя: расхождение с
+# ml-service не упало бы, а дало РАЗНЫЕ ЧИСЛА одной и той же модели в
+# обучении и в проде — худший из возможных исходов.
+WP_PASSTHROUGH_FEATURES += RATE_FEATURES
+
 # Колонки витрины для _timeline_rows: сырьё под WP_PASSTHROUGH_FEATURES и
-# производные. draft_prior живёт в MatchDraft — подтягивается джойном.
+# производные. draft_prior живёт в MatchDraft — подтягивается джойном,
+# производные считаются оконными функциями и колонками витрины не являются.
 WP_ROW_COLUMNS = ["game_time", "networth_diff", "networth_total", "xp_diff",
                   "kills_radiant", "kills_dire"] + [
-    f for f in WP_PASSTHROUGH_FEATURES if f != "draft_prior"]
+    f for f in WP_PASSTHROUGH_FEATURES
+    if f != "draft_prior" and f not in RATE_FEATURES]
+
+
+def _f(row: dict, key: str) -> float:
+    """Отсутствующая фича (JSON-матчи, строки до миграции 008) — NaN.
+
+    ClickHouse отдаёт NaN как null → None; NaN — корректный пропуск для
+    модели, protobuf double его несёт.
+    """
+    v = row.get(key)
+    return float(v) if v is not None else float("nan")
+
+
+def wp_feature_values(row: dict) -> dict[str, float]:
+    """Вектор фич WP по именам для gRPC MLService.
+
+    Вынесено из замыкания внутри `_wp_curve` намеренно: это единственное
+    место, где report-generator решает, что именно увидит модель, и оно
+    обязано быть проверяемым тестом. Ровно на этом уже обжигались —
+    забытые фичи волны 1 жили в коде спринтами и всплыли бы только в
+    день, когда гейт продвинул бы модель с ними.
+
+    Отдаются ВСЕ имена из model.features, включая те, которых у строки
+    нет: сервер требует полный набор и отвечает INVALID_ARGUMENT на
+    пропуск ключа. Отсутствующее значение — NaN, а не пропуск.
+    """
+    kills_r = float(row["kills_radiant"])
+    kills_d = float(row["kills_dire"])
+    total = _f(row, "networth_total")
+    v = {"game_time": float(row["game_time"]),
+         "networth_diff": float(row["networth_diff"]),
+         "xp_diff": float(row["xp_diff"]),
+         "kills_diff": kills_r - kills_d,
+         "kills_total": kills_r + kills_d,
+         "networth_rel": (float(row["networth_diff"]) / total
+                          if total == total and total > 0 else float("nan"))}
+    for name in WP_PASSTHROUGH_FEATURES:
+        if name not in RATE_FEATURES:
+            v[name] = _f(row, name)
+    # G1: производные считаются общим кодом (libs/wp_rates.py) из оконных
+    # колонок запроса — теми же формулами, что при обучении. Уровни, от
+    # которых они берутся, к этому моменту уже в v.
+    v.update(rates_for_row(row, v))
+    return v
 
 
 @dataclass
@@ -126,7 +179,8 @@ class ReportGenerator:
         cols = ", ".join(WP_ROW_COLUMNS)
         return self._ch_select(
             f"SELECT t.*, d.prior AS draft_prior"
-            f"  FROM (SELECT match_id, {cols}, radiant_win"
+            f"  FROM (SELECT match_id, {cols}, radiant_win,"
+            f"               {window_columns()}"
             f"          FROM MatchTimelineFeatures FINAL"
             f"         WHERE match_id = {{match_id:UInt64}}) AS t"
             f"  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
@@ -236,40 +290,12 @@ class ReportGenerator:
 
     def _wp_curve(self, match_id: int, rows: list[dict]
                   ) -> tuple[list[float], list[list[dict]], str]:
-        def _rel(r: dict) -> float:
-            total = _f(r, "networth_total")
-            if total == total and total > 0:
-                return float(r["networth_diff"]) / total
-            return float("nan")
-
-        def _f(r: dict, key: str) -> float:
-            # Отсутствующие фичи (JSON-матчи, строки до миграции 008):
-            # ClickHouse отдаёт NaN как null → NaN — корректный пропуск
-            # для модели (protobuf double его несёт).
-            v = r.get(key)
-            return float(v) if v is not None else float("nan")
-
-        def values(r: dict) -> dict:
-            kills_r = float(r["kills_radiant"])
-            kills_d = float(r["kills_dire"])
-            # Полный набор WP_FEATURES: ml-service требует ВСЕ имена из
-            # model.features, поэтому отдаём и те, которых у строки нет —
-            # NaN, а не пропуск ключа.
-            v = {"game_time": float(r["game_time"]),
-                 "networth_diff": float(r["networth_diff"]),
-                 "xp_diff": float(r["xp_diff"]),
-                 "kills_diff": kills_r - kills_d,
-                 "kills_total": kills_r + kills_d,
-                 "networth_rel": _rel(r)}
-            for name in WP_PASSTHROUGH_FEATURES:
-                v[name] = _f(r, name)
-            return v
-
         def frames():
             for r in rows:
                 yield services_pb2.FeatureFrame(
                     match_id=match_id, game_time=int(r["game_time"]),
-                    features=services_pb2.FeatureVector(values=values(r)))
+                    features=services_pb2.FeatureVector(
+                        values=wp_feature_values(r)))
 
         wp, drivers = [], []
         for p in self.ml.PredictStream(frames()):
@@ -280,7 +306,8 @@ class ReportGenerator:
         # Версию модели узнаём отдельным Predict по последней точке.
         resp = self.ml.Predict(services_pb2.PredictRequest(
             match_id=match_id, model_name="win_probability",
-            features=services_pb2.FeatureVector(values=values(rows[-1]))))
+            features=services_pb2.FeatureVector(
+                values=wp_feature_values(rows[-1]))))
         return wp, drivers, resp.model_version
 
     # -- генерация ---------------------------------------------------------------
