@@ -310,6 +310,27 @@ class StratzRankError(RuntimeError):
     """Ошибка запроса ранга у STRATZ."""
 
 
+class StratzQuotaExhausted(StratzRankError):
+    """Кончилась ЧАСОВАЯ или суточная квота — отступать бессмысленно.
+
+    От всплеска отличается принципиально. Всплеск лечится паузой в
+    секунды; исчерпанная квота часа не лечится ничем, кроме следующего
+    часа, и отступление 2/4/8/16 против неё — способ потратить полминуты
+    на запрос и не получить ничего. Живой прогон 2026-08-06: после
+    исчерпания квоты цикл ушёл в часы бессмысленных попыток, потому что
+    этой разницы код не знал.
+    """
+
+
+# Часовой лимит Default-токена STRATZ. Именно он СВЯЗЫВАЮЩИЙ: 8/с и
+# 150/мин позволяют куда больший темп, но 1500/час режет всё до одного
+# запроса в 2.4 секунды. Паузу надо считать по самому строгому лимиту, а
+# не по самому заметному — ровно эту ошибку я и допустил, взяв 8/с и
+# поставив 0.2 с, то есть 18000 запросов в час.
+STRATZ_HOUR_LIMIT = 1500
+STRATZ_MIN_DELAY_S = 3600.0 / STRATZ_HOUR_LIMIT   # 2.4 с
+
+
 def is_admin_only(message: str) -> bool:
     """Отказ «эндпоинт только для админов» — не сетевой сбой, а приговор."""
     return "not an admin" in message.lower()
@@ -356,17 +377,26 @@ class StratzRankResolver:
 
     def __init__(self, token: str, api_url: str = STRATZ_API_URL,
                  timeout: float = 30.0, batch_size: int = DEFAULT_BATCH,
-                 rank_field: str | None = None, api_delay_s: float = 0.2,
-                 retries: int = 4, backoff_base_s: float = 2.0) -> None:
+                 rank_field: str | None = None,
+                 api_delay_s: float = STRATZ_MIN_DELAY_S,
+                 retries: int = 4, backoff_base_s: float = 2.0,
+                 run_budget: int | None = None) -> None:
         if not token:
             raise ValueError("stratz: пустой токен")
         self._token = token
         self._url = api_url
         self._timeout = timeout
         self._batch_size = max(1, batch_size)
-        # Лимиты STRATZ: 8/с, 150/мин. Резолвер молотит пачками без пауз
-        # и в первом же прогоне поймал 429 — темп задаётся здесь.
+        # Темп по САМОМУ СТРОГОМУ лимиту (1500/час), а не по 8/с.
         self._api_delay_s = api_delay_s
+        # Бюджет запросов на прогон: квота часа общая с коллектором
+        # матчей, выесть её целиком значит остановить сбор.
+        self._run_budget = (run_budget if run_budget is not None
+                            else int(os.getenv("STRATZ_RUN_BUDGET", "1000")))
+        self.requests = 0
+        # Остаток по заголовкам ответа; None — сервер не сказал.
+        self.remaining_hour: int | None = None
+        self.remaining_day: int | None = None
         self._retries = max(0, retries)
         self._backoff_base_s = backoff_base_s
         self._last_call = 0.0
@@ -382,6 +412,9 @@ class StratzRankResolver:
     # -- транспорт -------------------------------------------------------------
 
     def _gql(self, query: str, variables: dict) -> dict:
+        if self.requests >= self._run_budget:
+            raise StratzQuotaExhausted(
+                f"бюджет прогона исчерпан ({self._run_budget} запросов)")
         for attempt in range(self._retries + 1):
             gap = self._api_delay_s - (time.monotonic() - self._last_call)
             if gap > 0:
@@ -391,11 +424,22 @@ class StratzRankResolver:
                 headers={"Authorization": f"Bearer {self._token}", **STRATZ_UA},
                 timeout=self._timeout)
             self._last_call = time.monotonic()
+            self.requests += 1
+            self._read_limits(resp)
             if resp.status_code != 429:
                 break
+            # 429 при нулевом остатке часа — это НЕ всплеск. Отступать
+            # незачем: до конца часа ответа не будет, и каждая попытка
+            # лишь тратит полминуты и ещё один запрос из суточной квоты.
+            if self.remaining_hour == 0 or self.remaining_day == 0:
+                raise StratzQuotaExhausted(
+                    f"квота исчерпана (час: {self.remaining_hour}, "
+                    f"сутки: {self.remaining_day})")
             if attempt == self._retries:
-                raise StratzRankError(
-                    f"HTTP 429 после {self._retries} отступлений")
+                # Заголовков нет, но 429 не ушёл за все отступления —
+                # почти наверняка та же исчерпанная квота, а не всплеск.
+                raise StratzQuotaExhausted(
+                    f"HTTP 429 не ушёл за {self._retries} отступлений")
             wait = self._backoff_base_s * (2 ** attempt)
             logger.info("STRATZ 429 — ждём %.0f с (попытка %d/%d)",
                         wait, attempt + 1, self._retries)
@@ -409,6 +453,18 @@ class StratzRankResolver:
         return (body or {}).get("data") or {}
 
     # -- запросы ---------------------------------------------------------------
+
+    def _read_limits(self, resp) -> None:
+        """Остатки квот из заголовков ответа STRATZ."""
+        for header, attr in (("x-ratelimit-remaining-hour", "remaining_hour"),
+                             ("x-ratelimit-remaining-day", "remaining_day")):
+            raw = resp.headers.get(header)
+            if raw is None:
+                continue
+            try:
+                setattr(self, attr, int(raw))
+            except (TypeError, ValueError):
+                pass
 
     def _batch_query(self) -> str:
         return ("query($ids: [Long!]!) { players(steamAccountIds: $ids) "
@@ -468,6 +524,13 @@ class StratzRankResolver:
                 self.failures["предел пачки не уменьшился"] += len(chunk)
                 start += len(chunk)
                 continue
+            except StratzQuotaExhausted:
+                # Квота не лечится продолжением: остальные куски получат
+                # ровно тот же отказ, каждый ценой очередных отступлений.
+                # Отдаём то, что успели, — записи уже полученных рангов
+                # терять нельзя.
+                self.failures["квота исчерпана"] += len(account_ids) - start
+                raise StratzQuotaExhausted(str(self.failures)) from None
             except StratzRankError as exc:
                 # НЕ откатываемся на одиночные: сбой пачки из-за квоты
                 # или сети превратился бы в полсотни запросов вместо
@@ -485,6 +548,8 @@ class StratzRankResolver:
             for aid in chunk:
                 try:
                     data = self._gql(self._single_query(), {"id": aid})
+                except StratzQuotaExhausted:
+                    raise
                 except StratzRankError as exc:
                     self.failures[str(exc)] += 1
                     logger.debug("stratz %s: %s", aid, exc)
@@ -826,7 +891,16 @@ def fill(cache: RankCache, resolver: RankResolver, budget: int,
     stats = {"спрошено": len(todo), "получено": 0, "immortal": 0}
     for start in range(0, len(todo), chunk):
         part = todo[start:start + chunk]
-        resolved = resolver.resolve(part)
+        try:
+            resolved = resolver.resolve(part)
+        except StratzQuotaExhausted as exc:
+            # Прогон закончился не по нашей воле — но закончился ЧЕСТНО:
+            # то, что успели опросить, уже записано, а остаток очереди
+            # никуда не денется до следующего часа.
+            logger.warning("STRATZ: %s — прогон остановлен", exc)
+            stats["остановлен"] = 1
+            stats["  причина: квота"] = 1
+            break
         if not resolved:
             continue
         cache.save(resolved, resolver.name)

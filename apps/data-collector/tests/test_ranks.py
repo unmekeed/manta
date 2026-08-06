@@ -22,6 +22,7 @@ from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
                              OpenDotaRankResolver, StratzRankError,
                              StratzRankResolver, _rank_value, build_resolver,
                              classify_match, fill, harvest_rawstore,
+                             STRATZ_HOUR_LIMIT, StratzQuotaExhausted,
                              SWEEP_KNOWN, SWEEP_SHARE, is_admin_only,
                              rawstore_pairs, scan, seed, stream_filter,
                              sweep_table,
@@ -360,18 +361,94 @@ def test_stratz_does_not_flood_singles_on_transient_batch_error():
     assert [k for k, _ in r.queries] == ["batch"], r.queries
 
 
+class _StratzResp:
+    def __init__(self, code, body, headers=None):
+        self.status_code = code
+        self.content = b"x"
+        self._body = body
+        self.headers = headers or {}
+
+    def json(self):
+        return self._body
+
+
+class _StratzSession:
+    def __init__(self, seq):
+        self.seq = list(seq)
+        self.posted = []
+
+    def post(self, url, **kwargs):
+        self.posted.append(kwargs)
+        return self.seq.pop(0) if self.seq else self.seq[-1]
+
+
+def _quiet_sleep(monkeypatch):
+    import collector.ranks as ranks_mod
+    monkeypatch.setattr(ranks_mod.time, "sleep", lambda s: None)
+
+
+def test_quota_exhaustion_is_not_retried(monkeypatch):
+    """429 при нулевом остатке часа — не всплеск, отступать бессмысленно.
+
+    Живой прогон 2026-08-06: после исчерпания часовой квоты цикл ушёл в
+    часы попыток по 30 секунд каждая, потому что код не отличал
+    исчерпанную квоту от всплеска.
+    """
+    _quiet_sleep(monkeypatch)
+    r = StratzRankResolver("токен", api_delay_s=0.0, backoff_base_s=0.0)
+    r._session = _StratzSession([
+        _StratzResp(429, {}, {"x-ratelimit-remaining-hour": "0"})])
+    with pytest.raises(StratzQuotaExhausted):
+        r.resolve([1])
+    assert len(r._session.posted) == 1, "на исчерпанной квоте были повторы"
+
+
+def test_persistent_429_without_headers_is_treated_as_quota(monkeypatch):
+    _quiet_sleep(monkeypatch)
+    r = StratzRankResolver("токен", api_delay_s=0.0, backoff_base_s=0.0,
+                           retries=2)
+    r._session = _StratzSession([_StratzResp(429, {}) for _ in range(5)])
+    with pytest.raises(StratzQuotaExhausted):
+        r.resolve([1])
+
+
+def test_run_budget_caps_requests(monkeypatch):
+    """Квота часа общая с коллектором матчей — выесть её нельзя."""
+    _quiet_sleep(monkeypatch)
+    r = StratzRankResolver("токен", api_delay_s=0.0, batch_size=1,
+                           run_budget=3)
+    r._session = _StratzSession(
+        [_StratzResp(200, {"data": {"players": [_account(i, 85)]}})
+         for i in range(10)])
+    with pytest.raises(StratzQuotaExhausted):
+        r.resolve(list(range(10)))
+    assert len(r._session.posted) == 3
+
+
+def test_default_pace_respects_the_binding_hour_limit():
+    """Считать паузу надо по 1500/час, а не по 8/с."""
+    r = StratzRankResolver("токен")
+    assert r._api_delay_s >= 3600.0 / STRATZ_HOUR_LIMIT
+
+
+def test_fill_stops_on_quota_and_keeps_what_it_got():
+    class Quota(FakeResolver):
+        def resolve(self, ids):
+            self.asked.extend(ids)
+            if len(self.asked) > 2:
+                raise StratzQuotaExhausted("квота исчерпана")
+            return {i: 85 for i in ids}
+
+    cache = FakeCache(pending=list(range(20)))
+    stats = fill(cache, Quota(), budget=20, chunk=2)
+    assert stats.get("остановлен") == 1
+    assert stats["получено"] == 2, "потеряли уже полученные ранги"
+    assert len(cache.saved) == 1
+
+
 def test_stratz_backs_off_on_429():
-    class Resp:
-        def __init__(self, code, body):
-            self.status_code = code
-            self.content = b"x"
-            self._body = body
-
-        def json(self):
-            return self._body
-
-    seq = [Resp(429, {}), Resp(429, {}),
-           Resp(200, {"data": {"players": [_account(1, 85)]}})]
+    seq = [_StratzResp(429, {}), _StratzResp(429, {}),
+           _StratzResp(200, {"data": {"players": [_account(1, 85)]}})]
     posted = []
 
     class Session:
