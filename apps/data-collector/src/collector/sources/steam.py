@@ -54,29 +54,50 @@ class SteamAPIError(RuntimeError):
     """Valve ответил, но не данными (status != 1 или HTTP-ошибка)."""
 
 
+class SteamRateLimited(SteamAPIError):
+    """429 не ушёл после всех отступлений — сегодня больше не наливают."""
+
+
 class SteamMatchStream:
     """Чтение живого потока матчей по номеру последовательности."""
 
     def __init__(self, api_key: str, base_url: str = API_BASE,
-                 timeout: float = 30.0, api_delay_s: float = 1.0) -> None:
+                 timeout: float = 30.0, api_delay_s: float = 1.0,
+                 retries: int = 4, backoff_base_s: float = 2.0) -> None:
         if not api_key:
             raise ValueError("steam: пустой STEAM_API_KEY")
         self._key = api_key
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._api_delay_s = api_delay_s
+        self._retries = max(0, retries)
+        self._backoff_base_s = backoff_base_s
         self._last_call = 0.0
+        self.rate_limit_waits = 0
 
     # -- транспорт -------------------------------------------------------------
 
     def _get(self, method: str, **params) -> dict:
-        gap = self._api_delay_s - (time.monotonic() - self._last_call)
-        if gap > 0:
-            time.sleep(gap)
-        params["key"] = self._key
-        resp = requests.get(f"{self._base}/{method}/v1/",
-                            params=params, timeout=self._timeout)
-        self._last_call = time.monotonic()
+        """Один вызов Valve с отступлением на 429.
+
+        Замер 2026-08-06: двенадцать вызовов подряд с паузой в секунду —
+        и 429. Лимит у этого эндпоинта burst-овый и заметно жёстче, чем
+        «одна секунда между вызовами», поэтому пауза не спасает, спасает
+        только отступление. Без него первый же 429 обрывал набор
+        аккаунтов на ~1200 матчах, а набор — топливо для всего кэша.
+        """
+        for attempt in range(self._retries + 1):
+            resp = self._request(method, params)
+            if resp.status_code != 429:
+                break
+            if attempt == self._retries:
+                raise SteamRateLimited(f"{method}: HTTP 429 после "
+                                       f"{self._retries} отступлений")
+            wait = self._backoff_base_s * (2 ** attempt)
+            self.rate_limit_waits += 1
+            logger.info("Valve 429 — ждём %.0f с (попытка %d/%d)",
+                        wait, attempt + 1, self._retries)
+            time.sleep(wait)
         if resp.status_code != 200:
             raise SteamAPIError(f"{method}: HTTP {resp.status_code}")
         result = (resp.json() or {}).get("result") or {}
@@ -88,6 +109,16 @@ class SteamMatchStream:
                 f"{method}: status={result.get('status')} "
                 f"{result.get('statusDetail', '')}".strip())
         return result
+
+    def _request(self, method: str, params: dict):
+        gap = self._api_delay_s - (time.monotonic() - self._last_call)
+        if gap > 0:
+            time.sleep(gap)
+        resp = requests.get(f"{self._base}/{method}/v1/",
+                            params={**params, "key": self._key},
+                            timeout=self._timeout)
+        self._last_call = time.monotonic()
+        return resp
 
     # -- поток -----------------------------------------------------------------
 
@@ -131,17 +162,24 @@ class SteamMatchStream:
         return lo
 
 
-def match_accounts(match: dict) -> list[int]:
-    """account_id всех игроков матча, без анонимов и дублей.
+def match_account_stats(match: dict) -> tuple[list[int], int, int]:
+    """(видимые account_id, всего слотов, скрытых профилей).
 
-    Дубли реальны: у Valve встречаются матчи, где один и тот же слот
-    продублирован, а UPSERT кэша по такому списку падает с «ON CONFLICT
-    cannot affect row a second time». Чистим здесь, у самого источника,
-    а не в кэше — иначе каждый будущий поставщик аккаунтов будет обязан
-    помнить об этом сам.
+    Доля скрытых — не любопытство, а параметр проекта. Отбирать матчи мы
+    собираемся по рангам их игроков, а ранг известен только для видимых
+    аккаунтов. Если видимых в среднем три из десяти, то порог «минимум
+    четыре известных ранга» недостижим в принципе, и правило отбора надо
+    строить иначе. Поэтому счётчик снимается прямо здесь, у источника.
+
+    Дубли отсекаются тоже здесь: у Valve встречаются матчи с
+    продублированным слотом, а UPSERT кэша по такому списку падает с
+    «ON CONFLICT cannot affect row a second time».
     """
     seen: dict[int, None] = {}
+    slots = 0
+    hidden = 0
     for p in match.get("players") or []:
+        slots += 1
         raw = p.get("account_id")
         if raw is None:
             continue
@@ -149,7 +187,15 @@ def match_accounts(match: dict) -> list[int]:
             aid = int(raw)
         except (TypeError, ValueError):
             continue
-        if aid <= 0 or aid == ANONYMOUS_ACCOUNT_ID:
+        if aid == ANONYMOUS_ACCOUNT_ID:
+            hidden += 1
+            continue
+        if aid <= 0:
             continue
         seen.setdefault(aid, None)
-    return list(seen)
+    return list(seen), slots, hidden
+
+
+def match_accounts(match: dict) -> list[int]:
+    """Только видимые account_id матча, без анонимов и дублей."""
+    return match_account_stats(match)[0]

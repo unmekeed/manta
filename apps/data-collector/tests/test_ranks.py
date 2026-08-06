@@ -19,11 +19,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
                              OpenDotaRankResolver, StratzRankError,
-                             StratzRankResolver, _rank_value, classify_match,
-                             fill, is_admin_only, seed)
+                             StratzRankResolver, _rank_value, build_resolver,
+                             classify_match, fill, is_admin_only, seed,
+                             visible_per_match)
 from collector.sources.steam import (ANONYMOUS_ACCOUNT_ID,  # noqa: E402
                                      SEQ_TIP_PRECISION, SteamAPIError,
-                                     SteamMatchStream, match_accounts)
+                                     SteamMatchStream, SteamRateLimited,
+                                     match_account_stats, match_accounts)
 
 
 # -- поток Valve --------------------------------------------------------------
@@ -81,6 +83,70 @@ def test_tip_seq_never_reads_from_zero():
     stream.tip_seq()
     assert stream.calls, "поиск не сделал ни одного вызова"
     assert all(seq >= 1 for seq, _ in stream.calls)
+
+
+def test_match_account_stats_counts_hidden_profiles():
+    """Доля скрытых профилей — параметр проекта, а не любопытство."""
+    m = _match(1, [11, ANONYMOUS_ACCOUNT_ID, ANONYMOUS_ACCOUNT_ID, 22])
+    accounts, slots, hidden = match_account_stats(m)
+    assert accounts == [11, 22]
+    assert slots == 4
+    assert hidden == 2
+
+
+def test_visible_per_match_uses_slots_not_distinct_accounts():
+    stats = {"матчей": 100, "слотов": 1000, "скрытых": 700}
+    assert visible_per_match(stats) == 3.0
+
+
+class _Resp:
+    def __init__(self, code, body=None):
+        self.status_code = code
+        self._body = body if body is not None else {"result": {"status": 1,
+                                                               "matches": []}}
+
+    def json(self):
+        return self._body
+
+
+def _steam_with_codes(monkeypatch, codes):
+    """Поток, чьи ответы заданы списком HTTP-кодов."""
+    import collector.sources.steam as steam_mod
+    seq = list(codes)
+    calls = []
+
+    def fake_get(url, **kwargs):
+        code = seq.pop(0) if seq else 200
+        calls.append(code)
+        return _Resp(code)
+
+    monkeypatch.setattr(steam_mod.requests, "get", fake_get)
+    monkeypatch.setattr(steam_mod.time, "sleep", lambda s: None)
+    return SteamMatchStream("ключ", api_delay_s=0.0, backoff_base_s=0.0), calls
+
+
+def test_rate_limit_is_retried_not_surrendered(monkeypatch):
+    """429 после двенадцати вызовов — замер 2026-08-06; пауза не спасает."""
+    stream, calls = _steam_with_codes(monkeypatch, [429, 429, 200])
+    assert stream.batch(100) == []
+    assert calls == [429, 429, 200]
+    assert stream.rate_limit_waits == 2
+
+
+def test_rate_limit_gives_up_after_all_backoffs(monkeypatch):
+    stream, calls = _steam_with_codes(monkeypatch, [429] * 10)
+    stream._retries = 3
+    with pytest.raises(SteamRateLimited):
+        stream.batch(100)
+    assert len(calls) == 4, "три отступления = четыре попытки"
+
+
+def test_non_429_error_is_not_retried(monkeypatch):
+    """Отступать на 500 бессмысленно — это не лимит, а поломка."""
+    stream, calls = _steam_with_codes(monkeypatch, [500, 200])
+    with pytest.raises(SteamAPIError):
+        stream.batch(100)
+    assert calls == [500]
 
 
 def test_get_rejects_non_success_status(monkeypatch):
@@ -364,6 +430,48 @@ def test_seed_finds_tip_when_cursor_is_empty():
     stream = FakeStream(tip=4_000_000)
     seed(cache, stream, matches=1)
     assert cache.cursor is not None and cache.cursor > 3_000_000
+
+
+def test_fill_reports_why_accounts_stayed_silent():
+    """«спрошено 200, получено 76» без причины — не диагностика."""
+    class Failing(FakeResolver):
+        def resolve(self, ids):
+            self.failures = __import__("collections").Counter({"HTTP 429": len(ids)})
+            return {}
+
+    cache = FakeCache(pending=[1, 2, 3])
+    stats = fill(cache, Failing(silent=True), budget=3)
+    assert any("HTTP 429" in k for k in stats), stats
+
+
+def test_build_resolver_prefers_stratz_when_token_present(monkeypatch):
+    """Пакет STRATZ закрывает 50 игроков за запрос, OpenDota — одного."""
+    monkeypatch.delenv("RANKS_RESOLVER", raising=False)
+    monkeypatch.setenv("STRATZ_API_TOKEN", "токен")
+    assert build_resolver().name == "stratz"
+
+
+def test_build_resolver_falls_back_without_token(monkeypatch):
+    monkeypatch.delenv("RANKS_RESOLVER", raising=False)
+    monkeypatch.delenv("STRATZ_API_TOKEN", raising=False)
+    assert build_resolver().name == "opendota"
+
+
+def test_build_resolver_obeys_explicit_choice(monkeypatch):
+    monkeypatch.setenv("STRATZ_API_TOKEN", "токен")
+    assert build_resolver("opendota").name == "opendota"
+
+
+def test_seed_counts_hidden_profiles_across_stream():
+    cache = FakeCache()
+    cache.cursor = 300
+    stream = FakeStream(tip=10**9, batches={
+        300: [_match(300, [1, ANONYMOUS_ACCOUNT_ID, ANONYMOUS_ACCOUNT_ID])],
+        301: [],
+    })
+    stats = seed(cache, stream, matches=10)
+    assert stats["слотов"] == 3 and stats["скрытых"] == 2
+    assert visible_per_match(stats) == 1.0
 
 
 def test_seed_keeps_repeat_encounters_for_priority():

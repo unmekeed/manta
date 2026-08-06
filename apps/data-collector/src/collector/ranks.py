@@ -36,7 +36,7 @@ import psycopg
 import requests
 
 from .sources.steam import (ANONYMOUS_ACCOUNT_ID, SteamAPIError,
-                            SteamMatchStream, match_accounts)
+                            SteamMatchStream, match_account_stats)
 
 logger = logging.getLogger("collector.ranks")
 
@@ -240,6 +240,10 @@ class OpenDotaRankResolver:
         self._api_delay_s = api_delay_s
         self._api_key = api_key
         self._session = requests.Session()
+        # Почему аккаунт не резолвнулся. Первый живой прогон дал
+        # «спрошено 200, получено 76», и по такому отчёту нельзя понять,
+        # исчерпана квота или профили закрыты, — а это разные решения.
+        self.failures: Counter = Counter()
 
     def resolve(self, account_ids: list[int]) -> dict[int, int]:
         out: dict[int, int] = {}
@@ -251,10 +255,12 @@ class OpenDotaRankResolver:
                 resp = self._session.get(f"{self._base}/players/{aid}",
                                          params=params, timeout=self._timeout)
                 if resp.status_code != 200:
+                    self.failures[f"HTTP {resp.status_code}"] += 1
                     logger.debug("opendota %s: HTTP %s", aid, resp.status_code)
                     continue
                 body = resp.json() or {}
             except (requests.RequestException, ValueError) as exc:
+                self.failures[type(exc).__name__] += 1
                 logger.debug("opendota %s: %s", aid, exc)
                 continue
             # Ответ получен — значит запись обязана появиться, даже если
@@ -308,7 +314,11 @@ class StratzRankResolver:
         self._batch_size = max(1, batch_size)
         self._field = rank_field or STRATZ_RANK_FIELD
         # None — не проверяли, True — пакет работает, False — админский.
+        # Живая проверка 2026-08-06: пакет РАЗРЕШЁН на нашем токене, в
+        # отличие от matches(ids:). Автоопределение оставлено — доступ
+        # уже менялся, и молча упасть на этом второй раз мы не должны.
         self.batch_allowed: bool | None = None
+        self.failures: Counter = Counter()
         self._session = requests.Session()
 
     # -- транспорт -------------------------------------------------------------
@@ -369,6 +379,7 @@ class StratzRankResolver:
             try:
                 batched = self._try_batch(chunk)
             except StratzRankError as exc:
+                self.failures[f"пакет: {exc}"] += len(chunk)
                 logger.warning("STRATZ пакет %d id: %s", len(chunk), exc)
                 batched = None
             if batched is not None:
@@ -378,6 +389,7 @@ class StratzRankResolver:
                 try:
                     data = self._gql(self._single_query(), {"id": aid})
                 except StratzRankError as exc:
+                    self.failures[str(exc)] += 1
                     logger.debug("stratz %s: %s", aid, exc)
                     continue
                 rec = (data.get("player") or {})
@@ -447,7 +459,8 @@ def seed(cache: RankCache, stream: SteamMatchStream, matches: int,
         logger.info("курсор пуст — ищем хвост последовательности")
         seq = stream.tip_seq()
         logger.info("хвост последовательности: %s", seq)
-    stats = {"матчей": 0, "аккаунтов": 0, "вызовов": 0}
+    stats = {"матчей": 0, "аккаунтов": 0, "вызовов": 0,
+             "слотов": 0, "скрытых": 0}
     seen_batch: list[int] = []
     while stats["матчей"] < matches:
         try:
@@ -461,12 +474,20 @@ def seed(cache: RankCache, stream: SteamMatchStream, matches: int,
             logger.info("догнали край потока на seq %s", seq)
             break
         for m in got:
-            seen_batch.extend(match_accounts(m))
+            accounts, slots, hidden = match_account_stats(m)
+            seen_batch.extend(accounts)
+            stats["слотов"] += slots
+            stats["скрытых"] += hidden
             seq = max(seq, int(m.get("match_seq_num") or seq) + 1)
         stats["матчей"] += len(got)
     stats["аккаунтов"] = cache.see(seen_batch)
     cache.set_cursor(seq)
     return stats
+
+
+def visible_per_match(stats: dict[str, int]) -> float:
+    """Сколько игроков матча видны по account_id. Ключевое для отбора."""
+    return (stats["слотов"] - stats["скрытых"]) / max(stats["матчей"], 1)
 
 
 def fill(cache: RankCache, resolver: RankResolver, budget: int,
@@ -494,6 +515,11 @@ def fill(cache: RankCache, resolver: RankResolver, budget: int,
         stats["получено"] += len(resolved)
         stats["immortal"] += sum(1 for r in resolved.values()
                                  if r >= IMMORTAL_MIN_RANK)
+    # Причины молчания — в тот же отчёт. Разница между «квота кончилась»
+    # и «профили закрыты» это разные решения, а по одному числу
+    # «получено» их не различить.
+    for reason, n in getattr(resolver, "failures", Counter()).most_common(5):
+        stats[f"  не ответил {reason}"] = n
     return stats
 
 
@@ -557,11 +583,21 @@ def probe_stratz(token: str) -> str:
     return "\n".join(out)
 
 
-def build_resolver(name: str) -> RankResolver:
+def build_resolver(name: str | None = None) -> RankResolver:
+    """Выбрать резолвер. По умолчанию — STRATZ, если есть токен.
+
+    Причина умолчания измерена: квота STRATZ считается по HTTP-запросам,
+    а пакетный players(steamAccountIds:) на нашем токене РАЗРЕШЁН (зонд
+    2026-08-06), то есть один запрос закрывает полсотни игроков. OpenDota
+    же тратит запрос на игрока и делит свои ~2000 в сутки с коллекторами,
+    из-за чего первый живой прогон дал 76 ответов из 200 спрошенных.
+    """
+    name = name or os.getenv("RANKS_RESOLVER") or (
+        "stratz" if os.getenv("STRATZ_API_TOKEN") else "opendota")
     if name == "stratz":
-        token = os.getenv("STRATZ_API_TOKEN", "")
         return StratzRankResolver(
-            token, batch_size=int(os.getenv("RANKS_BATCH_SIZE", "50")))
+            os.getenv("STRATZ_API_TOKEN", ""),
+            batch_size=int(os.getenv("RANKS_BATCH_SIZE", "50")))
     return OpenDotaRankResolver(
         api_key=os.getenv("OPENDOTA_API_KEY") or None,
         api_delay_s=float(os.getenv("OPENDOTA_DELAY_S", "1.1")))
@@ -580,8 +616,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--budget", type=int,
                    default=int(os.getenv("RANKS_FILL_BUDGET", "200")),
                    help="fill: сколько аккаунтов опросить")
-    p.add_argument("--resolver", default=os.getenv("RANKS_RESOLVER", "opendota"),
-                   choices=("opendota", "stratz"))
+    p.add_argument("--resolver", default=None, choices=("opendota", "stratz"),
+                   help="по умолчанию stratz при наличии токена")
     p.add_argument("--ttl-days", type=int, default=DEFAULT_TTL_DAYS)
     args = p.parse_args(argv)
 
@@ -599,9 +635,15 @@ def main(argv: list[str] | None = None) -> int:
                 api_delay_s=float(os.getenv("STEAM_DELAY_S", "1.0")))
             stats = seed(cache, stream, args.matches)
             print("seed:", ", ".join(f"{k} {v}" for k, v in stats.items()))
+            if stats["слотов"]:
+                print(f"      видимых игроков на матч: "
+                      f"{visible_per_match(stats):.1f} из 10 "
+                      f"(скрытых профилей "
+                      f"{100.0 * stats['скрытых'] / stats['слотов']:.0f}%)")
         elif args.command == "fill":
-            stats = fill(cache, build_resolver(args.resolver), args.budget,
-                         ttl_days=args.ttl_days)
+            resolver = build_resolver(args.resolver)
+            logger.info("резолвер: %s", resolver.name)
+            stats = fill(cache, resolver, args.budget, ttl_days=args.ttl_days)
             print("fill:", ", ".join(f"{k} {v}" for k, v in stats.items()))
         print(report(cache))
     finally:
