@@ -24,7 +24,9 @@ from collector.ranks import (IMMORTAL_MIN_RANK, RANK_UNKNOWN,  # noqa: E402
                              classify_match, fill, harvest_rawstore,
                              STRATZ_HOUR_LIMIT, StratzQuotaExhausted,
                              SWEEP_KNOWN, SWEEP_SHARE, is_admin_only,
+                             _verify_forward, lag_seconds,
                              rawstore_pairs, scan, seed, stream_filter,
+                             stream_rate,
                              sweep_table,
                              take_limit,
                              visible_per_match)
@@ -734,6 +736,132 @@ def test_sweep_table_renders_percentages():
     sweep[(2, 0.5)] = 25
     out = sweep_table(sweep, 100)
     assert "25.00%" in out and "50%" in out
+
+
+# -- догон живого края ------------------------------------------------------------
+
+def _timed(seq, mid, start_time, accounts=(1,)):
+    return {"match_seq_num": seq, "match_id": mid, "lobby_type": 7,
+            "game_mode": 22, "duration": 2400, "start_time": start_time,
+            "players": [{"account_id": a} for a in accounts]}
+
+
+def test_stream_rate_measured_from_the_batch_itself():
+    """Темп потока берётся из уже прочитанных данных, без лишних вызовов."""
+    got = [_timed(1000 + i * 10, i, 1_700_000_000 + i) for i in range(100)]
+    rate = stream_rate(got)
+    assert rate is not None and abs(rate - 10.0) < 1e-6
+
+
+def test_stream_rate_is_none_when_time_does_not_advance():
+    got = [_timed(1000 + i, i, 1_700_000_000) for i in range(5)]
+    assert stream_rate(got) is None
+
+
+def test_lag_seconds_uses_the_freshest_match():
+    now = 1_700_010_000
+    got = [_timed(1, 1, now - 7200), _timed(2, 2, now - 3600)]
+    assert lag_seconds(got, now) == 3600
+
+
+def test_verify_forward_falls_back_when_target_is_empty():
+    """Перелёт за живой край оставил бы курсор в пустоте навсегда."""
+    stream = FakeStream(tip=1_000_000)
+    assert _verify_forward(stream, 900_000, 500_000) <= 1_000_000
+    assert _verify_forward(stream, 900_000, 500_000) > 900_000, "недопрыгнул"
+
+
+def test_verify_forward_returns_base_when_nothing_alive():
+    class Dead(FakeStream):
+        def batch(self, seq, count=100):
+            return []
+
+    stream = Dead(tip=0)
+    assert _verify_forward(stream, 500, 1000) == 500
+
+
+class LagCache(ScanCache):
+    pass
+
+
+def _lag_stream(now, lag_s, count=100):
+    """Поток, отдающий матчи заданной давности, затем пустоту."""
+    base = 1_000_000
+    batches = {base: [_timed(base + i, i, int(now - lag_s))
+                      for i in range(count)],
+               base + count: []}
+    stream = FakeStream(tip=10**9, batches=batches)
+    return stream, base
+
+
+def test_scan_jumps_forward_when_lagging(monkeypatch):
+    """Читая подряд, сканер отстаёт на две трети скорости потока."""
+    import collector.ranks as ranks_mod
+    now = 1_700_000_000.0
+    monkeypatch.setattr(ranks_mod.time, "time", lambda: now)
+    stream, base = _lag_stream(now, lag_s=48 * 3600)
+    cache = LagCache({})
+    cache.cursor = base
+    funnel, _ = scan(cache, stream, matches=100)
+    assert funnel["отставание, ч"] == 48
+    assert funnel.get("прыжок вперёд", 0) > 0, "сканер не догоняет край"
+    assert cache.cursor > base + 100, "курсор не сдвинут вперёд"
+
+
+def test_scan_never_jumps_past_the_live_edge(monkeypatch):
+    """Перелёт оставил бы курсор в пустоте НАВСЕГДА.
+
+    Каждый следующий проход читал бы ноль матчей и не имел бы ни
+    малейшего повода вернуться назад: пустой ответ неотличим от «догнали
+    край». Поэтому прыжок обязан быть подтверждён живым ответом.
+    """
+    import collector.ranks as ranks_mod
+    now = 1_700_000_000.0
+    monkeypatch.setattr(ranks_mod.time, "time", lambda: now)
+    base, tip = 1_000_000, 1_200_000
+    # Отставание двое суток при темпе 10 seq/с даёт расчётный прыжок
+    # ~1.37 млн — заведомо дальше живого края.
+    stream = FakeStream(tip=tip, batches={
+        base: [_timed(base + i * 10, i, int(now - 48 * 3600))
+               for i in range(100)],
+        base + 990: [],
+    })
+    cache = LagCache({})
+    cache.cursor = base
+    scan(cache, stream, matches=100)
+    assert cache.cursor > base, "не сдвинулся вовсе"
+    assert cache.cursor <= tip, f"курсор улетел в пустоту: {cache.cursor}"
+    assert stream.batch(cache.cursor, count=1), "курсор в мёртвой зоне"
+
+
+def test_scan_does_not_jump_when_close_to_the_edge(monkeypatch):
+    """Прыгать без нужды значит пропускать матчи впустую.
+
+    Отставание намеренно ВЫШЕ целевого (час), но ниже порога догона
+    (шесть часов): проверяется именно порог, а не то, что расчётный
+    прыжок вышел отрицательным.
+    """
+    import collector.ranks as ranks_mod
+    now = 1_700_000_000.0
+    monkeypatch.setattr(ranks_mod.time, "time", lambda: now)
+    stream, base = _lag_stream(now, lag_s=2 * 3600)
+    cache = LagCache({})
+    cache.cursor = base
+    funnel, _ = scan(cache, stream, matches=100)
+    assert "прыжок вперёд" not in funnel
+    assert cache.cursor == base + 100
+
+
+def test_scan_reports_lag_even_without_jump(monkeypatch):
+    """Отставание — главный симптом будущего простоя, оно должно быть видно."""
+    import collector.ranks as ranks_mod
+    now = 1_700_000_000.0
+    monkeypatch.setattr(ranks_mod.time, "time", lambda: now)
+    stream, base = _lag_stream(now, lag_s=3600)
+    cache = LagCache({})
+    cache.cursor = base
+    funnel, _ = scan(cache, stream, matches=100)
+    assert funnel["отставание, ч"] == 1
 
 
 # -- цикл ------------------------------------------------------------------------

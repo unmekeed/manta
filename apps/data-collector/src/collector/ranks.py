@@ -698,6 +698,81 @@ def visible_per_match(stats: dict[str, int]) -> float:
 SWEEP_KNOWN = (2, 3, 4, 5)
 SWEEP_SHARE = (0.5, 0.6, 0.75, 1.0)
 
+# Отставание от живого края, при котором сканер прыгает вперёд.
+#
+# Зачем вообще прыгать. Мировой поток — порядка миллиона матчей в сутки,
+# а Valve отдаёт нам около 2400 за проход и упирается в 429. Читая
+# ПОДРЯД, сканер отстаёт примерно на две трети скорости потока, то есть
+# курсор уезжает назад на ~0.7 дня за каждый день работы. Реплеи Valve
+# хранит около двух недель — значит недели через три кандидаты начнут
+# массово помечаться expired, и приток тихо сойдёт на нет. Ничего не
+# сломается, просто перестанет работать: ровно та форма отказа, которая
+# нам уже стоила недель.
+#
+# Читать подряд нам и не нужно. Нужны не ВСЕ матчи, а полторы тысячи
+# подходящих в сутки, и распределены они по потоку равномерно. Поэтому
+# сканер работает как выборка, а не как перечисление, и это осознанный
+# отказ от полноты охвата.
+SCAN_MAX_LAG_S = 6 * 3600
+SCAN_TARGET_LAG_S = 3600
+
+# Прыгаем на 80% расчётного расстояния. Недолёт самоисправляется
+# следующим проходом, перелёт стоит целого прохода впустую — асимметрия
+# в пользу осторожности.
+JUMP_SAFETY = 0.8
+
+# Запасная оценка темпа потока (номеров последовательности в секунду),
+# если измерить не удалось. Из замера ~789 match_id/мин.
+DEFAULT_SEQ_RATE = 13.0
+
+
+def stream_rate(matches: list[dict]) -> float | None:
+    """Номеров последовательности в секунду реального времени.
+
+    Измеряется по самому же прочитанному куску — ни одного лишнего
+    вызова API. Шум от разной длительности матчей (номер выдаётся в
+    конце, start_time — начало) на паре тысяч матчей усредняется.
+    """
+    stamps = [(int(m.get("match_seq_num") or 0), int(m.get("start_time") or 0))
+              for m in matches]
+    stamps = [(s, t) for s, t in stamps if s > 0 and t > 0]
+    if len(stamps) < 2:
+        return None
+    stamps.sort()
+    d_seq = stamps[-1][0] - stamps[0][0]
+    d_time = stamps[-1][1] - stamps[0][1]
+    if d_seq <= 0 or d_time <= 0:
+        return None
+    return d_seq / d_time
+
+
+def lag_seconds(matches: list[dict], now: float) -> float | None:
+    """На сколько мы отстаём от живого края, по времени начала матчей."""
+    stamps = [int(m.get("start_time") or 0) for m in matches]
+    stamps = [t for t in stamps if t > 0]
+    if not stamps:
+        return None
+    return max(now - max(stamps), 0.0)
+
+
+def _verify_forward(stream: SteamMatchStream, base: int, jump: int,
+                    tries: int = 4) -> int:
+    """Прыжок вперёд, ПРОВЕРЕННЫЙ на наличие матчей.
+
+    Без проверки перелёт за живой край оставлял бы курсор в пустоте
+    навсегда: каждый следующий проход читал бы ноль матчей и не имел бы
+    ни малейшего повода вернуться. Стоит это 1-4 вызова.
+    """
+    while jump > 0 and tries > 0:
+        try:
+            if stream.batch(base + jump, count=1):
+                return base + jump
+        except SteamAPIError as exc:
+            logger.debug("прыжок на %s не удался: %s", base + jump, exc)
+        jump //= 2
+        tries -= 1
+    return base
+
 
 def rank_summary(ranks: dict[int, int | None]) -> tuple[int, int, int]:
     """(известных рангов, из них immortal, средний известный ранг).
@@ -734,6 +809,7 @@ def scan(cache: RankCache, stream: SteamMatchStream, matches: int,
     sweep: dict[tuple[int, float], int] = {
         (k, s): 0 for k in SWEEP_KNOWN for s in SWEEP_SHARE}
     seen_all: list[int] = []
+    seen_matches: list[dict] = []
     done = 0
     while done < matches:
         try:
@@ -744,6 +820,7 @@ def scan(cache: RankCache, stream: SteamMatchStream, matches: int,
         if not got:
             break
         done += len(got)
+        seen_matches.extend(got)
 
         prepared = []
         wanted: set[int] = set()
@@ -781,6 +858,26 @@ def scan(cache: RankCache, stream: SteamMatchStream, matches: int,
 
     funnel["всего матчей"] = done
     cache.see(seen_all)
+
+    # Догон живого края. Считается по данным, которые уже в руках:
+    # start_time каждого матча даёт и отставание, и темп потока — ни
+    # одного лишнего вызова API.
+    lag = lag_seconds(seen_matches, time.time())
+    if lag is not None:
+        funnel["отставание, ч"] = int(lag / 3600)
+    if lag is not None and lag > SCAN_MAX_LAG_S:
+        rate = stream_rate(seen_matches) or DEFAULT_SEQ_RATE
+        jump = int((lag - SCAN_TARGET_LAG_S) * rate * JUMP_SAFETY)
+        if jump > 0:
+            jumped = _verify_forward(stream, seq, jump)
+            if jumped > seq:
+                logger.info("отставание %.1f ч — прыгаем вперёд на %d "
+                            "(темп %.1f seq/с)", lag / 3600, jumped - seq, rate)
+                funnel["прыжок вперёд"] = jumped - seq
+                seq = jumped
+            else:
+                logger.warning("отставание %.1f ч, но прыжок не подтвердился",
+                               lag / 3600)
     cache.set_cursor(seq)
     return funnel, sweep
 
