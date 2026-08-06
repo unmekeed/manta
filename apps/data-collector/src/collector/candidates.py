@@ -37,6 +37,12 @@ MAX_SALT_ATTEMPTS = 8
 # впустую.
 RETRY_MINUTES = 30
 
+# Через сколько кандидат, выданный коллектору, считается потерянным.
+# Скачивание одного реплея — секунды-десятки секунд; получас с запасом
+# перекрывает самый медленный случай и при этом быстро возвращает в
+# очередь то, что зависло из-за смерти процесса.
+STALE_TAKEN_MINUTES = 30
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -91,12 +97,38 @@ class CandidateQueue:
                 (ttl_days,))
             return cur.rowcount
 
-    def take(self, limit: int) -> list[Candidate]:
-        """Взять из очереди. Самые СТАРЫЕ вперёд — они ближе к истечению.
+    def requeue_stale_taken(self, minutes: int = STALE_TAKEN_MINUTES) -> int:
+        """Вернуть в очередь кандидатов, застрявших в `taken`.
 
-        Порядок именно такой, а не «свежие вперёд»: реплей живёт около
-        двух недель, и матч, найденный вчера, имеет меньше времени, чем
-        найденный минуту назад.
+        Visibility timeout. Кандидат помечается `taken` при выдаче, а
+        `done` — после скачивания; если процесс между этими моментами
+        умер (рестарт WSL, kill, падение), строка осталась бы в `taken`
+        навсегда, потому что очередь выбирает только `new`.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                "UPDATE ReplayCandidates "
+                "   SET state = 'new', next_try_at = NULL, updated_at = NOW(),"
+                "       last_error = 'зависло в taken' "
+                " WHERE state = 'taken' "
+                "   AND updated_at < NOW() - make_interval(mins => %s)",
+                (minutes,))
+            return cur.rowcount
+
+    def take(self, limit: int) -> list[Candidate]:
+        """Взять из очереди. Самые СВЕЖИЕ вперёд.
+
+        Порядок изменён по замеру (спринт 128.1). Изначально брали самых
+        старых — «они ближе к истечению». Это верно, только пока приток
+        МЕНЬШЕ пропускной способности. Замер показал обратное: сканер
+        находит ~3500 кандидатов в сутки, а скачать канал позволяет ~1900.
+        При таком избытке «старые вперёд» означает, что мы всегда качаем
+        подтухший хвост очереди, приближаясь к границе в 13 дней, а
+        свежие ждут своей очереди вечно.
+        
+        Кандидат не ценность — их больше, чем мы способны взять. Ценность
+        — пропускная способность канала, и тратить её надо на реплей с
+        максимальным запасом жизни. Излишек пусть истекает.
         """
         if limit <= 0:
             return []
@@ -107,7 +139,7 @@ class CandidateQueue:
                 "  FROM ReplayCandidates "
                 " WHERE state = 'new' "
                 "   AND (next_try_at IS NULL OR next_try_at <= NOW()) "
-                " ORDER BY found_at LIMIT %s", (limit,))
+                " ORDER BY found_at DESC LIMIT %s", (limit,))
             return [Candidate(int(r[0]), int(r[1]), r[2], int(r[3]),
                               int(r[4]), int(r[5])) for r in cur.fetchall()]
 

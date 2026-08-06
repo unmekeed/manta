@@ -17,7 +17,7 @@ import requests
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from collector.candidates import Candidate  # noqa: E402
-from collector.sources import Shard  # noqa: E402
+from collector.sources import PermanentDownloadError, Shard  # noqa: E402
 from collector.sources.candidates import CandidateSource  # noqa: E402
 
 
@@ -34,6 +34,10 @@ class FakeQueue:
                                   "cand": c, "error": None}
                      for c in ready}
         self.expired = 0
+        self.stale_taken = 0
+
+    def requeue_stale_taken(self, minutes=30):
+        return self.stale_taken
 
     def expire(self, ttl_days=13):
         return self.expired
@@ -159,7 +163,14 @@ def test_done_is_set_only_after_download():
     assert q.rows[1]["state"] == "done"
 
 
-def test_download_failure_leaves_state_not_done():
+def test_download_failure_returns_candidate_to_the_queue():
+    """Сбой скачивания не должен терять кандидата навсегда.
+
+    Живой прогон 2026-08-06: кандидат помечался taken при выдаче, а при
+    418 от реплей-сервера Valve там и оставался — очередь выбирает только
+    new, поэтому матч не повторялся никогда. За полтора часа так зависло
+    шесть штук.
+    """
     q = FakeQueue([_cand(1)])
     src = _source(q, {1: {"replay_url": "http://r/1"}})
     ref = next(iter(src.fetch_new()))
@@ -170,7 +181,32 @@ def test_download_failure_leaves_state_not_done():
     src._od.download_replay = boom
     with pytest.raises(requests.ConnectionError):
         src.download_replay(ref)
-    assert q.rows[1]["state"] != "done"
+    assert q.rows[1]["state"] == "new", "кандидат завис в taken"
+    assert q.rows[1]["attempts"] == 1
+
+
+def test_permanent_download_error_closes_candidate_forever():
+    """404/410/битый архив — возвращать в очередь нечего."""
+    q = FakeQueue([_cand(1)])
+    src = _source(q, {1: {"replay_url": "http://r/1"}})
+    ref = next(iter(src.fetch_new()))
+
+    def gone(_ref):
+        raise PermanentDownloadError("реплей удалён")
+
+    src._od.download_replay = gone
+    with pytest.raises(PermanentDownloadError):
+        src.download_replay(ref)
+    assert q.rows[1]["state"] == "failed"
+
+
+def test_stale_taken_candidates_are_requeued():
+    """Процесс умер между выдачей и скачиванием — очередь не должна течь."""
+    q = FakeQueue([_cand(1)])
+    q.stale_taken = 3
+    src = _source(q, {})
+    list(src.fetch_new())
+    assert src.last_cycle["зависших вернули"] == 3
 
 
 def test_expired_are_counted_in_cycle_stats():

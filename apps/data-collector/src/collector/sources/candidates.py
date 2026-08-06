@@ -23,7 +23,7 @@ from typing import Iterable
 import requests
 
 from ..candidates import CandidateQueue
-from . import MatchRef, Shard
+from . import MatchRef, PermanentDownloadError, Shard
 from .opendota import OpenDotaSource
 
 logger = logging.getLogger("collector.candidates_source")
@@ -47,9 +47,14 @@ class CandidateSource:
         self.last_cycle: dict[str, int] = {}
 
     def fetch_new(self, after_cursor: str | None = None) -> Iterable[MatchRef]:
-        stats = {"взято": 0, "отдано": 0, "нет соли": 0,
-                 "безнадёжных": 0, "просрочено": 0}
+        stats = {"взято": 0, "отдано": 0, "нет соли": 0, "безнадёжных": 0,
+                 "просрочено": 0, "зависших вернули": 0}
         stats["просрочено"] = self._queue.expire()
+        # Кандидат, выданный процессу, который затем умер (рестарт WSL,
+        # kill, падение), остался бы в `taken` навсегда. Возвращаем такие
+        # в очередь — это стандартный visibility timeout, без него
+        # очередь медленно протекает при каждом перезапуске.
+        stats["зависших вернули"] = self._queue.requeue_stale_taken()
 
         # Берём с запасом: часть кандидатов уйдёт в отложенные из-за
         # отсутствия соли, и без запаса цикл отдал бы пустоту при полной
@@ -88,7 +93,28 @@ class CandidateSource:
                     ", ".join(f"{k} {v}" for k, v in stats.items()))
 
     def download_replay(self, ref: MatchRef) -> bytes:
-        data = self._od.download_replay(ref)
+        """Скачать реплей и закрыть кандидата — в ЛЮБОМ исходе.
+
+        Первый живой прогон вскрыл утечку: кандидат помечался `taken` при
+        выдаче, а при сбое скачивания там и оставался навсегда. Очередь
+        выбирает только `new`, поэтому такой матч не повторялся никогда и
+        тихо терялся — за полтора часа так зависло шесть штук (418 от
+        реплей-сервера Valve).
+
+        Поэтому каждая ветка исхода что-то делает с состоянием:
+        постоянная ошибка закрывает кандидата навсегда, временная
+        возвращает в очередь с отложенным повтором.
+        """
+        try:
+            data = self._od.download_replay(ref)
+        except PermanentDownloadError as exc:
+            # Реплей уже не скачать никогда: 404/410, битый архив, не
+            # демка. Возвращать в очередь нечего.
+            self._queue.mark(ref.match_id, "failed", str(exc)[:200])
+            raise
+        except Exception as exc:  # noqa: BLE001 — состояние важнее типа
+            self._queue.defer(ref.match_id, error=str(exc)[:200])
+            raise
         # Отмечаем ПОСЛЕ успешного скачивания, а не при выдаче: между
         # ними лежит 58 МиБ по сети, и обрыв не должен выглядеть как
         # успешно собранный матч.
