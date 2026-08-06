@@ -88,6 +88,28 @@ def _detail_split(name: str) -> SourceSplit:
                        count=2)
 
 
+def blamed_on_stratz(response, source: str) -> bool:
+    """Кто на самом деле ответил ошибкой — STRATZ или OpenDota.
+
+    Раньше решалось по ИМЕНИ источника: любой 429 в stratz-коллекторе
+    считался лимитом STRATZ и усыплял его на час. Но кандидатов stratz
+    берёт из ЛИСТИНГА OPENDOTA, у которого свой минутный лимит 60/мин —
+    и он куда жёстче, потому что его делят все коллекторы машины.
+
+    Замер 2026-08-06: три 429 за сутки при остатке квоты STRATZ 13358 из
+    15000 (то есть у STRATZ упереться было не во что) и remaining-minute
+    у OpenDota 23 из 60. Каждый такой 429 стоил часа простоя источника,
+    который к тому моменту стал главным по притоку — 197 матчей в сутки.
+
+    Отсюда правило: смотрим на URL ОТВЕТА. Имя источника остаётся
+    запасным вариантом на случай, когда ответа нет вовсе (обрыв связи).
+    """
+    url = str(getattr(response, "url", "") or "")
+    if url:
+        return "stratz" in url.lower()
+    return source.startswith("stratz")
+
+
 def build_source(name: str):
     limit = int(os.getenv("OPENDOTA_LIMIT", "3"))
     api_key = os.getenv("OPENDOTA_API_KEY") or None
@@ -238,7 +260,8 @@ def main() -> None:
                 CYCLES_FAILED.inc()
                 status = (e.response.status_code
                           if e.response is not None else None)
-                if status == 429 and args.source.startswith("stratz"):
+                from_stratz = blamed_on_stratz(e.response, args.source)
+                if status == 429 and from_stratz:
                     RATE_LIMITED.inc()
                     # У STRATZ лимиты почасовые (2000/ч) и суточные
                     # (10000/сут), полночь UTC к ним отношения не имеет —
@@ -249,7 +272,7 @@ def main() -> None:
                         "429: лимит STRATZ исчерпан; жду %ss вместо обычных "
                         "%ss — при регулярных 429 снижать STRATZ_LIMIT",
                         sleep_s, args.interval)
-                elif status in (401, 403) and args.source.startswith("stratz"):
+                elif status in (401, 403) and from_stratz:
                     # Токен протух или отозван: повтор через interval ничего
                     # не изменит, но и падать демону незачем — так проблема
                     # видна в логе и на дашборде, а не превращается в
