@@ -114,6 +114,50 @@ def test_match_gives_up_after_attempt_budget():
     assert src.last_cycle["безнадёжных"] == 1
 
 
+def _http_error(status):
+    resp = requests.Response()
+    resp.status_code = status
+    return requests.HTTPError(f"{status} Client Error", response=resp)
+
+
+def test_quota_exhaustion_aborts_the_cycle_immediately():
+    """429 — состояние ЦИКЛА, а не свойство матча.
+
+    Живой прогон 2026-08-06: цикл шёл к следующему кандидату и сжигал
+    шестьдесят запросов на исчерпанной квоте («взято 60, отдано 0, нет
+    соли 60»), дожигая и без того отрицательный остаток.
+    """
+    q = FakeQueue([_cand(i) for i in range(10)])
+    src = _source(q, {i: _http_error(429) for i in range(10)})
+    with pytest.raises(requests.HTTPError):
+        list(src.fetch_new())
+    assert len(src._od.asked) == 1, "цикл продолжил жечь квоту"
+    assert src.last_cycle["квота исчерпана"] == 1
+
+
+def test_quota_exhaustion_does_not_count_as_a_failed_attempt():
+    """Матч ни в чём не виноват — простой не должен его забраковывать.
+
+    Иначе через восемь циклов простоя очередь целиком уходит в no_salt.
+    """
+    q = FakeQueue([_cand(1)])
+    src = _source(q, {1: _http_error(429)})
+    with pytest.raises(requests.HTTPError):
+        list(src.fetch_new())
+    assert q.rows[1]["attempts"] == 0
+    assert q.rows[1]["state"] == "new"
+
+
+def test_non_429_http_error_still_defers_that_match():
+    """500 у одного матча — его личная беда, цикл продолжается."""
+    q = FakeQueue([_cand(1), _cand(2)])
+    src = _source(q, {1: _http_error(500),
+                      2: {"replay_url": "http://r/2", "players": []}})
+    refs = list(src.fetch_new())
+    assert [r.match_id for r in refs] == [2]
+    assert q.rows[1]["attempts"] == 1
+
+
 def test_network_error_defers_and_continues_with_next():
     """Сбой сети на одном матче не должен обрывать весь цикл."""
     q = FakeQueue([_cand(1), _cand(2)])
