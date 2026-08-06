@@ -148,6 +148,15 @@ fi
 if want rate || want quota; then
 hdr "КВОТЫ ВНЕШНИХ API — первая подозреваемая при падении темпа"
 
+sub "Бюджет вызовов OpenDota по источникам (день UTC)"
+echo "   Делится ЯВНО с спринта 130: раньше квота уходила по принципу"
+echo "   «кто успел», и один источник останавливал все остальные —"
+echo "   включая кормящие про-эталон промоушен-гейта."
+pg "SELECT source AS \"источник\", calls AS \"вызовов\"
+      FROM ApiBudget
+     WHERE day = (now() AT TIME ZONE 'utc')::date AND api = 'opendota'
+     ORDER BY calls DESC"
+
 sub "OpenDota (лимит на IP, сброс 00:00 UTC)"
 od=$(curl -sI --max-time 10 https://api.opendota.com/api/health | tr -d '\r')
 if [ -z "$od" ]; then

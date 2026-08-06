@@ -20,6 +20,7 @@ from typing import Iterable
 
 import requests
 
+from .. import budget
 from . import (IncompleteDownloadError, MatchRef, PermanentDownloadError,
                Shard, with_api_key)
 
@@ -79,6 +80,7 @@ class OpenDotaSource:
         self._shard = shard or Shard()
 
     def fetch_new(self, after_cursor: str | None) -> Iterable[MatchRef]:
+        budget.spend()
         resp = requests.get(f"{self._base}/proMatches",
                             params=with_api_key(None, self._api_key),
                             timeout=self._timeout)
@@ -114,6 +116,7 @@ class OpenDotaSource:
 
     def _match_detail(self, match_id: int) -> dict | None:
         time.sleep(self._api_delay_s)
+        budget.spend()
         resp = requests.get(f"{self._base}/matches/{match_id}",
                             params=with_api_key(None, self._api_key),
                             timeout=self._timeout)

@@ -68,6 +68,7 @@ from typing import Iterable
 import requests
 
 from . import Shard, SourceSplit, with_api_key
+from .. import budget
 from ..signals import HERO_BY_ID, team_of
 from .opendota_timeline import TimelineMatch
 
@@ -550,6 +551,7 @@ class StratzTimelineSource:
         return body.get("data") or {}
 
     def _opendota(self, path: str, **params) -> list:
+        budget.spend()
         resp = requests.get(f"{self._opendota_base}/{path}",
                             params=with_api_key(params, self._opendota_key),
                             timeout=self._timeout,

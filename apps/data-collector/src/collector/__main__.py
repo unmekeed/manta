@@ -14,6 +14,7 @@ import requests
 import manta_grpc
 from prometheus_client import Counter
 
+from . import budget
 from .runner import Collector, CollectorConfig
 
 MATCHES_COLLECTED = Counter("matches_collected_total",
@@ -259,6 +260,14 @@ def main() -> None:
         collector = Collector(cfg, source)
         default_metrics_port = "9105"
 
+    # Бюджет вызовов OpenDota для ЭТОГО процесса (спринт 130). Без него
+    # источник, тратящий больше своей доли, останавливает все остальные —
+    # включая те, что кормят про-эталон промоушен-гейта.
+    budget.budget_from_env(
+        os.getenv("POSTGRES_DSN",
+                  "postgresql://dota:dota_dev_password@localhost:5432/manta"),
+        args.source)
+
     metrics_port = int(os.getenv("METRICS_PORT", default_metrics_port))
     if metrics_port and not args.once:
         manta_grpc.serve_metrics(metrics_port, "data-collector")
@@ -342,6 +351,17 @@ def main() -> None:
                 else:
                     log.exception("цикл сбора упал; повтор через %ss",
                                   args.interval)
+            except budget.BudgetExhausted as e:
+                # Своя доля суточной квоты выбрана. Это НЕ поломка: спим
+                # до сброса, как при 429, но БЕЗ единого лишнего запроса
+                # — в том и смысл бюджета, чтобы упереться в него раньше,
+                # чем в чужой лимит, и не мешать остальным коллекторам.
+                if args.once:
+                    raise
+                RATE_LIMITED.inc()
+                sleep_s = max(sleep_s, seconds_until_utc_midnight())
+                log.warning("%s; жду сброса ~%.1fч (OPENDOTA_BUDGET)",
+                            e, sleep_s / 3600)
             except Exception:  # noqa: BLE001
                 if args.once:
                     raise

@@ -266,7 +266,7 @@ fi
 if ! pgrep -f "collector --source opendota-public" >/dev/null; then
     say "запускаю data-collector (лог: $LOG_DIR/collector.log)"
     (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-1}" METRICS_PORT=9105 PYTHONPATH=src:$ROOT/libs \
-        nohup python3 -u -m collector --source opendota-public \
+        OPENDOTA_BUDGET="${PUBLIC_OD_BUDGET:-50}" nohup python3 -u -m collector --source opendota-public \
             --interval "${PUBLIC_REPLAY_INTERVAL:-3600}" \
             >"$LOG_DIR/collector.log" 2>&1 &)
 else
@@ -276,7 +276,7 @@ fi
 if ! pgrep -f "collector --source opendota-timeline --interval" >/dev/null; then
     say "запускаю timeline-collector (лог: $LOG_DIR/timeline.log)"
     (cd apps/data-collector && TIMELINE_LIMIT="${TIMELINE_LIMIT:-10}" METRICS_PORT=9108 PYTHONPATH=src:$ROOT/libs \
-        nohup python3 -u -m collector --source opendota-timeline \
+        OPENDOTA_BUDGET="${TIMELINE_OD_BUDGET:-250}" nohup python3 -u -m collector --source opendota-timeline \
             --interval "${TIMELINE_INTERVAL:-1800}" \
             >"$LOG_DIR/timeline.log" 2>&1 &)
 else
@@ -286,7 +286,7 @@ fi
 if ! pgrep -f "collector --source opendota-timeline-pro" >/dev/null; then
     say "запускаю pro-timeline-collector (лог: $LOG_DIR/timeline-pro.log)"
     (cd apps/data-collector && TIMELINE_LIMIT="${PRO_TIMELINE_LIMIT:-5}" METRICS_PORT=9110 PYTHONPATH=src:$ROOT/libs \
-        nohup python3 -u -m collector --source opendota-timeline-pro \
+        OPENDOTA_BUDGET="${PRO_TIMELINE_OD_BUDGET:-200}" nohup python3 -u -m collector --source opendota-timeline-pro \
             --interval "${PRO_TIMELINE_INTERVAL:-3600}" \
             >"$LOG_DIR/timeline-pro.log" 2>&1 &)
 else
@@ -300,7 +300,7 @@ if [ -n "${STRATZ_API_TOKEN:-}" ]; then
     if ! pgrep -f "collector --source stratz-timeline --interval" >/dev/null; then
         say "запускаю stratz-collector (лог: $LOG_DIR/stratz.log)"
         (cd apps/data-collector && STRATZ_LIMIT="${STRATZ_LIMIT:-40}" METRICS_PORT=9115 PYTHONPATH=src:$ROOT/libs \
-            nohup python3 -u -m collector --source stratz-timeline \
+            OPENDOTA_BUDGET="${STRATZ_OD_BUDGET:-50}" nohup python3 -u -m collector --source stratz-timeline \
                 --interval "${STRATZ_INTERVAL:-1800}" \
                 >"$LOG_DIR/stratz.log" 2>&1 &)
     else
@@ -327,7 +327,7 @@ if [ "${CANDIDATES_ENABLED:-0}" = "1" ]; then
     if ! pgrep -f "collector --source candidates" >/dev/null; then
         say "запускаю candidates-collector (лог: $LOG_DIR/candidates.log)"
         (cd apps/data-collector && CANDIDATES_LIMIT="${CANDIDATES_LIMIT:-20}" METRICS_PORT=9116 PYTHONPATH=src:$ROOT/libs \
-            nohup python3 -u -m collector --source candidates \
+            OPENDOTA_BUDGET="${CANDIDATES_OD_BUDGET:-1100}" nohup python3 -u -m collector --source candidates \
                 --interval "${CANDIDATES_INTERVAL:-900}" \
                 >"$LOG_DIR/candidates.log" 2>&1 &)
     else
@@ -380,7 +380,7 @@ fi
 if ! pgrep -f "collector --source opendota-league" >/dev/null; then
     say "запускаю league-collector (лог: $LOG_DIR/league.log)"
     (cd apps/data-collector && TIMELINE_LIMIT="${LEAGUE_LIMIT:-6}" METRICS_PORT=9117 PYTHONPATH=src:$ROOT/libs \
-        nohup python3 -u -m collector --source opendota-league \
+        OPENDOTA_BUDGET="${LEAGUE_OD_BUDGET:-200}" nohup python3 -u -m collector --source opendota-league \
             --interval "${LEAGUE_INTERVAL:-3600}" \
             >"$LOG_DIR/league.log" 2>&1 &)
 else
@@ -393,7 +393,7 @@ if ! pgrep -f "collector --source opendota --interval" >/dev/null; then
     # единица здесь молча отменяла документированный OPENDOTA_LIMIT (E4) и
     # держала реплей-путь на одном матче в час независимо от настроек.
     (cd apps/data-collector && OPENDOTA_LIMIT="${OPENDOTA_LIMIT:-1}" METRICS_PORT=9109 PYTHONPATH=src:$ROOT/libs \
-        nohup python3 -u -m collector --source opendota \
+        OPENDOTA_BUDGET="${PRO_REPLAY_OD_BUDGET:-50}" nohup python3 -u -m collector --source opendota \
             --interval "${PRO_REPLAY_INTERVAL:-3600}" \
             >"$LOG_DIR/pro-collector.log" 2>&1 &)
 else

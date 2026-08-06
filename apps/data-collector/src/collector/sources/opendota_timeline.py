@@ -28,6 +28,7 @@ from typing import Iterable
 
 import requests
 
+from .. import budget
 from ..signals import all_minute_features
 from . import Shard, SourceSplit, with_api_key
 
@@ -253,6 +254,7 @@ class OpenDotaTimelineSource:
 
     def _get(self, path: str, **params) -> requests.Response:
         time.sleep(self._delay)          # бюджет free tier: 60 вызовов/мин
+        budget.spend()
         resp = requests.get(f"{self._base}/{path}",
                             params=with_api_key(params, self._api_key),
                             timeout=self._timeout, headers=UA)

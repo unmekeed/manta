@@ -22,6 +22,7 @@ from typing import Iterable
 
 import requests
 
+from .. import budget
 from . import MatchRef, Shard, with_api_key
 from .opendota import DEM_MAGIC, OpenDotaSource
 
@@ -72,6 +73,7 @@ class OpenDotaPublicSource:
 
         # Верхняя граница окна: свежайший матч минус лаг — у более новых
         # OpenDota обычно ещё не имеет replay_salt.
+        budget.spend()
         newest = requests.get(
             f"{self._base}/publicMatches",
             params=with_api_key({"min_rank": str(self._min_rank)},
@@ -84,6 +86,7 @@ class OpenDotaPublicSource:
         ceiling = max(int(r["match_id"]) for r in rows) - self._lag
 
         time.sleep(self._api_delay_s)
+        budget.spend()
         resp = requests.get(
             f"{self._base}/publicMatches",
             params=with_api_key({"min_rank": str(self._min_rank),
@@ -130,6 +133,7 @@ class OpenDotaPublicSource:
 
     def _match_detail(self, match_id: int) -> dict | None:
         time.sleep(self._api_delay_s)
+        budget.spend()
         resp = requests.get(f"{self._base}/matches/{match_id}",
                             params=with_api_key(None, self._api_key),
                             timeout=self._timeout)
