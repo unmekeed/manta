@@ -25,8 +25,15 @@ import requests
 from ..candidates import CandidateQueue
 from . import MatchRef, PermanentDownloadError, Shard
 from .opendota import OpenDotaSource
+from .steam import ANONYMOUS_ACCOUNT_ID
 
 logger = logging.getLogger("collector.candidates_source")
+
+# Нижняя граница Immortal. Дублирует константу из ranks.py намеренно:
+# ranks импортирует candidates, и обратный импорт замкнул бы цикл. У
+# Immortal нет звёзд, поэтому rank_tier ровно 80 — значение стабильное,
+# а не подобранное.
+IMMORTAL_MIN_RANK = 80
 
 
 class CandidateSource:
@@ -35,8 +42,11 @@ class CandidateSource:
     def __init__(self, queue: CandidateQueue, limit_per_cycle: int = 20,
                  base_url: str = "https://api.opendota.com/api",
                  timeout: float = 30.0, api_key: str | None = None,
-                 shard: Shard | None = None) -> None:
+                 shard: Shard | None = None, cache=None) -> None:
         self._queue = queue
+        # Кэш рангов опционален: без него источник работает как прежде,
+        # просто не подкармливает кэш фактическими рангами.
+        self._cache = cache
         self._limit = limit_per_cycle
         self._shard = shard or Shard()
         # Скачивание и распаковка — те же, что у остальных источников:
@@ -79,6 +89,7 @@ class CandidateSource:
                 state = self._queue.defer(cand.match_id, error="нет replay_url")
                 stats["безнадёжных" if state == "no_salt" else "нет соли"] += 1
                 continue
+            self._observe(cand.match_id, detail, stats)
             self._queue.mark(cand.match_id, "taken")
             stats["отдано"] += 1
             yield MatchRef(
@@ -91,6 +102,48 @@ class CandidateSource:
         self.last_cycle = stats
         logger.info("цикл кандидатов: %s",
                     ", ".join(f"{k} {v}" for k, v in stats.items()))
+
+    def _observe(self, match_id: int, detail: dict | None,
+                 stats: dict[str, int]) -> None:
+        """Забрать из ответа за соль то, за что уже заплачено.
+
+        В /matches/{id} лежит rank_tier КАЖДОГО игрока. Это разом две
+        вещи, и обе бесплатны.
+
+        Первая — проверка точности: правило берёт матч по двум известным
+        рангам из десяти, и только факт покажет, не набираем ли мы мусор.
+
+        Вторая важнее. Каждый скачанный матч отдаёт до десяти пар
+        «аккаунт -> ранг» ПРЯМО В КЭШ. При тысяче с лишним закачек в
+        сутки это порядка десяти тысяч рангов в день даром — больше, чем
+        даёт вся суточная квота STRATZ. А чем полнее кэш, тем выше доля
+        отбора, тем больше кандидатов: петля усиливает сама себя.
+        """
+        players = (detail or {}).get("players") or []
+        ranks: dict[int, int] = {}
+        known: list[int] = []
+        for p in players:
+            rank = int(p.get("rank_tier") or 0)
+            if rank <= 0:
+                continue
+            known.append(rank)
+            try:
+                aid = int(p.get("account_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if aid > 0 and aid != ANONYMOUS_ACCOUNT_ID:
+                ranks[aid] = rank
+        if not known:
+            return
+        high = sum(1 for r in known if r >= IMMORTAL_MIN_RANK)
+        self._queue.record_truth(match_id, len(known), high,
+                                 int(sum(known) / len(known)))
+        stats["факт записан"] = stats.get("факт записан", 0) + 1
+        if self._cache is not None and ranks:
+            # Ранг из ответа актуален СЕЙЧАС — дата не указывается,
+            # save() поставит текущее время.
+            self._cache.save(ranks, "opendota-match")
+            stats["рангов в кэш"] = stats.get("рангов в кэш", 0) + len(ranks)
 
     def download_replay(self, ref: MatchRef) -> bytes:
         """Скачать реплей и закрыть кандидата — в ЛЮБОМ исходе.

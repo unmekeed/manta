@@ -200,6 +200,80 @@ def test_permanent_download_error_closes_candidate_forever():
     assert q.rows[1]["state"] == "failed"
 
 
+# -- факт из ответа за соль -----------------------------------------------------
+
+class TruthQueue(FakeQueue):
+    def __init__(self, ready=()):
+        super().__init__(ready)
+        self.truth = {}
+
+    def record_truth(self, match_id, known, immortal, avg_rank):
+        self.truth[match_id] = (known, immortal, avg_rank)
+
+
+class SpyCache:
+    def __init__(self):
+        self.saved = []
+
+    def save(self, ranks, source, dates=None):
+        self.saved.append((dict(ranks), source))
+        return len(ranks)
+
+
+def _detail(url, players):
+    return {"replay_url": url,
+            "players": [{"account_id": a, "rank_tier": r} for a, r in players]}
+
+
+def test_records_true_composition_from_the_salt_response():
+    """Факт приезжает вместе с солью и не стоит лишнего вызова."""
+    q = TruthQueue([_cand(1)])
+    src = _source(q, {1: _detail("http://r/1", [(11, 80), (12, 80), (13, 75)])})
+    list(src.fetch_new())
+    assert q.truth[1] == (3, 2, 78), q.truth
+    assert src.last_cycle["факт записан"] == 1
+
+
+def test_feeds_true_ranks_into_the_cache():
+    """Каждая закачка отдаёт до десяти пар «аккаунт -> ранг» даром."""
+    q = TruthQueue([_cand(1)])
+    cache = SpyCache()
+    src = _source(q, {1: _detail("http://r/1", [(11, 80), (12, 55)])},
+                  cache=cache)
+    list(src.fetch_new())
+    assert cache.saved == [({11: 80, 12: 55}, "opendota-match")]
+    assert src.last_cycle["рангов в кэш"] == 2
+
+
+def test_anonymous_players_do_not_reach_the_cache_but_count_in_truth():
+    """Скрытый профиль — это игрок матча, но не адресуемый аккаунт."""
+    from collector.sources.steam import ANONYMOUS_ACCOUNT_ID
+    q = TruthQueue([_cand(1)])
+    cache = SpyCache()
+    src = _source(q, {1: _detail("http://r/1",
+                                 [(ANONYMOUS_ACCOUNT_ID, 80), (12, 80)])},
+                  cache=cache)
+    list(src.fetch_new())
+    assert q.truth[1][0] == 2, "аноним обязан считаться в составе матча"
+    assert cache.saved == [({12: 80}, "opendota-match")]
+
+
+def test_no_ranks_in_response_records_nothing():
+    """Пустой факт не должен выглядеть как «матч из безранговых»."""
+    q = TruthQueue([_cand(1)])
+    src = _source(q, {1: _detail("http://r/1", [(11, None), (12, 0)])})
+    list(src.fetch_new())
+    assert q.truth == {}
+    assert "факт записан" not in src.last_cycle
+
+
+def test_source_works_without_cache():
+    q = TruthQueue([_cand(1)])
+    src = _source(q, {1: _detail("http://r/1", [(11, 80)])})
+    assert len(list(src.fetch_new())) == 1
+    assert "рангов в кэш" not in src.last_cycle
+
+
 def test_stale_taken_candidates_are_requeued():
     """Процесс умер между выдачей и скачиванием — очередь не должна течь."""
     q = FakeQueue([_cand(1)])

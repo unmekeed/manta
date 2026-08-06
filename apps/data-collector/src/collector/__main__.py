@@ -128,10 +128,11 @@ def build_source(name: str):
         dsn = os.getenv(
             "POSTGRES_DSN",
             "postgresql://dota:dota_dev_password@localhost:5432/manta")
+        from .ranks import RankCache
         return CandidateSource(
             CandidateQueue(dsn),
             limit_per_cycle=int(os.getenv("CANDIDATES_LIMIT", "20")),
-            api_key=api_key, shard=shard)
+            api_key=api_key, shard=shard, cache=RankCache(dsn))
     if name == "opendota-public":
         min_patch = os.getenv("OPENDOTA_MIN_PATCH")
         return OpenDotaPublicSource(

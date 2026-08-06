@@ -143,6 +143,45 @@ class CandidateQueue:
             return [Candidate(int(r[0]), int(r[1]), r[2], int(r[3]),
                               int(r[4]), int(r[5])) for r in cur.fetchall()]
 
+    def record_truth(self, match_id: int, known: int, immortal: int,
+                     avg_rank: int) -> None:
+        """Записать ФАКТИЧЕСКИЙ состав матча по данным OpenDota.
+
+        Приезжает вместе с солью (см. миграцию 009) и не стоит ни одного
+        дополнительного вызова. Единственный способ узнать, не набирает
+        ли правило отбора мусор.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                "UPDATE ReplayCandidates "
+                "   SET true_known_ranks = %s, true_immortal_ranks = %s,"
+                "       true_avg_rank = %s "
+                " WHERE match_id = %s", (known, immortal, avg_rank, match_id))
+
+    def precision(self, min_rank: int = 80) -> dict[str, int]:
+        """Сколько отобранного оказалось иммортальным на самом деле.
+
+        Считается ТОЛЬКО по матчам, где факт известен: NULL означает «не
+        смотрели», и включать такие в знаменатель значило бы разбавлять
+        точность собственным незнанием.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                "SELECT count(*),"
+                "       count(*) FILTER (WHERE true_known_ranks > 0),"
+                "       count(*) FILTER (WHERE true_known_ranks > 0"
+                "                          AND true_avg_rank >= %s),"
+                "       coalesce(avg(true_avg_rank) FILTER"
+                "                (WHERE true_known_ranks > 0), 0),"
+                "       coalesce(avg(true_known_ranks) FILTER"
+                "                (WHERE true_known_ranks > 0), 0)"
+                "  FROM ReplayCandidates WHERE state = 'done'",
+                (min_rank,))
+            row = cur.fetchone()
+        return {"скачано": int(row[0]), "факт известен": int(row[1]),
+                "из них immortal": int(row[2]),
+                "средний ранг": int(row[3]), "рангов на матч": int(row[4])}
+
     def mark(self, match_id: int, state: str, error: str | None = None) -> None:
         with self._db.cursor() as cur:
             cur.execute(
