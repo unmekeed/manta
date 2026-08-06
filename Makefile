@@ -5,6 +5,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
+.PHONY: ranks-seed ranks-fill ranks-report ranks-probe
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -167,6 +168,18 @@ collect-report: ## Почему упал темп сбора + покрытие 
 
 backfill:      ## Пересчёт фич по сохранённому JSON, без вызовов API: ARGS="--limit 50"
 	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs python3 -m collector.backfill $(ARGS)
+
+ranks-seed:    ## Набрать account_id из потока Valve: ARGS="--matches 2000"
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh seed $(ARGS)
+
+ranks-fill:    ## Опросить очередь рангов: ARGS="--budget 500 --resolver stratz"
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh fill $(ARGS)
+
+ranks-report:  ## Кэш рангов: сколько накоплено и какую долю потока он закрывает
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh report
+
+ranks-probe:   ## Что разрешено токену STRATZ: player / players / поля ранга
+	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh probe
 
 dashboard:     ## Живой дашборд наблюдаемости без Docker/Grafana (:9107)
 	python3 scripts/dashboard.py
