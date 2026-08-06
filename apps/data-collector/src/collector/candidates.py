@@ -158,29 +158,54 @@ class CandidateQueue:
                 "       true_avg_rank = %s "
                 " WHERE match_id = %s", (known, immortal, avg_rank, match_id))
 
-    def precision(self, min_rank: int = 80) -> dict[str, int]:
-        """Сколько отобранного оказалось иммортальным на самом деле.
+    def precision(self) -> dict[str, int]:
+        """Насколько отобранное оказалось иммортальным на самом деле.
 
-        Считается ТОЛЬКО по матчам, где факт известен: NULL означает «не
+        Считается ТОЛЬКО по матчам с известным фактом: NULL означает «не
         смотрели», и включать такие в знаменатель значило бы разбавлять
         точность собственным незнанием.
+
+        Метрик три, потому что первая версия мерила не то. Она считала
+        матч удачным при СРЕДНЕМ ранге >= 80, но у Immortal нет звёзд
+        (ровно 80), а Divine 5 — это 75. Матч из девяти известных, где
+        восемь Immortal и один Divine, даёт 79.4 -> 79 и шёл в брак.
+        Критерий означал «вообще все Immortal» и на живых данных дал
+        79.3%, хотя настоящего мусора там почти не было.
+
+        Что теперь:
+          «все immortal»   — строгий критерий, как раньше;
+          «доля immortal»  — средняя доля Immortal среди известных, это
+                             и есть содержательная точность;
+          «мусор»          — матчи, где Immortal МЕНЬШЕ ПОЛОВИНЫ. Вот их
+                             и надо бояться: они означают, что правило
+                             ошиблось, а не что в составе был один дивайн.
         """
         with self._db.cursor() as cur:
             cur.execute(
                 "SELECT count(*),"
                 "       count(*) FILTER (WHERE true_known_ranks > 0),"
                 "       count(*) FILTER (WHERE true_known_ranks > 0"
-                "                          AND true_avg_rank >= %s),"
-                "       coalesce(avg(true_avg_rank) FILTER"
-                "                (WHERE true_known_ranks > 0), 0),"
-                "       coalesce(avg(true_known_ranks) FILTER"
-                "                (WHERE true_known_ranks > 0), 0)"
-                "  FROM ReplayCandidates WHERE state = 'done'",
-                (min_rank,))
+                "                          AND true_immortal_ranks"
+                "                              = true_known_ranks),"
+                "       coalesce(round(100 * avg(true_immortal_ranks::numeric"
+                "                                / true_known_ranks)"
+                "                      FILTER (WHERE true_known_ranks > 0)"
+                "                ), 0),"
+                "       count(*) FILTER (WHERE true_known_ranks > 0"
+                "                          AND 2 * true_immortal_ranks"
+                "                              < true_known_ranks),"
+                "       coalesce(round(avg(true_avg_rank)"
+                "                      FILTER (WHERE true_known_ranks > 0)"
+                "                ), 0),"
+                "       coalesce(round(avg(true_known_ranks)"
+                "                      FILTER (WHERE true_known_ranks > 0)"
+                "                ), 0)"
+                "  FROM ReplayCandidates WHERE state = 'done'")
             row = cur.fetchone()
-        return {"скачано": int(row[0]), "факт известен": int(row[1]),
-                "из них immortal": int(row[2]),
-                "средний ранг": int(row[3]), "рангов на матч": int(row[4])}
+        keys = ("скачано", "факт известен", "все immortal", "доля immortal, %",
+                "мусор (immortal < половины)", "средний ранг",
+                "рангов на матч")
+        return dict(zip(keys, [int(v) for v in row]))
 
     def mark(self, match_id: int, state: str, error: str | None = None) -> None:
         with self._db.cursor() as cur:

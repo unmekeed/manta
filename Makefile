@@ -6,7 +6,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
-.PHONY: candidates-queue
+.PHONY: candidates-queue candidates-sql-test
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -184,6 +184,11 @@ ranks-scan:    ## Замер отбора: воронка причин + раз�
 
 candidates-queue: ## Очередь своей разбивки: состояния + выборка для проверки точности
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh queue
+
+candidates-sql-test: ## Проверить SQL метрики точности на живом Postgres
+	cd apps/data-collector && \
+	MANTA_TEST_DSN="$${POSTGRES_DSN:-postgresql://dota:dota_dev_password@localhost:5432/manta}" \
+	PYTHONPATH=src:$(PWD)/libs python3 -m pytest tests/test_candidates_sql.py -v
 
 ranks-report:  ## Кэш рангов: сколько накоплено и какую долю потока он закрывает
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh report

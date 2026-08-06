@@ -874,17 +874,18 @@ class ReportQueue:
     def stats(self):
         return self._states
 
-    def precision(self, min_rank=80):
+    def precision(self):
         return self._prec
 
     def precision_sample(self, limit=20):
         return self._sample
 
 
-def _prec(done=0, known=0, immortal=0, avg=0, ranks=0):
+def _prec(done=0, known=0, all_imm=0, share=0, trash=0, avg=0, ranks=0):
     return {"скачано": done, "факт известен": known,
-            "из них immortal": immortal, "средний ранг": avg,
-            "рангов на матч": ranks}
+            "все immortal": all_imm, "доля immortal, %": share,
+            "мусор (immortal < половины)": trash,
+            "средний ранг": avg, "рангов на матч": ranks}
 
 
 def test_queue_report_shows_precision_when_matches_downloaded():
@@ -894,10 +895,12 @@ def test_queue_report_shows_precision_when_matches_downloaded():
     БД и ни одного — вывод команды. Этот тест закрывает ровно ту дыру.
     """
     q = ReportQueue({"done": 199, "new": 470},
-                    _prec(done=199, known=180, immortal=171, avg=79, ranks=8))
+                    _prec(done=199, known=180, all_imm=140, share=93,
+                          trash=9, avg=79, ranks=9))
     out = queue_report(q)
     assert "точность правила отбора" in out
-    assert "95.0%" in out, out
+    assert "93% игроков" in out, out
+    assert "5.0% матчей" in out, out
 
 
 def test_queue_report_hides_precision_until_something_downloaded():
@@ -911,8 +914,23 @@ def test_queue_report_says_when_truth_was_never_recorded():
     q = ReportQueue({"done": 199}, _prec(done=199))
     out = queue_report(q)
     assert "факт ещё не собран" in out
-    assert "%" not in out.split("факт ещё не собран")[0].split(
-        "точность правила отбора")[-1]
+    assert "ТОЧНОСТЬ" not in out
+
+
+def test_queue_report_separates_share_from_garbage():
+    """Матч из девяти immortal и одного дивайна — не мусор.
+
+    Первая версия метрики считала матч удачным при СРЕДНЕМ ранге >= 80.
+    У Immortal нет звёзд (ровно 80), Divine 5 — это 75, поэтому такой
+    матч давал 79.4 -> 79 и шёл в брак. На живых данных критерий дал
+    79.3% при почти полном отсутствии настоящего мусора.
+    """
+    q = ReportQueue({"done": 100},
+                    _prec(done=100, known=100, all_imm=60, share=95,
+                          trash=2, avg=79, ranks=9))
+    out = queue_report(q)
+    assert "95% игроков" in out
+    assert "2.0% матчей" in out, out
 
 
 def test_queue_report_marks_sample_as_prediction_not_truth():

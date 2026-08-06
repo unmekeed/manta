@@ -1036,12 +1036,20 @@ def queue_report(queue) -> str:
     prec = queue.precision()
     if prec["скачано"]:
         lines += ["", "=== точность правила отбора ==="]
+        # Ширина по самому длинному ключу, а не константой: имена метрик
+        # длиннее колонки состояний, и при жёстких 22 колонка разъезжается.
+        w = max(22, max(len(k) for k in prec))
         for k, v in prec.items():
-            lines.append(f"{k:>22}: {v}")
+            lines.append(f"{k:>{w}}: {v}")
         if prec["факт известен"]:
-            share = 100.0 * prec["из них immortal"] / prec["факт известен"]
-            lines.append(f"{'ТОЧНОСТЬ':>22}: {share:.1f}% скачанного"
-                         " действительно immortal")
+            known = prec["факт известен"]
+            lines.append(
+                f"{'ТОЧНОСТЬ':>{w}}: {prec['доля immortal, %']}% игроков в"
+                " отобранных матчах — immortal")
+            lines.append(
+                f"{'МУСОР':>{w}}: "
+                f"{100.0 * prec['мусор (immortal < половины)'] / known:.1f}%"
+                " матчей, где immortal меньше половины")
         else:
             lines.append("  факт ещё не собран: эти матчи скачаны до"
                          " миграции 009")
