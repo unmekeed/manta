@@ -35,6 +35,12 @@ from .sources.opendota_public import OpenDotaPublicSource
 from .sources.opendota_timeline import OpenDotaTimelineSource
 from .sources.stratz import StratzTimelineSource
 
+# Пауза при исчерпанном бюджете. Час, а не «до полуночи»: потолок
+# источника растёт в течение суток по мере таяния резерва под чужие
+# гарантии, и проверять это раз в час дёшево — ни одного запроса к API
+# такая проверка не стоит.
+BUDGET_RETRY_S = int(os.getenv("BUDGET_RETRY_S", "3600"))
+
 
 def seconds_until_utc_midnight(now: datetime | None = None,
                                buffer_s: int = 120) -> int:
@@ -352,16 +358,26 @@ def main() -> None:
                     log.exception("цикл сбора упал; повтор через %ss",
                                   args.interval)
             except budget.BudgetExhausted as e:
-                # Своя доля суточной квоты выбрана. Это НЕ поломка: спим
-                # до сброса, как при 429, но БЕЗ единого лишнего запроса
-                # — в том и смысл бюджета, чтобы упереться в него раньше,
-                # чем в чужой лимит, и не мешать остальным коллекторам.
+                # Бюджет исчерпан. Это НЕ поломка: спим, как при 429, но
+                # БЕЗ единого лишнего запроса — в том и смысл бюджета,
+                # чтобы упереться в него раньше, чем в чужой лимит.
+                #
+                # Спать до полуночи БОЛЬШЕ НЕЛЬЗЯ. С работосохраняющим
+                # бюджетом (спринт 135) потолок источника РАСТЁТ в
+                # течение суток: резерв под невыбранные гарантии соседей
+                # тает вместе с днём. Источник, упёршийся в потолок утром,
+                # к вечеру почти наверняка сможет продолжить — а старая
+                # логика укладывала его спать на восемнадцать часов и
+                # оставляла квоту неиспользованной. Ровно это и было
+                # замерено 2026-08-07: два источника спали при целой на
+                # 85% квоте.
                 if args.once:
                     raise
                 RATE_LIMITED.inc()
-                sleep_s = max(sleep_s, seconds_until_utc_midnight())
-                log.warning("%s; жду сброса ~%.1fч (OPENDOTA_BUDGET)",
-                            e, sleep_s / 3600)
+                sleep_s = min(max(sleep_s, BUDGET_RETRY_S),
+                              seconds_until_utc_midnight())
+                log.warning("%s; повтор через ~%.1fч (потолок растёт по мере"
+                            " суток)", e, sleep_s / 3600)
             except Exception:  # noqa: BLE001
                 if args.once:
                     raise
