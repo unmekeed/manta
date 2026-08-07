@@ -268,3 +268,58 @@ def test_lock_survives_a_killed_run(tmp_path):
     lock.write_text("999999")     # «остался от убитого прогона»
     with single_run(lock):
         pass
+
+
+# -- гейт по числу матчей (спринт 133) --------------------------------------------
+
+def test_removal_verdict_needs_enough_matches():
+    """Найдено на живом прогоне 2026-08-07.
+
+    Четыре группы трека F имели покрытие 26.1% — на 1.1 процентного
+    пункта выше LOW_COVERAGE — и все четыре получили «кандидат на
+    удаление». Полтора пункта в другую сторону дали бы «преждевременен».
+    Решение об удалении фичи, стоившей спринта, не может держаться на
+    такой щепке; правильная мера — число матчей, и она же записана в
+    самой задаче ревизии.
+    """
+    from training.ablation import MIN_VERDICT_MATCHES
+
+    thin = verdict(0.0001, 0.0006, cov=0.99,
+                   matches=MIN_VERDICT_MATCHES - 1)
+    assert "преждевременен" in thin
+    assert "кандидат на удаление" not in thin
+
+    fat = verdict(0.0001, 0.0006, cov=0.99, matches=MIN_VERDICT_MATCHES)
+    assert "кандидат на удаление" in fat
+
+
+def test_match_gate_does_not_rescue_a_measured_effect():
+    """Порог по объёму данных откладывает вердикт «удалить», но не
+    отменяет измеренный эффект: значимая и заметная фича остаётся
+    полезной, сколько бы матчей её ни несло."""
+    from training.ablation import MIN_VERDICT_MATCHES
+
+    v = verdict(0.010, 0.002, cov=0.05, matches=MIN_VERDICT_MATCHES // 10)
+    assert "ПОЛЕЗНА" in v
+
+
+def test_match_count_reaches_the_verdict():
+    """Число матчей должно ДОХОДИТЬ до вердикта, а не только до отчёта.
+
+    Посчитать его и не передать — та же ошибка, только тише: отчёт
+    выглядит информативным, а решение принимается по-старому. Здесь фича
+    — чистый шум при полном покрытии строк, но матчей всего сотня: без
+    передачи числа матчей вердикт был бы «кандидат на удаление».
+    """
+    ds = synth_matches(100, seed=31)
+    i = FEATURES.index("roshan_diff")
+    rng = np.random.default_rng(31)
+    ds.X[:, i] = rng.normal(size=len(ds.y))     # шум, но заполнено везде
+
+    rows, _ = run(ds, {"F2_объективы": ["roshan_diff"]})
+    r = rows[0]
+    assert r["coverage"] == 1.0, "покрытие строк полное — гейт не о нём"
+    assert r["matches_observed"] < 2000
+    assert "преждевременен" in r["verdict"], r["verdict"]
+    assert str(r["matches_observed"]) in r["verdict"], (
+        "вердикт обязан назвать число, на котором он основан")
