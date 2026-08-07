@@ -6,7 +6,7 @@ COMPOSE     := docker compose -f deployments/docker-compose.yml
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
-.PHONY: candidates-queue candidates-sql-test wp-rates-sql-test
+.PHONY: candidates-queue candidates-sql-test wp-rates-sql-test pytest-check
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -149,9 +149,16 @@ ml-status:     ## Статус обучения: production-версия, раз
 ml-ablation:   ## Ablation фич WP: какая заслужила место (ARGS="--each")
 	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.ablation $(ARGS)
 
-wp-rates-sql-test: ## Проверить окна производных (G1) на живом ClickHouse
+wp-rates-sql-test: pytest-check ## Проверить окна производных (G1) на живом ClickHouse
 	cd apps/ml-service && MANTA_TEST_CH=1 \
 	PYTHONPATH=src:$(CURDIR)/libs python3 -m pytest tests/test_rates_sql.py -v
+
+pytest-check:  ## Проверить, что pytest вообще установлен (иначе внятная подсказка)
+	@python3 -c "import pytest" 2>/dev/null || { \
+		echo "pytest не установлен в этом python3."; \
+		echo "лечение: python3 -m pip install --user pytest"; \
+		echo "(тесты на живой БД запускаются руками и в CI не участвуют)"; \
+		exit 2; }
 
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
 	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.audit
@@ -189,7 +196,7 @@ ranks-scan:    ## Замер отбора: воронка причин + раз�
 candidates-queue: ## Очередь своей разбивки: состояния + выборка для проверки точности
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh queue
 
-candidates-sql-test: ## Проверить SQL метрики точности на живом Postgres
+candidates-sql-test: pytest-check ## Проверить SQL метрики точности на живом Postgres
 	cd apps/data-collector && \
 	MANTA_TEST_DSN="$${POSTGRES_DSN:-postgresql://dota:dota_dev_password@localhost:5432/manta}" \
 	PYTHONPATH=src:$(PWD)/libs python3 -m pytest tests/test_candidates_sql.py -v

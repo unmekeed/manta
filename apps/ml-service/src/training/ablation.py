@@ -26,10 +26,35 @@ NaN. Фича, которой нет в данных, не «бесполезн�
 путать эти два вердикта нельзя. Ровно этот случай сейчас у всех 12 фич
 трека F: они извлекаются при сборе, поэтому у исторических матчей пусты.
 
+ГДЕ ЕСТЬ и ВЕЗДЕ (спринт 132). Δ считается дважды, и это не украшение
+отчёта, а исправление ошибки измерения.
+
+Фича, заполненная у 30% строк, физически не может двигать метрику на
+остальных 70%: там модель её не видела ни с ней, ни без неё. Измеряя Δ
+по всей валидации, мы делим реальный эффект на долю покрытия — эффект
+0.003 на своей подвыборке превращается в 0.001 общего и попадает ровно в
+порог MIN_EFFECT, то есть в вердикт «практической пользы нет». Инструмент
+систематически занижал эффект тем сильнее, чем реже фича, и рекомендовал
+бы удалять работающие фичи трека F — те самые, ради ревизии которых он и
+писался.
+
+Поэтому вердикт выносится по Δ НА ПОДВЫБОРКЕ, где фича наблюдаема
+(«работает ли она там, где она есть»), а Δ по всей валидации печатается
+рядом как масштаб продуктового эффекта («сколько это даёт модели
+сегодня»). Оговорка, которую надо помнить: подвыборка не случайна —
+реплейные матчи отличаются от JSON-матчей, — поэтому первое число это
+эффект на популяции матчей с полным сигналом, а не на всём датасете.
+
+ПО ФАЗАМ. Агрегат маскирует фазовую природу: объективы (Рошан, аегис,
+бэйбеки) живут в поздней игре, производные трека G — в ранней. Фича,
+дающая много в одной фазе и ноль в остальных, в среднем выглядит шумом.
+Δ по фазам считается на той же подвыборке.
+
 CLI:
-    python -m training.ablation                # группы (быстро, ~7 обучений)
-    python -m training.ablation --each         # каждая фича (22 обучения)
+    python -m training.ablation                # группы (быстро, ~11 обучений)
+    python -m training.ablation --each         # каждая фича (42 обучения)
     python -m training.ablation --min-coverage 0.05
+    python -m training.ablation --json out.json
 """
 from __future__ import annotations
 
@@ -111,13 +136,48 @@ def without(ds: Dataset, names: list[str]) -> Dataset:
                    patches=ds.patches)
 
 
+# Фазы игры, секунды. Те же границы, что у фазовых Brier в train_winprob:
+# сравнивать вклад фичи с фазовой слабостью модели можно только на одной
+# нарезке.
+PHASES = (("ранняя", 0, 600), ("средняя", 600, 1500),
+          ("поздняя", 1500, float("inf")))
+
+# Ниже этого числа строк подвыборка ничего не измеряет: Brier на десятках
+# строк — это шум сэмплирования, а не метрика. Бутстрап дополнительно
+# требует хотя бы трёх МАТЧЕЙ и сам возвращает σ=0, если их меньше.
+MIN_OBSERVED_ROWS = 100
+
+
 def _valid_predictions(art: dict, ds: Dataset):
-    """Предсказания артефакта на нетронутой валидации + её метки/группы."""
+    """Предсказания артефакта на нетронутой валидации + её метки/группы/X."""
     from .train_winprob import predict_calibrated
 
     in_valid, pro = ds._valid_mask()
     m = in_valid & ~pro
-    return (predict_calibrated(art, ds.X[m]), ds.y[m], ds.groups[m])
+    return (predict_calibrated(art, ds.X[m]), ds.y[m], ds.groups[m], ds.X[m])
+
+
+def observed_mask(X: np.ndarray, names: list[str]) -> np.ndarray:
+    """Строки, где группа наблюдаема хотя бы одной своей фичей.
+
+    Именно «хотя бы одной»: группа отключается целиком, поэтому эффект
+    возможен везде, где было чему отключаться. Требовать заполненности
+    всех фич сразу значило бы сузить подвыборку до пересечения покрытий и
+    мерить эффект на другой популяции.
+    """
+    idx = [FEATURES.index(n) for n in names]
+    return ~np.all(np.isnan(X[:, idx]), axis=1)
+
+
+def _delta_on(mask: np.ndarray, y, p_abl, p_base, groups):
+    """(Δ, σ) на подмножестве строк или (None, None), если их мало."""
+    from .train_winprob import _paired_bootstrap_delta
+
+    if int(mask.sum()) < MIN_OBSERVED_ROWS:
+        return None, None
+    d, s = _paired_bootstrap_delta(y[mask], p_abl[mask], p_base[mask],
+                                   groups[mask])
+    return round(float(d), 5), round(float(s), 5)
 
 
 def verdict(delta: float, sigma: float, cov: float = 1.0) -> str:
@@ -152,7 +212,7 @@ def run(ds: Dataset, targets: dict[str, list[str]],
     Возвращает (строки отчёта, базовый Brier). Базовая модель обучается
     ровно один раз — она же эталон для всех парных сравнений.
     """
-    from .train_winprob import _paired_bootstrap_delta, train
+    from .train_winprob import train
 
     cov = coverage(ds)
     t0 = time.time()
@@ -160,7 +220,8 @@ def run(ds: Dataset, targets: dict[str, list[str]],
     base_brier = float(base_art["metrics"]["brier_calibrated"])
     logger.info("базовая модель: Brier valid %.4f, обучение %.0fс",
                 base_brier, time.time() - t0)
-    p_base, y_va, g_va = _valid_predictions(base_art, ds)
+    p_base, y_va, g_va, X_va = _valid_predictions(base_art, ds)
+    t_va = X_va[:, FEATURES.index("game_time")]
 
     rows = []
     for label, names in targets.items():
@@ -168,27 +229,96 @@ def run(ds: Dataset, targets: dict[str, list[str]],
         if not names:
             continue
         cov_max = max(cov[n] for n in names)
+        # Сколько МАТЧЕЙ вообще несут этот сигнал. Доля строк обманчива:
+        # 5% строк могут быть и сотней матчей, и пятью. Ревизия трека F
+        # ждала «2–3 тысячи матчей с полными сигналами» — считается это.
+        n_matches_obs = len(set(
+            ds.groups[observed_mask(ds.X, names)].tolist()))
         if cov_max < min_coverage:
             # Не обучаем: данных нет. Это НЕ вердикт о полезности.
             rows.append({"target": label, "features": names,
                          "coverage": round(cov_max, 4), "delta": None,
-                         "sigma": None,
+                         "sigma": None, "delta_all": None, "observed_rows": 0,
+                         "matches_observed": n_matches_obs, "phases": {},
                          "verdict": "НЕИЗМЕРИМА — фичи пусты в датасете"})
             logger.info("%-24s покрытие %.1f%% — пропуск, данных нет",
                         label, cov_max * 100)
             continue
 
         art = train(without(ds, names))
-        p_abl, _, _ = _valid_predictions(art, ds)
-        delta, sigma = _paired_bootstrap_delta(y_va, p_abl, p_base, g_va)
+        p_abl, _, _, _ = _valid_predictions(art, ds)
+
+        # Продуктовый эффект: что фича даёт модели на всей валидации.
+        delta_all, _ = _delta_on(np.ones(len(y_va), dtype=bool),
+                                 y_va, p_abl, p_base, g_va)
+        # Вердикт: работает ли фича ТАМ, ГДЕ ОНА ЕСТЬ. На строках без неё
+        # обе модели видели одно и то же, и включать их в знаменатель
+        # значит делить эффект на долю покрытия (см. модульный docstring).
+        obs = observed_mask(X_va, names)
+        delta, sigma = _delta_on(obs, y_va, p_abl, p_base, g_va)
+
+        if delta is None:
+            # Покрытие по датасету есть, а на ВАЛИДАЦИИ фичи почти нет:
+            # так бывает, когда матчи с полным сигналом осели в train.
+            # Это не вердикт о фиче, а отказ его выносить.
+            rows.append({"target": label, "features": names,
+                         "coverage": round(cov_max, 4), "delta": None,
+                         "sigma": None, "delta_all": delta_all,
+                         "observed_rows": int(obs.sum()),
+                         "matches_observed": n_matches_obs, "phases": {},
+                         "verdict": "НЕИЗМЕРИМА — на валидации почти нет строк"})
+            logger.info("%-24s покрытие %5.1f%%, но на валидации %d строк — "
+                        "вывод невозможен", label, cov_max * 100, obs.sum())
+            continue
+
+        phases = {}
+        for ph_label, lo, hi in PHASES:
+            d, s = _delta_on(obs & (t_va >= lo) & (t_va < hi),
+                             y_va, p_abl, p_base, g_va)
+            if d is not None:
+                phases[ph_label] = {"delta": d, "sigma": s}
+
         v = verdict(delta, sigma, cov_max)
         rows.append({"target": label, "features": names,
                      "coverage": round(cov_max, 4),
-                     "delta": round(delta, 5), "sigma": round(sigma, 5),
+                     "delta": delta, "sigma": sigma,
+                     "delta_all": delta_all,
+                     "observed_rows": int(obs.sum()),
+                     "matches_observed": n_matches_obs, "phases": phases,
                      "verdict": v})
-        logger.info("%-24s покрытие %5.1f%%  Δ%+.5f ±%.5f  %s",
-                    label, cov_max * 100, delta, sigma, v)
+        logger.info("%-24s покрытие %5.1f%%  Δ(где есть)%+.5f ±%.5f  "
+                    "Δ(везде)%+.5f  %s",
+                    label, cov_max * 100, delta, sigma,
+                    delta_all if delta_all is not None else float("nan"), v)
     return rows, base_brier
+
+
+def _phase_report(rows: list[dict]) -> list[str]:
+    """Таблица Δ по фазам игры для групп, где фаза что-то показала.
+
+    Отдельным блоком, а не колонками основной таблицы: фазовая разбивка
+    интересна не для всех групп, и в одну строку она не влезает без
+    потери читаемости.
+    """
+    measured = [r for r in rows if r.get("phases")]
+    if not measured:
+        return []
+    names = [p[0] for p in PHASES]
+    head = "  ".join(f"{n:>16}" for n in names)
+    out = ["", "Δ по фазам игры (0–10 / 10–25 / 25+ мин), там где фича есть.",
+           "Звёздочка — эффект превышает 2σ на этой фазе.",
+           "", f"{'группа/фича':<24} {head}", "-" * (24 + len(head) + 2)]
+    for r in measured:
+        cells = []
+        for n in names:
+            ph = r["phases"].get(n)
+            if ph is None:
+                cells.append(f"{'—':>16}")
+            else:
+                mark = "*" if abs(ph["delta"]) > 2 * ph["sigma"] > 0 else " "
+                cells.append(f"{ph['delta']:+10.5f}{mark}     ")
+        out.append(f"{r['target']:<24} " + "  ".join(cells))
+    return out
 
 
 def _print_report(rows: list[dict], base_brier: float) -> None:
@@ -196,18 +326,39 @@ def _print_report(rows: list[dict], base_brier: float) -> None:
     print(f"Базовый Brier (валидация): {base_brier:.4f}")
     print("Δ = Brier(без фичи) − Brier(со всеми). Δ > 0 → фича полезна.")
     print()
-    print(f"{'группа/фича':<24} {'покр.':>6} {'Δ Brier':>10} {'σ':>8}  вердикт")
-    print("-" * 96)
+    print("«где есть» — только строки, в которых фича заполнена: вердикт")
+    print("выносится по нему, иначе эффект делится на долю покрытия.")
+    print("«везде» — вся валидация: масштаб продуктового эффекта сегодня.")
+    print()
+    print(f"{'группа/фича':<24} {'покр.':>6} {'Δ где есть':>11} {'σ':>8} "
+          f"{'Δ везде':>9}  вердикт")
+    print("-" * 110)
     for r in rows:
+        d_all = r.get("delta_all")
+        all_cell = f"{d_all:+9.5f}" if d_all is not None else f"{'—':>9}"
         if r["delta"] is None:
             print(f"{r['target']:<24} {r['coverage']*100:5.1f}% "
-                  f"{'—':>10} {'—':>8}  {r['verdict']}")
+                  f"{'—':>11} {'—':>8} {all_cell}  {r['verdict']}")
         else:
             print(f"{r['target']:<24} {r['coverage']*100:5.1f}% "
-                  f"{r['delta']:+10.5f} {r['sigma']:8.5f}  {r['verdict']}")
+                  f"{r['delta']:+11.5f} {r['sigma']:8.5f} {all_cell}  "
+                  f"{r['verdict']}")
+    for line in _phase_report(rows):
+        print(line)
     print()
     def by(mark: str) -> list[str]:
         return [r["target"] for r in rows if mark in r["verdict"]]
+
+    def with_matches(labels: list[str]) -> str:
+        """Названия с числом матчей, несущих сигнал.
+
+        Отложенный вердикт без этого числа бесполезен: «вернуться при
+        росте данных» не отвечает на вопрос «насколько ещё вырасти».
+        """
+        by_label = {r["target"]: r.get("matches_observed") for r in rows}
+        return ", ".join(
+            f"{n} ({by_label[n]} матчей)" if by_label.get(n) is not None else n
+            for n in labels)
 
     dead = by("кандидат на удаление") + by("— удалить")
     blind = [r["target"] for r in rows if r["delta"] is None]
@@ -220,10 +371,10 @@ def _print_report(rows: list[dict], base_brier: float) -> None:
               + ", ".join(tiny))
     if early:
         print("Мало покрытия — НЕ удалять, вернуться при росте данных: "
-              + ", ".join(early))
+              + with_matches(early))
     if blind:
         print("Неизмеримо (нет данных, вернуться после накопления): "
-              + ", ".join(blind))
+              + with_matches(blind))
     if not (dead or blind or early or tiny):
         print("Все проверенные фичи оправдывают своё место.")
 

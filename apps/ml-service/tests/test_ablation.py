@@ -14,7 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from training.ablation import (GROUPS, coverage, run, verdict, without)
+from training.ablation import (GROUPS, MIN_OBSERVED_ROWS, PHASES, coverage,
+                               observed_mask, run, verdict, without)
 from training.dataset import FEATURES, synth_matches
 
 
@@ -117,3 +118,109 @@ def test_groups_reference_only_real_features():
     for label, names in GROUPS.items():
         unknown = [n for n in names if n not in FEATURES]
         assert not unknown, f"{label}: нет таких фич — {unknown}"
+
+
+# -- «где есть» против «везде» (спринт 132) ---------------------------------------
+
+def test_observed_mask_needs_only_one_feature_of_the_group():
+    """Группа отключается ЦЕЛИКОМ, значит эффект возможен везде, где было
+    чему отключаться. Требовать заполненности всех фич сразу — сузить
+    подвыборку до пересечения покрытий и мерить на другой популяции."""
+    X = np.full((3, len(FEATURES)), np.nan)
+    a, b = FEATURES.index("roshan_diff"), FEATURES.index("aegis_alive")
+    X[0, a] = 1.0                      # есть одна
+    X[1, a] = X[1, b] = 1.0            # есть обе
+    obs = observed_mask(X, ["roshan_diff", "aegis_alive"])
+    assert list(obs) == [True, True, False]
+
+
+@pytest.fixture(scope="module")
+def sparse_signal():
+    """Фича заполнена ровно у половины матчей и там почти решает исход.
+
+    Так выглядит любая фича трека F: она есть только у реплейных матчей,
+    а у JSON-матчей её нет вовсе. Половина, а не 5%, — чтобы подвыборка
+    осталась достаточной для бутстрапа: на синтетике из четырёх сотен
+    матчей более редкий сигнал даёт честную, но слишком широкую σ, и тест
+    начал бы мигать от seed к seed.
+
+    Прогон общий на модуль: два полных обучения стоят несколько секунд.
+    """
+    n_matches, share, seed = 400, 0.5, 5
+    ds = synth_matches(n_matches, seed=seed)
+    i = FEATURES.index("roshan_diff")
+    ds.X[:, i] = np.nan
+    rng = np.random.default_rng(seed)
+    matches = sorted(set(ds.groups.tolist()))
+    rng.shuffle(matches)
+    chosen = set(matches[:int(len(matches) * share)])
+    filled = np.array([g in chosen for g in ds.groups])
+    # Там, где фича есть, она почти детерминирует исход: эффект её
+    # отключения обязан быть большим ИМЕННО на этих строках.
+    ds.X[filled, i] = ds.y[filled] * 10.0 + rng.normal(0, 0.3,
+                                                      size=filled.sum())
+    rows, _ = run(ds, {"F2_объективы": ["roshan_diff"]})
+    return ds, filled, rows[0]
+
+
+def test_verdict_is_measured_where_the_feature_exists_not_everywhere(
+        sparse_signal):
+    """Главная поправка спринта 132.
+
+    Фича, заполненная у половины строк, физически не может двигать метрику
+    на остальных: там модель её не видела ни с ней, ни без неё. Считая Δ
+    по всей валидации, инструмент делил реальный эффект на долю покрытия —
+    и тем вернее рекомендовал удалить фичу, чем она реже. Ревизия трека F
+    этим инструментом выкинула бы работающие фичи.
+    """
+    _, _, r = sparse_signal
+    assert r["delta"] is not None and r["delta_all"] is not None
+    assert r["delta"] > 1.5 * r["delta_all"], (
+        "эффект «где есть» обязан быть заметно больше размазанного по всей "
+        f"валидации: {r['delta']} против {r['delta_all']}")
+    assert "ПОЛЕЗНА" in r["verdict"], r["verdict"]
+
+
+def test_report_row_counts_matches_carrying_the_signal(sparse_signal):
+    """«Вернуться при росте данных» бесполезно без ответа «насколько
+    вырасти». Доля строк на это не отвечает: 5% строк — это и сто матчей,
+    и пять."""
+    ds, filled, r = sparse_signal
+    assert r["matches_observed"] == len(set(ds.groups[filled].tolist()))
+
+
+def test_phase_deltas_are_reported_separately(sparse_signal):
+    """Объективы живут в поздней игре, производные — в ранней. Фича,
+    дающая много в одной фазе и ноль в остальных, в среднем выглядит
+    шумом; без разбивки этого не увидеть."""
+    _, _, r = sparse_signal
+    phases = r["phases"]
+    assert phases, "фазовая разбивка не посчитана"
+    assert set(phases) <= {p[0] for p in PHASES}
+    for ph in phases.values():
+        assert "delta" in ph and "sigma" in ph
+
+
+def test_verdict_is_refused_on_a_handful_of_validation_rows():
+    """Покрытие по датасету есть, а на валидации фичу видно в двух
+    десятках строк: так бывает, когда матчи с полным сигналом осели в
+    train. Brier на двадцати строках — это шум сэмплирования, и вердикт
+    по нему был бы выдумкой; инструмент обязан ОТКАЗАТЬСЯ его выносить.
+
+    Строк намеренно не ноль: пустая подвыборка отсеклась бы и без порога,
+    и тест не отличил бы «есть порог» от «нет порога».
+    """
+    ds = synth_matches(60)
+    i = FEATURES.index("roshan_diff")
+    ds.X[:, i] = np.nan
+    in_valid, pro = ds._valid_mask()
+    ds.X[~in_valid & ~pro, i] = 1.0            # заполнено в обучении
+    valid_rows = np.where(in_valid & ~pro)[0][:20]
+    ds.X[valid_rows, i] = 1.0                  # и в 20 строках валидации
+
+    rows, _ = run(ds, {"F2_объективы": ["roshan_diff"]})
+    r = rows[0]
+    assert 0 < r["observed_rows"] < MIN_OBSERVED_ROWS, r["observed_rows"]
+    assert r["delta"] is None, "вердикт вынесен по горстке строк"
+    assert "НЕИЗМЕРИМА" in r["verdict"]
+    assert "кандидат на удаление" not in r["verdict"]

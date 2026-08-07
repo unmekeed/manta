@@ -10,6 +10,19 @@ from training.dataset import FEATURES, dataset_hash, merge, synth_matches
 from training.train_winprob import train
 
 
+def _pad(row: list[float]) -> list[float]:
+    """Дополнить вектор до текущего числа фич NaN'ами: тесты перечисляют
+    только базовые 10, остальные (треки F и G) для них не заданы.
+
+    Хелпер жил ВНУТРИ test_autotrain_thresholds — скриптовая правка
+    спринтов 60–66 вклинила его между сигнатурой теста и телом. Тело
+    оказалось недостижимым кодом после `return` внутри `_pad`, а сам тест
+    сжался до двух строк: докстринг и импорт. Он проходил и не проверял
+    ничего — а сторожил он пороги АВТОМАТИЧЕСКОГО переобучения.
+    """
+    return row + [float("nan")] * (len(FEATURES) - len(row))
+
+
 def test_group_split_no_match_overlap():
     ds = synth_matches(30)
     (X_tr, _), (X_va, _) = ds.split_by_match()
@@ -140,13 +153,6 @@ def test_autotrain_thresholds(monkeypatch, tmp_path):
     считаются по дельте датасета относительно ПОСЛЕДНЕГО обучения в процессе
     (а не относительно production) — устойчиво к сбросу витрины."""
     from training import auto
-from training.dataset import FEATURES as _FEATURES
-
-
-def _pad(row: list[float]) -> list[float]:
-    """Дополнить вектор до текущего числа фич NaN'ами: тесты перечисляют
-    только базовые 10, остальные (трек F) для них не заданы."""
-    return row + [float("nan")] * (len(_FEATURES) - len(row))
 
     # Триггер держит состояние последнего обучения в модульной переменной.
     monkeypatch.setattr(auto, "_last_trained_n", None)
@@ -431,6 +437,64 @@ def test_gate_handles_feature_set_growth():
                "features": FEATURES[:6]}
     ok, reason = evaluate_gate(new_art, old_art, ds)
     assert isinstance(ok, bool) and "одни данные" in reason
+
+
+def test_gate_survives_a_feature_removed_from_the_middle():
+    """Обратная сторона: фичу УДАЛИЛИ, и она была не последней.
+
+    Ревизия трека F существует ровно ради удаления не оправдавших себя
+    фич. Позиционная обрезка `X[:, :n]` этот случай не ломает — она молча
+    сдвигает колонки, и старая production-модель получает networth там,
+    где ждала xp. Гейт сравнил бы кандидата с испорченным соперником,
+    объявил бы prod негодным и продвинул новую версию по ложному
+    основанию: ни падения, ни следа в метриках.
+
+    Здесь артефакт «старой» модели знает две фичи, которые НЕ являются
+    первыми двумя в FEATURES. Позиционная трактовка дала бы ей другие
+    колонки и другой ответ.
+    """
+    import lightgbm as lgb
+    from sklearn.isotonic import IsotonicRegression
+    from training.train_winprob import predict_calibrated
+
+    ds = synth_matches(60, seed=19)
+    names = ["xp_diff", "networth_diff"]          # порядок и позиции чужие
+    idx = [FEATURES.index(n) for n in names]
+    assert idx != [0, 1], "тест обессмыслится, если это первые колонки"
+
+    Xn = ds.X[:, idx]
+    booster = lgb.train({"objective": "binary", "verbose": -1},
+                        lgb.Dataset(Xn, label=ds.y), num_boost_round=30)
+    cal = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip").fit(
+        booster.predict(Xn), ds.y)
+    art = {"booster": booster.model_to_string(), "calibrator": cal,
+           "features": names}
+
+    expected = cal.predict(booster.predict(Xn[:50]))
+    got = predict_calibrated(art, ds.X[:50])
+    assert np.allclose(got, expected), "колонки взяты не по именам"
+
+    # Контрольный выстрел: позиционная трактовка дала бы ДРУГОЙ ответ,
+    # иначе тест зелен при любом поведении кода.
+    positional = cal.predict(booster.predict(ds.X[:50, :2]))
+    assert not np.allclose(positional, expected)
+
+
+def test_predict_calibrated_falls_back_to_positions_without_names():
+    """У совсем древнего артефакта списка фич нет — догадываться не о чем,
+    и позиционная трактовка остаётся единственно возможной."""
+    import lightgbm as lgb
+    from sklearn.isotonic import IsotonicRegression
+    from training.train_winprob import predict_calibrated
+
+    ds = synth_matches(20, seed=3)
+    booster = lgb.train({"objective": "binary", "verbose": -1},
+                        lgb.Dataset(ds.X, label=ds.y), num_boost_round=10)
+    cal = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip").fit(
+        booster.predict(ds.X), ds.y)
+    art = {"booster": booster.model_to_string(), "calibrator": cal}
+    p = predict_calibrated(art, ds.X[:10])
+    assert np.all((p >= 0) & (p <= 1))
 
 
 def test_oof_calibration_and_platt_switch():

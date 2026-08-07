@@ -368,13 +368,25 @@ def _brier(y: np.ndarray, p: np.ndarray) -> float:
 def predict_calibrated(model: dict, X: np.ndarray) -> np.ndarray:
     """Калиброванная WP по артефакту (booster-строка + изотоника).
 
-    X режется до набора фич АРТЕФАКТА: FEATURES только дописываются в конец,
-    поэтому старая модель (меньше фич) корректно оценивается на новой матрице
-    — критично для честного гейта, где обе версии считаются на одних данных.
+    Колонки берутся под набор фич АРТЕФАКТА по ИМЕНАМ. Раньше здесь была
+    позиционная обрезка `X[:, :n]`, верная ровно при одном условии — что
+    FEATURES только дописывается в конец. Ревизия трека F это условие
+    отменяет: она существует для того, чтобы фичи УДАЛЯТЬ, а удаление из
+    середины списка обрезку не ломает — оно молча сдвигает колонки.
+    Гейт продвижения сравнивал бы кандидата с production по перепутанным
+    входам, объявлял бы старую модель негодной и продвигал бы новую по
+    ложному основанию. Ни падения, ни следа в метриках.
+
+    Артефакт без списка фич (совсем древний) — единственный случай, где
+    позиционная трактовка остаётся: имён у него нет, догадываться не о чем.
     """
     booster = lgb.Booster(model_str=model["booster"])
-    n = len(model.get("features") or []) or X.shape[1]
-    return model["calibrator"].predict(booster.predict(X[:, :n]))
+    names = model.get("features") or []
+    if not names:
+        return model["calibrator"].predict(booster.predict(X))
+    from .dataset import align_to_artifact
+    return model["calibrator"].predict(
+        booster.predict(align_to_artifact(X, list(names))))
 
 
 def _paired_bootstrap_delta(y, p_new, p_prod, groups, n_boot: int = 200,
