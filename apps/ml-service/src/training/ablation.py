@@ -59,9 +59,13 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import logging
 import os
+import pathlib
+import tempfile
 import time
 
 import numpy as np
@@ -379,6 +383,48 @@ def _print_report(rows: list[dict], base_brier: float) -> None:
         print("Все проверенные фичи оправдывают своё место.")
 
 
+LOCK_PATH = pathlib.Path(tempfile.gettempdir()) / "manta-ablation.lock"
+
+
+@contextlib.contextmanager
+def single_run(lock_path: pathlib.Path = LOCK_PATH):
+    """Не дать запустить второй прогон поверх первого.
+
+    Прогон идёт десятки минут и до самого конца ничего не пишет в
+    --json — файла нет, прогресс виден только в логе. Отсюда прямой путь
+    к тому, что и случилось на живой машине: `ls` не находит отчёт,
+    команда запускается снова, и так восемь раз. Восемь прогонов дерутся
+    за процессор, каждый обучает по двенадцать моделей и все пишут в один
+    файл — отчёт получился бы перемешанным, а счёт шёл бы в восемь раз
+    дольше.
+
+    Блокировка на flock, а не на «есть ли файл»: файл переживает
+    kill -9 и после первого же аварийного завершения запретил бы запуск
+    навсегда. Захват flock ядро снимает вместе с процессом.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        holder = fh.read().strip() or "неизвестен"
+        fh.close()
+        raise SystemExit(
+            f"ablation уже выполняется (pid {holder}). Прогон идёт десятки "
+            f"минут и пишет --json только в конце — следите за логом, а не "
+            f"за файлом отчёта.\nПрервать: pkill -f training.ablation")
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
@@ -388,28 +434,38 @@ def main() -> int:
     ap.add_argument("--json", help="записать отчёт в файл")
     args = ap.parse_args()
 
-    ds = load_from_clickhouse(
-        os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
-        os.getenv("CLICKHOUSE_DB", "manta"),
-        os.getenv("CLICKHOUSE_USER", "dota"),
-        os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
-    logger.info("датасет: %d матчей, %d строк", ds.n_matches, len(ds.y))
+    with single_run():
+        ds = load_from_clickhouse(
+            os.getenv("CLICKHOUSE_URL", "http://localhost:8123"),
+            os.getenv("CLICKHOUSE_DB", "manta"),
+            os.getenv("CLICKHOUSE_USER", "dota"),
+            os.getenv("CLICKHOUSE_PASSWORD", "dota_dev_password"))
+        logger.info("датасет: %d матчей, %d строк", ds.n_matches, len(ds.y))
 
-    targets = ({name: [name] for name in FEATURES} if args.each
-               else dict(GROUPS))
-    # game_time и kills_total не ablate-им: первая задаёт фазу игры (без
-    # неё модель теряет смысл), вторая симметрична и служит нормировкой.
-    for skip in ("game_time",):
-        targets.pop(skip, None)
+        targets = ({name: [name] for name in FEATURES} if args.each
+                   else dict(GROUPS))
+        # game_time и kills_total не ablate-им: первая задаёт фазу игры
+        # (без неё модель теряет смысл), вторая симметрична и служит
+        # нормировкой.
+        for skip in ("game_time",):
+            targets.pop(skip, None)
 
-    rows, base = run(ds, targets, args.min_coverage)
-    _print_report(rows, base)
+        # Сколько это займёт — говорим ЗАРАНЕЕ. Прогон молчит десятки
+        # минут и пишет --json только в конце; без этой строки «ничего не
+        # происходит» неотличимо от «зависло», и команда запускается
+        # снова (на живой машине так набралось восемь параллельных).
+        logger.info("групп %d, то есть %d полных обучений; отчёт в --json "
+                    "появится ТОЛЬКО в конце, прогресс — здесь в логе",
+                    len(targets), len(targets) + 1)
 
-    if args.json:
-        with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump({"base_brier": base, "rows": rows}, fh,
-                      ensure_ascii=False, indent=1)
-        logger.info("отчёт записан в %s", args.json)
+        rows, base = run(ds, targets, args.min_coverage)
+        _print_report(rows, base)
+
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as fh:
+                json.dump({"base_brier": base, "rows": rows}, fh,
+                          ensure_ascii=False, indent=1)
+            logger.info("отчёт записан в %s", args.json)
     return 0
 
 

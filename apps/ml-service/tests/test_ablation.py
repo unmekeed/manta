@@ -224,3 +224,47 @@ def test_verdict_is_refused_on_a_handful_of_validation_rows():
     assert r["delta"] is None, "вердикт вынесен по горстке строк"
     assert "НЕИЗМЕРИМА" in r["verdict"]
     assert "кандидат на удаление" not in r["verdict"]
+
+
+# -- защита от параллельных прогонов (спринт 132.1) -------------------------------
+
+def test_second_run_refuses_to_start(tmp_path):
+    """Прогон идёт десятки минут и до конца ничего не пишет в --json.
+
+    На живой машине это привело ровно к тому, к чему и должно было:
+    `ls` не находил отчёт, команда запускалась снова — и так восемь раз.
+    Восемь прогонов дрались за процессор, обучали по двенадцать моделей
+    каждый и писали в один файл.
+    """
+    from training.ablation import single_run
+
+    lock = tmp_path / "ablation.lock"
+    with single_run(lock):
+        with pytest.raises(SystemExit) as e:
+            with single_run(lock):
+                pass
+    assert "уже выполняется" in str(e.value)
+    assert "pkill" in str(e.value), "сообщение обязано говорить, как прервать"
+
+
+def test_lock_is_released_after_a_finished_run(tmp_path):
+    """Блокировка на flock, а не на «есть ли файл»: иначе первое же
+    аварийное завершение запретило бы запуск навсегда."""
+    from training.ablation import single_run
+
+    lock = tmp_path / "ablation.lock"
+    with single_run(lock):
+        pass
+    with single_run(lock):        # не должно бросить
+        pass
+
+
+def test_lock_survives_a_killed_run(tmp_path):
+    """Файл блокировки остаётся на диске после kill -9, но захват ядро
+    снимает вместе с процессом — следующий запуск обязан пройти."""
+    from training.ablation import single_run
+
+    lock = tmp_path / "ablation.lock"
+    lock.write_text("999999")     # «остался от убитого прогона»
+    with single_run(lock):
+        pass
