@@ -3,10 +3,19 @@
 GO_SERVICES := apps/api-gateway apps/replay-parser/svc
 COMPOSE     := docker compose -f deployments/docker-compose.yml
 
+# Env-файл с секретами живёт ВНЕ репозитория. Пустое значение допустимо:
+# цели, которым секреты не нужны, работают и без него.
+MANTA_TRAIN_ENV ?= $(HOME)/manta-train.env
+
+# Окружение бота Game Coordinator — тоже вне репозитория: dota2 тянет
+# protobuf 3.20 и gevent, которым нечего делать рядом с коллекторами.
+GC_VENV ?= $(HOME)/.manta-gc-venv
+
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 .PHONY: candidates-queue candidates-sql-test wp-rates-sql-test pytest-check
+.PHONY: gc-venv gc-probe
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -162,6 +171,18 @@ pytest-check:  ## Проверить, что pytest вообще установ�
 		echo "    python3 -m pip install --break-system-packages pytest"; \
 		echo "(тесты на живой БД запускаются руками и в CI не участвуют)"; \
 		exit 2; }
+
+gc-venv:       ## Отдельное окружение для замера Game Coordinator
+	python3 -m venv $(GC_VENV)
+	$(GC_VENV)/bin/pip install -q -r scripts/gc-requirements.txt
+	@echo "готово: $(GC_VENV)"
+	@echo "дальше — логин и пароль бота в $(MANTA_TRAIN_ENV):"
+	@echo "  STEAM_BOT_LOGIN=... / STEAM_BOT_PASSWORD=..."
+
+gc-probe:      ## Замер GC: ARGS=login | "details --limit 200" | bulk
+	@test -x $(GC_VENV)/bin/python || { echo "сначала make gc-venv"; exit 2; }
+	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
+	$(GC_VENV)/bin/python scripts/gc-probe.py $(ARGS)
 
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
 	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.audit
