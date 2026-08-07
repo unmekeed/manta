@@ -84,7 +84,6 @@ GROUPS: dict[str, list[str]] = {
     "F4_предметы": ["item_value_diff", "key_items_diff"],
     "F5_вижн_руны": ["obs_wards_diff", "sen_wards_diff", "runes_diff"],
     "F6_нейтралки_уровни": ["neutral_tier_diff", "levels_diff"],
-    "F3_драфт_прайор": ["draft_prior"],
     "база_экономика": ["networth_diff", "xp_diff", "networth_rel"],
     "база_объекты": ["towers_diff", "rax_diff", "alive_diff"],
     # G1 (спринт 131). Четыре группы, а не одна, потому что вопросов два
@@ -167,6 +166,30 @@ PHASES = (("ранняя", 0, 600), ("средняя", 600, 1500),
 # строк — это шум сэмплирования, а не метрика. Бутстрап дополнительно
 # требует хотя бы трёх МАТЧЕЙ и сам возвращает σ=0, если их меньше.
 MIN_OBSERVED_ROWS = 100
+
+
+def select_targets(targets: dict[str, list[str]],
+                   only: str | None) -> dict[str, list[str]]:
+    """Оставить перечисленные в --only цели.
+
+    Появилось по делу: ревизия трека F оставила один открытый вопрос
+    («какая из трёх фич в база_объекты даёт минус»), а ответить на него
+    можно было только прогоном --each по всем сорока одной фиче — часы
+    ради трёх обучений.
+
+    Неизвестное имя — не молчаливый пропуск, а отказ со списком
+    доступных. Пустой набор целей дал бы пустой отчёт, а «ничего не
+    нашлось» неотличимо от «всё чисто»: опечатка в имени группы читалась
+    бы как отсутствие проблем.
+    """
+    if not only:
+        return targets
+    wanted = [n.strip() for n in only.split(",") if n.strip()]
+    unknown = [n for n in wanted if n not in targets]
+    if unknown:
+        raise SystemExit(f"нет таких целей: {', '.join(unknown)}\n"
+                         f"доступны: {', '.join(sorted(targets))}")
+    return {n: targets[n] for n in wanted}
 
 
 def _valid_predictions(art: dict, ds: Dataset):
@@ -467,6 +490,9 @@ def main() -> int:
     ap.add_argument("--each", action="store_true",
                     help="каждая фича отдельно (22 обучения) вместо групп")
     ap.add_argument("--min-coverage", type=float, default=MIN_COVERAGE)
+    ap.add_argument("--only", help=(
+        "через запятую: имена групп (или фич при --each). Прогон по всем "
+        "стоит десятки минут, а вопрос обычно про две-три"))
     ap.add_argument("--json", help="записать отчёт в файл")
     args = ap.parse_args()
 
@@ -485,6 +511,8 @@ def main() -> int:
         # нормировкой.
         for skip in ("game_time",):
             targets.pop(skip, None)
+
+        targets = select_targets(targets, args.only)
 
         # Сколько это займёт — говорим ЗАРАНЕЕ. Прогон молчит десятки
         # минут и пишет --json только в конце; без этой строки «ничего не

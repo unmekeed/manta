@@ -71,11 +71,9 @@ def test_row_columns_cover_passthrough():
 
     from reportgen.runner import WP_PASSTHROUGH_FEATURES, WP_ROW_COLUMNS
 
-    # draft_prior приходит джойном из MatchDraft, а производные (G1) —
-    # оконными функциями; колонками витрины не являются ни те, ни другие.
-    # Что они действительно доезжают, проверяет тест ниже.
-    need = [f for f in WP_PASSTHROUGH_FEATURES
-            if f != "draft_prior" and f not in RATE_FEATURES]
+    # Производные (G1) считаются оконными функциями и колонками витрины
+    # не являются. Что они действительно доезжают, проверяет тест ниже.
+    need = [f for f in WP_PASSTHROUGH_FEATURES if f not in RATE_FEATURES]
     missing = [f for f in need if f not in WP_ROW_COLUMNS]
     assert not missing, f"{missing} не читаются из витрины — всегда NaN"
 

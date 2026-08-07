@@ -323,3 +323,27 @@ def test_match_count_reaches_the_verdict():
     assert "преждевременен" in r["verdict"], r["verdict"]
     assert str(r["matches_observed"]) in r["verdict"], (
         "вердикт обязан назвать число, на котором он основан")
+
+
+# -- выбор целей (спринт 134) -----------------------------------------------------
+
+def test_only_keeps_just_the_named_targets():
+    """Прогон по всем целям стоит десятки минут, а вопрос обычно про
+    одну-две."""
+    from training.ablation import select_targets
+
+    all_targets = {"a": ["x"], "b": ["y"], "c": ["z"]}
+    assert select_targets(all_targets, "c,a") == {"c": ["z"], "a": ["x"]}
+    assert select_targets(all_targets, None) == all_targets
+    assert select_targets(all_targets, "") == all_targets
+
+
+def test_only_refuses_an_unknown_name():
+    """Опечатка не должна давать пустой отчёт: «ничего не нашлось»
+    неотличимо от «всё чисто», и это худший вид молчания."""
+    from training.ablation import select_targets
+
+    with pytest.raises(SystemExit) as e:
+        select_targets({"база_объекты": ["towers_diff"]}, "база_обьекты")
+    assert "нет таких целей" in str(e.value)
+    assert "база_объекты" in str(e.value), "надо подсказать, что есть"

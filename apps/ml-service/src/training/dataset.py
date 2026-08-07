@@ -56,7 +56,6 @@ FEATURES = [
     "runes_diff",         # подобрано рун R−D (F5)
     "neutral_tier_diff",  # сумма тиров нейтралок R−D (F6)
     "levels_diff",        # сумма уровней героев R−D (F6)
-    "draft_prior",        # P(win) по составам, Draft Prior Model (F3)
     # G1 (спринт 131): производные — темп изменения метрики за окно,
     # единиц метрики в минуту. Дописаны В КОНЕЦ намеренно: артефакты
     # моделей хранят свой список фич, и старая модель (27 фич) обязана
@@ -112,9 +111,13 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
 MIRROR_NEGATE |= {rate_name(m, w) for m in RATE_METRICS
                   for w in RATE_WINDOWS if m in MIRROR_NEGATE}
 
-# draft_prior — вероятность, а не разность: при зеркалировании сторон
-# она переходит в 1 − p, а не в −p. Обрабатывается отдельно в mirror_xy.
-MIRROR_COMPLEMENT = {"draft_prior"}
+# Фичи-ВЕРОЯТНОСТИ: при зеркалировании сторон такая переходит в 1 − p, а
+# не в −p. Сейчас множество пусто — единственный жилец, draft_prior, снят
+# ревизией трека F (спринт 134). Механизм оставлен: следующая фича-
+# вероятность обязана зеркалиться правильно, а не «как разность», и
+# ошибка здесь молчаливая — модель просто учится на несогласованных
+# данных.
+MIRROR_COMPLEMENT: set[str] = set()
 
 
 PRO_TIER = "Professional"
@@ -256,8 +259,7 @@ class Dataset:
         return self.X[va], self.y[va], self.groups[va], "valid"
 
 
-# Колонки витрины, из которых row_to_features собирает вектор (draft_prior
-# лежит отдельно — в MatchDraft, подтягивается джойном).
+# Колонки витрины, из которых row_to_features собирает вектор.
 #
 # Единый источник истины для ЛЮБОГО чтения витрины под инференс. До трека F
 # predictors/explain/report-generator держали каждый свой список из 10
@@ -294,11 +296,11 @@ def match_rows_sql(extra: tuple[str, ...] = (), where: str = "") -> str:
     собранных матчах, без миграции и без пересбора.
     """
     cols = ", ".join(("match_id", *ROW_COLUMNS, *extra, window_columns()))
-    return (f"SELECT t.*, d.prior AS draft_prior"
-            f"  FROM (SELECT {cols}"
-            f"          FROM MatchTimelineFeatures FINAL {where}) AS t"
-            f"  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
-            f"    USING (match_id)")
+    # Джойн MatchDraft убран вместе с draft_prior (спринт 134): читать
+    # колонку, которую никто не использует, — платить за неё временем
+    # запроса на каждом обучении и каждом инференсе.
+    return (f"SELECT {cols}"
+            f"  FROM MatchTimelineFeatures FINAL {where}")
 
 
 def align_to_artifact(X: np.ndarray, names: list[str]) -> np.ndarray:
@@ -380,7 +382,6 @@ def row_to_features(row: dict) -> list[float]:
         "runes_diff": _f("runes_diff"),
         "neutral_tier_diff": _f("neutral_tier_diff"),
         "levels_diff": _f("levels_diff"),
-        "draft_prior": _f("draft_prior"),
     }
     # G1: производные (арифметика — в libs/wp_rates.py, чтобы у
     # report-generator была ровно та же).

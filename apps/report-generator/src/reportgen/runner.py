@@ -55,10 +55,10 @@ TOPIC_OUT = "report.generated"
 # между сервисами нет); при добавлении фичи в модель дописывать сюда.
 WP_PASSTHROUGH_FEATURES = [
     "position_advance", "alive_diff", "towers_diff", "rax_diff",
-    # Трек F (миграция 012 + MatchDraft)
+    # Трек F (миграция 012)
     "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
     "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
-    "runes_diff", "neutral_tier_diff", "levels_diff", "draft_prior",
+    "runes_diff", "neutral_tier_diff", "levels_diff",
     # Волна 1 (спринты 84, 90, 91). Их добавили в обучение, но забыли
     # здесь — тест test_wp_features_sync горел с тех самых пор. Пока в
     # production крутится модель постарше, Predict не спрашивает эти
@@ -75,13 +75,12 @@ WP_PASSTHROUGH_FEATURES = [
 # обучении и в проде — худший из возможных исходов.
 WP_PASSTHROUGH_FEATURES += RATE_FEATURES
 
-# Колонки витрины для _timeline_rows: сырьё под WP_PASSTHROUGH_FEATURES и
-# производные. draft_prior живёт в MatchDraft — подтягивается джойном,
-# производные считаются оконными функциями и колонками витрины не являются.
+# Колонки витрины для _timeline_rows: сырьё под WP_PASSTHROUGH_FEATURES.
+# Производные (G1) считаются оконными функциями и колонками витрины не
+# являются.
 WP_ROW_COLUMNS = ["game_time", "networth_diff", "networth_total", "xp_diff",
                   "kills_radiant", "kills_dire"] + [
-    f for f in WP_PASSTHROUGH_FEATURES
-    if f != "draft_prior" and f not in RATE_FEATURES]
+    f for f in WP_PASSTHROUGH_FEATURES if f not in RATE_FEATURES]
 
 
 def _f(row: dict, key: str) -> float:
@@ -177,14 +176,13 @@ class ReportGenerator:
 
     def _timeline_rows(self, match_id: int) -> list[dict]:
         cols = ", ".join(WP_ROW_COLUMNS)
+        # Джойн MatchDraft убран вместе с draft_prior (спринт 134):
+        # фича снята ревизией трека F, а тянуть таблицу ради колонки,
+        # которую никто не читает, — платить временем на каждом отчёте.
         return self._ch_select(
-            f"SELECT t.*, d.prior AS draft_prior"
-            f"  FROM (SELECT match_id, {cols}, radiant_win,"
-            f"               {window_columns()}"
-            f"          FROM MatchTimelineFeatures FINAL"
-            f"         WHERE match_id = {{match_id:UInt64}}) AS t"
-            f"  LEFT JOIN (SELECT match_id, prior FROM MatchDraft FINAL) AS d"
-            f"    USING (match_id)"
+            f"SELECT match_id, {cols}, radiant_win, {window_columns()}"
+            f"  FROM MatchTimelineFeatures FINAL"
+            f" WHERE match_id = {{match_id:UInt64}}"
             f" ORDER BY game_time", match_id)
 
     def _kill_rows(self, match_id: int) -> list[dict]:
