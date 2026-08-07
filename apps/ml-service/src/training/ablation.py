@@ -220,6 +220,13 @@ def run(ds: Dataset, targets: dict[str, list[str]],
 
     cov = coverage(ds)
     t0 = time.time()
+    # Базовое обучение — самый долгий одиночный блок прогона (OOF-фолды на
+    # всех строках, удвоенных зеркалированием) и при этом единственный, во
+    # время которого раньше не было ни строчки в логе. Тишина в несколько
+    # минут неотличима от зависания — и на живой машине именно так и была
+    # прочитана.
+    logger.info("обучаю базовую модель: %d строк, %d фич — самый долгий шаг",
+                len(ds.y), len(FEATURES))
     base_art = train(ds)
     base_brier = float(base_art["metrics"]["brier_calibrated"])
     logger.info("базовая модель: Brier valid %.4f, обучение %.0fс",
@@ -228,7 +235,9 @@ def run(ds: Dataset, targets: dict[str, list[str]],
     t_va = X_va[:, FEATURES.index("game_time")]
 
     rows = []
-    for label, names in targets.items():
+    for done, (label, names) in enumerate(targets.items(), start=1):
+        logger.info("[%d/%d] %s — обучаю без этой группы",
+                    done, len(targets), label)
         names = [n for n in names if n in FEATURES]
         if not names:
             continue
