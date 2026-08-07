@@ -156,7 +156,10 @@ wp-rates-sql-test: pytest-check ## Проверить окна производ�
 pytest-check:  ## Проверить, что pytest вообще установлен (иначе внятная подсказка)
 	@python3 -c "import pytest" 2>/dev/null || { \
 		echo "pytest не установлен в этом python3."; \
-		echo "лечение: python3 -m pip install --user pytest"; \
+		echo "лечение (Debian/Ubuntu, PEP 668 — pip в системный python закрыт):"; \
+		echo "    sudo apt install -y python3-pytest"; \
+		echo "если пакета нет — тем же способом, каким ставились numpy и lightgbm:"; \
+		echo "    python3 -m pip install --break-system-packages pytest"; \
 		echo "(тесты на живой БД запускаются руками и в CI не участвуют)"; \
 		exit 2; }
 
