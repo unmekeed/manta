@@ -180,21 +180,37 @@ def match_ids_from_steam(limit: int) -> list[int]:
         return []
     url = ("https://api.steampowered.com/IDOTA2Match_570"
            "/GetMatchHistory/v1/")
-    try:
-        resp = requests.get(url, params={"key": key,
-                                         "matches_requested": min(limit, 100)},
-                            timeout=60)
-        resp.raise_for_status()
-        result = (resp.json() or {}).get("result") or {}
-    except Exception as exc:  # noqa: BLE001
-        print(f"Valve не ответила ({exc})")
-        return []
-    if result.get("status") != 1:
-        print(f"Valve вернула status={result.get('status')} "
-              f"{result.get('statusDetail', '')}".strip())
-        return []
-    ids = [int(m["match_id"]) for m in (result.get("matches") or [])
-           if m.get("match_id")]
+
+    # Постранично. За вызов Valve отдаёт сотню, а замеру нужно больше:
+    # первый живой прогон обработал ровно сто матчей БЕЗ единого отказа,
+    # то есть упёрся не в потолок аккаунта, а в конец списка. Без
+    # страниц суточный потолок измерить нечем.
+    #
+    # Страница задаётся start_at_match_id: следующий запрос начинается с
+    # матча ПЕРЕД последним полученным. Номера убывают, поэтому минус.
+    ids: list[int] = []
+    start_at = None
+    while len(ids) < limit:
+        params = {"key": key, "matches_requested": 100}
+        if start_at is not None:
+            params["start_at_match_id"] = start_at
+        try:
+            resp = requests.get(url, params=params, timeout=60)
+            resp.raise_for_status()
+            result = (resp.json() or {}).get("result") or {}
+        except Exception as exc:  # noqa: BLE001
+            print(f"Valve не ответила ({exc})")
+            break
+        if result.get("status") != 1:
+            print(f"Valve вернула status={result.get('status')} "
+                  f"{result.get('statusDetail', '')}".strip())
+            break
+        page = [int(m["match_id"]) for m in (result.get("matches") or [])
+                if m.get("match_id")]
+        if not page:
+            break
+        ids.extend(page)
+        start_at = min(page) - 1
     print(f"от Valve: {len(ids)} матчей (квота OpenDota не тронута)")
     return ids[:limit]
 
@@ -414,7 +430,7 @@ def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
     from dota2.utils import replay_url_from_match
 
     steam, dota = connect()
-    ok = failed = verified = 0
+    ok = failed = verified = attempted = 0
     streak = 0
     started = time.time()
     reasons: dict[str, int] = {}
@@ -423,6 +439,7 @@ def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
           f"потолок {limit}\n")
     try:
         for n, match_id in enumerate(match_ids[:limit], start=1):
+            attempted = n
             jobid = dota.request_match_details(match_id)
             resp = dota.wait_msg(jobid, timeout=30)
             reason = detail_failure_reason(resp)
@@ -480,10 +497,26 @@ def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
         print("    молчание GC                — эндпоинт, похоже, снят;")
         print("    нет соли в ответе          — матчи слишком свежие или")
         print("                                 их реплеев уже нет.")
-    elif ok >= limit:
-        print("\n  потолок НЕ достигнут — повторить с большим --limit")
+    elif streak < STOP_AFTER_FAILURES:
+        # Замер кончился НЕ отказом GC, а концом входных данных: сколько
+        # match_id дали, столько и обработали. Это не потолок аккаунта, и
+        # называть его потолком нельзя.
+        #
+        # Прежняя версия сравнивала ok с --limit (по умолчанию 200), а
+        # список был на 100 — и объявила «аккаунт отдал 100 солей до
+        # отказа, нужно ~20 аккаунтов». Отказов при этом было ноль.
+        # Третий случай подряд, когда вердикт истолковывал СВОЮ
+        # остановку как ответ внешней системы.
+        print(f"\n  ПОТОЛОК НЕ ДОСТИГНУТ: отказов ноль, кончились матчи "
+              f"({attempted} шт).")
+        print("  Сколько аккаунт отдаёт в сутки — пока НЕ измерено.")
+        print("  Дальше: make gc-probe ARGS='details --from-steam 500 "
+              "--limit 500'")
+        print("  Если суточный лимит уже выбран, следующий прогон упрётся")
+        print("  в стену сразу — это тоже ответ, и тоже полезный.")
     else:
-        print(f"\n  ВЕРДИКТ: аккаунт отдал {ok} солей до отказа.")
+        print(f"\n  ВЕРДИКТ: аккаунт отдал {ok} солей и упёрся в стену "
+              f"({attempted} попыток).")
         print(f"  Под 2000 матчей в сутки нужно ~{-(-2000 // ok)} аккаунтов.")
     return 0
 

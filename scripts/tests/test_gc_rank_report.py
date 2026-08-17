@@ -277,19 +277,25 @@ def test_steam_source_rejects_a_bad_status(capsys, monkeypatch):
 
 
 def test_steam_source_returns_match_ids(monkeypatch):
+    """Обычный случай: Valve отдала страницу, дальше пусто."""
     probe = _probe()
     monkeypatch.setenv("STEAM_API_KEY", "ключ")
+    calls = []
 
     class FakeResp:
+        def __init__(self, ids): self._ids = ids
         def raise_for_status(self): pass
         def json(self):
             return {"result": {"status": 1,
-                               "matches": [{"match_id": 8951315555},
-                                           {"match_id": 8951315458}]}}
+                               "matches": [{"match_id": i} for i in self._ids]}}
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(1)
+        return FakeResp([8951315555, 8951315458] if len(calls) == 1 else [])
 
     import requests
     original = requests.get
-    requests.get = lambda *a, **kw: FakeResp()
+    requests.get = fake_get
     try:
         assert probe.match_ids_from_steam(10) == [8951315555, 8951315458]
     finally:
@@ -399,3 +405,73 @@ def test_all_context_fields_exist_in_the_protocol():
     names = {f.name for f in player.fields}
     missing = [n for n in probe.RANK_CONTEXT_FIELDS if n not in names]
     assert not missing, f"нет таких полей у игрока: {missing}"
+
+
+# -- постраничность и вердикт ------------------------------------------------------
+
+def test_steam_source_pages_beyond_one_hundred(monkeypatch):
+    """За вызов Valve отдаёт сотню — просят больше, значит листаем.
+
+    Первый живой прогон обработал ровно 100 матчей БЕЗ единого отказа:
+    упёрся не в потолок аккаунта, а в конец списка. Без страниц суточный
+    потолок измерить нечем.
+    """
+    probe = _probe()
+    monkeypatch.setenv("STEAM_API_KEY", "ключ")
+    pages, seen = [], []
+
+    class FakeResp:
+        def __init__(self, ids): self._ids = ids
+        def raise_for_status(self): pass
+        def json(self):
+            return {"result": {"status": 1,
+                               "matches": [{"match_id": i} for i in self._ids]}}
+
+    def fake_get(url, params=None, timeout=None):
+        seen.append(params.get("start_at_match_id"))
+        base = 9000 - len(seen) * 100
+        ids = list(range(base + 99, base - 1, -1))
+        pages.append(ids)
+        return FakeResp(ids)
+
+    import requests
+    original = requests.get
+    requests.get = fake_get
+    try:
+        ids = probe.match_ids_from_steam(250)
+    finally:
+        requests.get = original
+
+    assert len(ids) == 250, f"вернулось {len(ids)}"
+    assert len(seen) == 3, "должно быть три страницы"
+    assert seen[0] is None, "первая страница идёт без start_at_match_id"
+    # Каждая следующая страница начинается ПЕРЕД последним матчем прошлой.
+    assert seen[1] == min(pages[0]) - 1
+    assert seen[2] == min(pages[1]) - 1
+
+
+def test_steam_source_stops_when_valve_runs_out(monkeypatch):
+    """Пустая страница — конец, а не повод крутиться вечно."""
+    probe = _probe()
+    monkeypatch.setenv("STEAM_API_KEY", "ключ")
+    calls = []
+
+    class FakeResp:
+        def __init__(self, ids): self._ids = ids
+        def raise_for_status(self): pass
+        def json(self):
+            return {"result": {"status": 1,
+                               "matches": [{"match_id": i} for i in self._ids]}}
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(1)
+        return FakeResp([9001, 9000] if len(calls) == 1 else [])
+
+    import requests
+    original = requests.get
+    requests.get = fake_get
+    try:
+        assert probe.match_ids_from_steam(500) == [9001, 9000]
+    finally:
+        requests.get = original
+    assert len(calls) == 2, "после пустой страницы надо остановиться"
