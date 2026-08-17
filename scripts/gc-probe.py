@@ -126,23 +126,76 @@ def match_ids_from_public(limit: int) -> list[int]:
     Стоит один вызов из суточной квоты 2000. Это дешевле, чем поднимать
     ради замера весь стек сбора.
     """
-    import json
-    import urllib.request
+    # requests, а не urllib: он и так есть в этом окружении (его тянет
+    # steam), и им же ходят коллекторы — незачем иметь два разных
+    # сетевых поведения для одного и того же API.
+    #
+    # User-Agent обязателен. По умолчанию клиент представляется как
+    # «Python-urllib/3.x», и OpenDota отвечает 403 — тот же запрос через
+    # curl проходит. Ошибка выглядела бы как «лента недоступна», то есть
+    # уводила бы в сторону сети.
+    import requests
 
-    # User-Agent обязателен. По умолчанию urllib представляется как
-    # «Python-urllib/3.x», и OpenDota отвечает на это 403 — тот же
-    # запрос через curl проходит. Ошибка выглядела бы как «лента
-    # недоступна», то есть уводила бы в сторону сети.
     url = "https://api.opendota.com/api/publicMatches"
-    req = urllib.request.Request(url, headers={"User-Agent": "manta-gc-probe"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            rows = json.loads(resp.read())
-    except Exception as exc:  # noqa: BLE001 — сеть: скажем честно и выйдем
-        print(f"публичная лента недоступна ({exc})")
+    headers = {"User-Agent": "manta-gc-probe"}
+    # Две попытки и щедрый таймаут: на живой машине ответ не пришёл за 30
+    # секунд, хотя коллекторы к тому же API ходят успешно. Лента отдаёт
+    # сотню матчей целиком и бывает медленной; одна неудача — не повод
+    # объявлять её недоступной.
+    last = None
+    for attempt in (1, 2):
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            rows = resp.json()
+            break
+        except Exception as exc:  # noqa: BLE001 — сеть: скажем честно
+            last = exc
+            print(f"лента OpenDota не ответила (попытка {attempt}/2): {exc}")
+    else:
+        print(f"публичная лента недоступна ({last})")
+        print("  запасной источник у Valve, мимо OpenDota:")
+        print("    make gc-probe ARGS='details --from-steam 100'")
         return []
+
     ids = [int(r["match_id"]) for r in rows if r.get("match_id")]
     print(f"из публичной ленты OpenDota: {len(ids)} матчей (1 вызов квоты)")
+    return ids[:limit]
+
+
+def match_ids_from_steam(limit: int) -> list[int]:
+    """Свежие match_id у самой Valve — мимо OpenDota и мимо её квоты.
+
+    Нужен как запасной путь: на живой машине лента OpenDota не ответила,
+    а замер от неё зависеть не должен. Valve отдаёт сто матчей за вызов
+    и своей квоты в нашем смысле не имеет.
+
+    Ключ берётся из того же ~/manta-train.env, что и всё остальное.
+    """
+    import requests
+
+    key = os.getenv("STEAM_API_KEY")
+    if not key:
+        print("нет STEAM_API_KEY в ~/manta-train.env — источник недоступен")
+        return []
+    url = ("https://api.steampowered.com/IDOTA2Match_570"
+           "/GetMatchHistory/v1/")
+    try:
+        resp = requests.get(url, params={"key": key,
+                                         "matches_requested": min(limit, 100)},
+                            timeout=60)
+        resp.raise_for_status()
+        result = (resp.json() or {}).get("result") or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"Valve не ответила ({exc})")
+        return []
+    if result.get("status") != 1:
+        print(f"Valve вернула status={result.get('status')} "
+              f"{result.get('statusDetail', '')}".strip())
+        return []
+    ids = [int(m["match_id"]) for m in (result.get("matches") or [])
+           if m.get("match_id")]
+    print(f"от Valve: {len(ids)} матчей (квота OpenDota не тронута)")
     return ids[:limit]
 
 
@@ -447,6 +500,9 @@ def main() -> int:
     ap.add_argument("--from-public", type=int, metavar="N",
                     help="взять N свежих match_id из публичной ленты "
                          "OpenDota вместо очереди (1 вызов квоты)")
+    ap.add_argument("--from-steam", type=int, metavar="N",
+                    help="то же, но у самой Valve: мимо OpenDota и её "
+                         "квоты (нужен STEAM_API_KEY)")
     ap.add_argument("--matches-requested", type=int, default=100,
                     help="сколько матчей просить в массовом запросе (bulk)")
     ap.add_argument("--hero-id", type=int,
@@ -462,12 +518,15 @@ def main() -> int:
         ids = [int(x) for x in args.match_ids.split(",") if x.strip()]
     elif args.from_public:
         ids = match_ids_from_public(args.from_public)
+    elif args.from_steam:
+        ids = match_ids_from_steam(args.from_steam)
     else:
         ids = match_ids_from_queue(args.limit)
     if not ids:
-        die("нет match_id. Варианты: --from-public 100 (свежие матчи из "
-            "ленты OpenDota, 1 вызов квоты), --match-ids через запятую, "
-            "либо поднять Postgres с непустой очередью кандидатов")
+        die("нет match_id. Варианты: --from-steam 100 (у Valve, квоту "
+            "OpenDota не тратит), --from-public 100 (лента OpenDota, "
+            "1 вызов квоты), --match-ids через запятую, либо поднять "
+            "Postgres с непустой очередью кандидатов")
     print(f"матчей для замера: {len(ids)}")
     return probe_details(ids, args.delay, args.limit)
 
