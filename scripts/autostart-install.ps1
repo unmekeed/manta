@@ -5,7 +5,10 @@
 # команды. Проверяется тестом scripts/tests/test_daily_report.py.
 # Автозапуск Manta на Windows (E1 роадмапа) — задачи Планировщика.
 #
-# Создаёт три задачи:
+# Создаёт четыре задачи:
+#   Manta-Anchor   — при входе в систему и далее каждые 10 минут: держать
+#                    WSL живым, чтобы окно терминала можно было закрыть на
+#                    крестик, не погасив стек (scripts/wsl-anchor.sh);
 #   Manta-Recover  — при входе в систему: поднять Docker Desktop, дождаться
 #                    демона и выполнить `make recover` в WSL (идемпотентно);
 #   Manta-Backup   — ежедневно: слепок датасета с ротацией (scripts/backup.sh);
@@ -38,7 +41,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if ($Uninstall) {
-    foreach ($name in 'Manta-Recover', 'Manta-Backup', 'Manta-Report') {
+    foreach ($name in 'Manta-Anchor', 'Manta-Recover', 'Manta-Backup', 'Manta-Report') {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
             Write-Host "удалена задача $name"
@@ -70,11 +73,13 @@ wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && MANTA_TRAIN_ENV=~/manta-tr
 $backupCmd = "wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && ./scripts/backup.sh'"
 $reportCmd = "wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && ./scripts/daily-report.sh'"
 
-function New-MantaTask($name, $command, $trigger, $description) {
+function New-MantaTask($name, $command, $trigger, $description, $settings) {
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
         -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$command`""
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
-        -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    if (-not $settings) {
+        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+            -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    }
     if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $name -Confirm:$false
     }
@@ -82,6 +87,35 @@ function New-MantaTask($name, $command, $trigger, $description) {
         -Settings $settings -Description $description -RunLevel Highest | Out-Null
     Write-Host "создана задача $name"
 }
+
+# Якорь WSL. Отдельными настройками, потому что общие ему не подходят:
+#
+#   ExecutionTimeLimit 0  — «без ограничения». С общими двумя часами
+#     Планировщик убивал бы якорь дважды в рабочий день, и стек падал бы
+#     при закрытии окна — ровно то, от чего якорь и ставится.
+#   MultipleInstances IgnoreNew — повторное срабатывание не поднимает
+#     второй экземпляр. Сам скрипт тоже это проверяет (pidfile + flock),
+#     но полагаться на одну защиту там, где их можно поставить две,
+#     незачем.
+#
+# Повтор каждые 10 минут — это самолечение. `wsl --shutdown`, перезапуск
+# Docker Desktop и выход из спящего режима гасят якорь, и без повтора он
+# вернулся бы только при следующем входе в систему.
+$anchorSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+    -DontStopOnIdleEnd -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+    -MultipleInstances IgnoreNew
+
+$anchorTrigger = New-ScheduledTaskTrigger -AtLogOn
+$anchorTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 10) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)).Repetition
+
+$anchorCmd = "wsl -d $Distro -u $WslUser -- bash -lc 'cd ~/manta && ./scripts/wsl-anchor.sh run'"
+
+New-MantaTask 'Manta-Anchor' $anchorCmd $anchorTrigger `
+    'Manta: держать WSL живым, чтобы окно можно было закрыть на крестик' `
+    $anchorSettings
 
 New-MantaTask 'Manta-Recover' $recoverCmd `
     (New-ScheduledTaskTrigger -AtLogOn) `

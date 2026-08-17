@@ -16,6 +16,8 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 .PHONY: candidates-queue candidates-sql-test wp-rates-sql-test pytest-check
 .PHONY: gc-venv gc-probe
+.PHONY: golden-test signals-golden-update
+.PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -161,6 +163,38 @@ ml-ablation:   ## Ablation фич WP: какая заслужила место (
 wp-rates-sql-test: pytest-check ## Проверить окна производных (G1) на живом ClickHouse
 	cd apps/ml-service && MANTA_TEST_CH=1 \
 	PYTHONPATH=src:$(CURDIR)/libs python3 -m pytest tests/test_rates_sql.py -v
+
+wsl-anchor:    ## Держать WSL живым: окно терминала можно закрыть на крестик
+	@./scripts/wsl-anchor.sh run &
+	@sleep 1
+	@./scripts/wsl-anchor.sh status
+
+wsl-anchor-status: ## Переживёт ли стек закрытие окна WSL
+	@./scripts/wsl-anchor.sh status
+
+wsl-anchor-stop: ## Снять якорь (WSL снова погаснет с последним окном)
+	@./scripts/wsl-anchor.sh stop
+
+golden-test:   pytest-check ## Регресс ЗНАЧЕНИЙ фич: три эталона, без БД и сети
+	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs \
+	python3 -m pytest tests/test_signals_golden.py -q
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs \
+	python3 -m pytest tests/test_rates_golden.py tests/test_vector_golden.py \
+	                  tests/test_feature_coverage.py -q
+
+signals-golden-update: ## ПЕРЕПИСАТЬ эталоны фич (только когда формулу меняют осознанно)
+	@echo "Эталоны будут перезаписаны. Это правка СМЫСЛА, а не обновление кэша:"
+	@echo "каждое изменившееся число обязано попасть в diff коммита и быть"
+	@echo "объяснённым в его сообщении. Если числа поехали неожиданно —"
+	@echo "это не устаревший эталон, это регресс."
+	@echo
+	cd apps/data-collector && python3 tools/regen_golden.py
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs \
+	python3 tools/regen_rates_golden.py
+	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs \
+	python3 tools/regen_vector_golden.py
+	@echo
+	@git --no-pager diff --stat -- '*/tests/fixtures/golden_*.json' || true
 
 pytest-check:  ## Проверить, что pytest вообще установлен (иначе внятная подсказка)
 	@python3 -c "import pytest" 2>/dev/null || { \
