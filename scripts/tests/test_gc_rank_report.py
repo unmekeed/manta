@@ -118,3 +118,78 @@ def test_all_reported_fields_exist_in_the_protocol():
     names = {f.name for f in player.fields}
     missing = [n for n in probe.RANK_FIELDS if n not in names]
     assert not missing, f"нет таких полей у игрока: {missing}"
+
+
+# -- источник match_id для замера --------------------------------------------------
+
+def test_public_feed_sends_a_user_agent():
+    """OpenDota отбивает дефолтный «Python-urllib/3.x» кодом 403.
+
+    Тот же запрос через curl проходит, поэтому ошибка выглядела бы как
+    «лента недоступна» и уводила бы искать проблему в сети. Проверяем не
+    сеть, а что заголовок вообще ставится.
+    """
+    import urllib.request
+
+    probe = _probe()
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["ua"] = req.get_header("User-agent")
+        raise RuntimeError("дальше не идём — проверяем только заголовок")
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        probe.match_ids_from_public(10)
+    finally:
+        urllib.request.urlopen = original
+
+    assert seen.get("ua"), "User-Agent не задан — OpenDota ответит 403"
+    assert "urllib" not in seen["ua"].lower()
+
+
+def test_public_feed_failure_is_not_silent(capsys):
+    """Сеть отказала — говорим об этом, а не возвращаем пустоту молча.
+
+    Молчаливый пустой список неотличим от «матчей нет», и замер сообщал
+    бы «очередь пуста» там, где на самом деле не дотянулся до сети.
+    """
+    import urllib.request
+
+    probe = _probe()
+
+    def boom(req, timeout=None):
+        raise OSError("сеть отвалилась")
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = boom
+    try:
+        assert probe.match_ids_from_public(10) == []
+    finally:
+        urllib.request.urlopen = original
+    assert "недоступна" in capsys.readouterr().out
+
+
+def test_missing_psycopg_is_reported_not_swallowed(capsys, monkeypatch):
+    """Нет psycopg — это «прочитать нечем», а не «очередь пуста».
+
+    Ровно эта подмена смысла и случилась на живой машине: замер сообщил
+    «очередь пуста» в тот момент, когда очередь он не умел прочитать —
+    psycopg живёт в окружении коллекторов, а у замера своё.
+    """
+    import builtins
+
+    probe = _probe()
+    real_import = builtins.__import__
+
+    def no_psycopg(name, *a, **kw):
+        if name == "psycopg":
+            raise ImportError("нет такого")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_psycopg)
+    assert probe.match_ids_from_queue(10) == []
+    out = capsys.readouterr().out
+    assert "прочитать нечем" in out
+    assert "--from-public" in out

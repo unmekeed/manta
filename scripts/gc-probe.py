@@ -70,6 +70,10 @@ DEFAULT_DELAY_S = 1.0
 # (матч слишком старый, GC моргнул), три подряд — это стена.
 STOP_AFTER_FAILURES = 3
 
+# Сколько ждать ответа на массовый запрос. Минута — с большим запасом:
+# GC отвечает за секунды, и если он молчит минуту, он молчит совсем.
+BULK_TIMEOUT_S = 60
+
 
 def die(msg: str) -> None:
     print(f"ОШИБКА: {msg}", file=sys.stderr)
@@ -87,6 +91,13 @@ def match_ids_from_queue(limit: int) -> list[int]:
     try:
         import psycopg
     except ImportError:
+        # Молчать здесь нельзя. Пустой список неотличим от пустой
+        # очереди, и замер честно сообщал «очередь пуста» в тот момент,
+        # когда очередь он попросту не умел прочитать: psycopg живёт в
+        # окружении коллекторов, а у замера своё, где его нет.
+        print("psycopg в окружении замера нет — очередь прочитать нечем.")
+        print("  проще:   make gc-probe ARGS='details --from-public 100'")
+        print("  либо:    ~/.manta-gc-venv/bin/pip install 'psycopg[binary]'")
         return []
     dsn = os.getenv("POSTGRES_DSN",
                     "postgresql://dota:dota_dev_password@localhost:5432/manta")
@@ -98,8 +109,41 @@ def match_ids_from_queue(limit: int) -> list[int]:
                 (limit,))
             return [int(r[0]) for r in cur.fetchall()]
     except Exception as exc:  # noqa: BLE001 — БД не обязательна для замера
-        print(f"очередь недоступна ({exc}); нужен --match-ids")
+        print(f"очередь недоступна ({exc}); нужен --match-ids или --from-public")
         return []
+
+
+def match_ids_from_public(limit: int) -> list[int]:
+    """Свежие match_id из публичной ленты OpenDota — один вызов на сотню.
+
+    Зачем, если есть очередь кандидатов. Затем, что замеру всё равно,
+    ЧЬИ это матчи: он меряет суточный потолок аккаунта в Game
+    Coordinator, а не качество отбора. Требовать для этого поднятую
+    Postgres с непустой очередью значит связывать замер с состоянием
+    машины, на которой он запущен, — а на второй машине очередь пуста, и
+    замер из-за этого не стартовал вовсе.
+
+    Стоит один вызов из суточной квоты 2000. Это дешевле, чем поднимать
+    ради замера весь стек сбора.
+    """
+    import json
+    import urllib.request
+
+    # User-Agent обязателен. По умолчанию urllib представляется как
+    # «Python-urllib/3.x», и OpenDota отвечает на это 403 — тот же
+    # запрос через curl проходит. Ошибка выглядела бы как «лента
+    # недоступна», то есть уводила бы в сторону сети.
+    url = "https://api.opendota.com/api/publicMatches"
+    req = urllib.request.Request(url, headers={"User-Agent": "manta-gc-probe"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            rows = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001 — сеть: скажем честно и выйдем
+        print(f"публичная лента недоступна ({exc})")
+        return []
+    ids = [int(r["match_id"]) for r in rows if r.get("match_id")]
+    print(f"из публичной ленты OpenDota: {len(ids)} матчей (1 вызов квоты)")
+    return ids[:limit]
 
 
 # -- проверка соли ----------------------------------------------------------------
@@ -214,7 +258,14 @@ def connect():
     steam.set_credential_location(str(CREDENTIAL_DIR))
     dota = Dota2Client(steam)
 
+    # Библиотека печатает «Failed to parse: <номер>» на каждое сообщение
+    # GC, которого нет в её протоколах: dota2 не обновлялась с 2022 года,
+    # а Valve с тех пор добавила своих. Это НЕ ошибки замера — приходят
+    # уведомления, которых мы не просили и которые нам не нужны. Соль
+    # лежит в CMsgDOTAMatch, и его библиотека разбирает.
     print("вход по токену …")
+    print("(строки «Failed to parse: NNNNN» ниже — шум устаревших")
+    print(" протоколов библиотеки, на замер они не влияют)")
     result = login_with_token(steam, token)
     if result != 1:                       # EResult.OK
         hint = ""
@@ -344,10 +395,20 @@ def probe_bulk(matches_requested: int, hero_id: int | None) -> int:
             kwargs["hero_id"] = hero_id
         print(f"\nмассовый запрос: {kwargs}")
         jobid = dota.send_job(EDOTAGCMsg.EMsgGCRequestMatches, kwargs)
-        resp = dota.wait_msg(jobid, timeout=60)
+        # Молчание — это ОТВЕТ, и ждать его надо до конца. Без этой
+        # строки замер выглядел зависшим: запрос ушёл, GC не отвечает, на
+        # экране ничего. Прогон прервали с клавиатуры, так и не узнав,
+        # молчит ли GC или просто думает.
+        print(f"жду ответа GC до {BULK_TIMEOUT_S} с. Тишина здесь — это не "
+              "зависание,\nа вероятный ответ «путь закрыт»: дождись конца.")
+        resp = dota.wait_msg(jobid, timeout=BULK_TIMEOUT_S)
 
         if resp is None:
-            print("\nВЕРДИКТ: GC промолчал — путь, похоже, закрыт.")
+            print(f"\nGC не ответил за {BULK_TIMEOUT_S} с.")
+            print("\nВЕРДИКТ: массовый путь, похоже, закрыт — Valve в своё")
+            print("время урезала поиск по истории матчей. Остаётся путь")
+            print("одиночных деталей: make gc-probe ARGS='details "
+                  "--from-public 100'")
             return 0
 
         matches = list(getattr(resp, "matches", []))
@@ -383,6 +444,9 @@ def main() -> int:
                     help="сколько одиночных запросов пробовать (details)")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY_S)
     ap.add_argument("--match-ids", help="через запятую, вместо очереди")
+    ap.add_argument("--from-public", type=int, metavar="N",
+                    help="взять N свежих match_id из публичной ленты "
+                         "OpenDota вместо очереди (1 вызов квоты)")
     ap.add_argument("--matches-requested", type=int, default=100,
                     help="сколько матчей просить в массовом запросе (bulk)")
     ap.add_argument("--hero-id", type=int,
@@ -394,10 +458,16 @@ def main() -> int:
     if args.mode == "bulk":
         return probe_bulk(args.matches_requested, args.hero_id)
 
-    ids = ([int(x) for x in args.match_ids.split(",") if x.strip()]
-           if args.match_ids else match_ids_from_queue(args.limit))
+    if args.match_ids:
+        ids = [int(x) for x in args.match_ids.split(",") if x.strip()]
+    elif args.from_public:
+        ids = match_ids_from_public(args.from_public)
+    else:
+        ids = match_ids_from_queue(args.limit)
     if not ids:
-        die("нет match_id: очередь пуста и --match-ids не задан")
+        die("нет match_id. Варианты: --from-public 100 (свежие матчи из "
+            "ленты OpenDota, 1 вызов квоты), --match-ids через запятую, "
+            "либо поднять Postgres с непустой очередью кандидатов")
     print(f"матчей для замера: {len(ids)}")
     return probe_details(ids, args.delay, args.limit)
 
