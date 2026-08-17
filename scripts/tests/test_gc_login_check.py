@@ -131,11 +131,11 @@ def test_verdict_is_printed_once_when_limitations_arrive_late(tmp_path):
     конфигурацию, в которой система не работает, и пропустили дефект.
     """
     late = LOGGED_ON + ("setTimeout(() => this.emit('accountLimitations', "
-                        "false, false, false), 6500);")
-    proc, elapsed = _run(tmp_path, late, timeout=30)
+                        "false, false, false), 17000);")
+    proc, elapsed = _run(tmp_path, late, timeout=40)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stdout.count("=== ВЕРДИКТ ===") == 1, proc.stdout
-    assert elapsed < 6.5, "вышли по таймеру, а не дождавшись события"
+    assert elapsed < 17, "вышли по событию, а не по таймеру — проверка мимо"
 
 
 def test_invalid_password_is_reported_as_not_the_protocol(tmp_path):

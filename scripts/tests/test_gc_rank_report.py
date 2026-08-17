@@ -294,3 +294,51 @@ def test_steam_source_returns_match_ids(monkeypatch):
         assert probe.match_ids_from_steam(10) == [8951315555, 8951315458]
     finally:
         requests.get = original
+
+
+# -- истолкование ответа GC --------------------------------------------------------
+
+class _Resp:
+    def __init__(self, result):
+        self.result = result
+
+
+@needs_dota2
+def test_eresult_one_is_success_not_failure():
+    """result == 1 — это УСПЕХ.
+
+    Ошибка, стоившая целого живого прогона: успехом считался ноль, а
+    `result` это EResult, где успех — единица, а ноль означает Invalid.
+    Замер записывал каждый нормальный ответ GC в отказы, останавливался
+    после трёх подряд и объявлял «аккаунт отдал 0 солей, нужно 2000
+    аккаунтов» — притом что GC отвечал исправно.
+    """
+    probe = _probe()
+    assert probe.detail_failure_reason(_Resp(1)) is None
+
+
+@needs_dota2
+def test_eresult_zero_is_a_failure():
+    """Ноль — это Invalid, а не успех."""
+    probe = _probe()
+    assert probe.detail_failure_reason(_Resp(0)) is not None
+
+
+@needs_dota2
+def test_silence_is_a_failure_with_its_own_name():
+    probe = _probe()
+    assert probe.detail_failure_reason(None) == "молчание GC"
+
+
+@needs_dota2
+def test_failure_reason_is_named_not_numbered():
+    """Причина отказа читается словами, а не кодом.
+
+    «eresult=15» требует лезть в таблицу; «AccessDenied» отвечает сразу
+    и, в частности, сразу отличило бы запрет для limited-аккаунта от
+    отсутствия матча.
+    """
+    probe = _probe()
+    from steam.enums import EResult
+    reason = probe.detail_failure_reason(_Resp(int(EResult.AccessDenied)))
+    assert "AccessDenied" in reason

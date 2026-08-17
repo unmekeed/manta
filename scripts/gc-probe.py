@@ -352,6 +352,35 @@ def probe_login() -> int:
     return 0
 
 
+def detail_failure_reason(resp) -> str | None:
+    """Причина отказа по ответу GC, либо None если это УСПЕХ.
+
+    Здесь была ошибка, стоившая целого прогона. Успехом считалось
+    `result == 0`, а на деле поле `result` — это EResult, и успех у него
+    ЕДИНИЦА (`EResult.OK == 1`), тогда как ноль означает `Invalid`.
+    Замер поэтому записывал каждый нормальный ответ GC в отказы,
+    останавливался после трёх подряд и объявлял «аккаунт отдал 0 солей,
+    нужно 2000 аккаунтов» — притом что GC отвечал исправно.
+
+    Сама библиотека делает ровно так (dota2/features/match.py:54):
+
+        eresult = EResult(message.result)
+        match = message.match if eresult == EResult.OK else None
+
+    Вывод на будущее: числовой код из чужого протокола нельзя
+    истолковывать на глаз. Сравнение идёт с ИМЕНОВАННОЙ константой, а
+    имя берётся из той же библиотеки, что и ответ.
+    """
+    from steam.enums import EResult
+
+    if resp is None:
+        return "молчание GC"
+    result = EResult(resp.result)
+    if result != EResult.OK:
+        return f"{result!r}"
+    return None
+
+
 def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
     """Сколько одиночных запросов деталей отдаёт аккаунт до отказа.
 
@@ -372,15 +401,11 @@ def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
         for n, match_id in enumerate(match_ids[:limit], start=1):
             jobid = dota.request_match_details(match_id)
             resp = dota.wait_msg(jobid, timeout=30)
-            if resp is None:
+            reason = detail_failure_reason(resp)
+            if reason:
                 failed += 1
                 streak += 1
-                reasons["молчание GC"] = reasons.get("молчание GC", 0) + 1
-            elif resp.result != 0:
-                failed += 1
-                streak += 1
-                key = f"eresult={resp.result}"
-                reasons[key] = reasons.get(key, 0) + 1
+                reasons[reason] = reasons.get(reason, 0) + 1
             else:
                 url = replay_url_from_match(resp.match)
                 if url is None:
@@ -417,12 +442,25 @@ def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
     print(f"  отказов:          {failed}  {reasons or ''}")
     print(f"  соль проверена на CDN: {verified} из первых 5")
     print(f"  заняло:           {minutes:.1f} мин")
-    if ok >= limit:
+    if ok == 0:
+        # Экстраполировать здесь нечего, и делать этого нельзя. Прежняя
+        # версия делила 2000 на max(ok, 1) и печатала «нужно ~2000
+        # аккаунтов» — число, которое выглядит замером, а на деле
+        # означает лишь «ноль в знаменателе». Ноль солей это не потолок
+        # аккаунта, а неработающий путь, и разбираться надо с причинами.
+        print("\n  ВЕРДИКТ: соли не получено ни одной — считать нечего.")
+        print("  Смотри причины отказов выше: это НЕ суточный потолок,")
+        print("  а неработающий путь. Дальше — по имени ошибки:")
+        print("    AccessDenied / limited     — ограничения аккаунта;")
+        print("    Fail, Busy, Timeout        — повторить позже;")
+        print("    молчание GC                — эндпоинт, похоже, снят;")
+        print("    нет соли в ответе          — матчи слишком свежие или")
+        print("                                 их реплеев уже нет.")
+    elif ok >= limit:
         print("\n  потолок НЕ достигнут — повторить с большим --limit")
     else:
         print(f"\n  ВЕРДИКТ: аккаунт отдал {ok} солей до отказа.")
-        print(f"  Под 2000 матчей в сутки нужно ~{max(1, -(-2000 // max(ok, 1)))}"
-              f" аккаунтов.")
+        print(f"  Под 2000 матчей в сутки нужно ~{-(-2000 // ok)} аккаунтов.")
     return 0
 
 
