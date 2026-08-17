@@ -224,11 +224,21 @@ def salt_is_real(url: str, timeout: float = 20.0) -> bool:
 
 # -- что ещё лежит в ответе, кроме соли -------------------------------------------
 
-# Поля игрока в CMsgDOTAMatch, из которых МОЖЕТ восстанавливаться ранг.
-# «Может» — потому что наличие поля в протоколе и его заполнение Valve в
-# ответе на чужой запрос это разные вещи, а протокол закрытый.
-RANK_FIELDS = ("previous_rank", "rank_change", "rank_tier_updated",
-               "search_rank", "mmr_type")
+# Поля игрока, которые НЕСУТ ЗНАЧЕНИЕ РАНГА. Только по ним выносится
+# вердикт: достаётся ли ранг из GC.
+#
+# Список пришлось сузить после живого прогона. Сначала сюда попал и
+# `mmr_type`, и на первом же матче он оказался единственным ненулевым —
+# отчего замер объявил «ранг из GC ДОСТАЁТСЯ», хотя все настоящие
+# ранговые поля были нулями. `mmr_type` это не ранг, а тип матчмейкинга
+# (соло/пати): он говорит, КАКОЙ рейтинг считался, и ничего не говорит о
+# его величине. Правило на будущее: в вердикт идут поля со ЗНАЧЕНИЕМ, а
+# не поля, которые просто лежат рядом по смыслу.
+RANK_FIELDS = ("previous_rank", "search_rank")
+
+# Соседние поля: сами по себе ранга не дают, но помогают понять, что
+# вообще приехало. Показываются, в вердикте НЕ участвуют.
+RANK_CONTEXT_FIELDS = ("rank_change", "rank_tier_updated", "mmr_type")
 
 
 def rank_report(match) -> dict[str, int]:
@@ -246,26 +256,40 @@ def rank_report(match) -> dict[str, int]:
     заполненных рангах GC заменяет OpenDota полностью, при пустых —
     придётся гнать выборку матчей через OpenDota ради одной лишь истины.
     """
-    out = {name: 0 for name in RANK_FIELDS}
+    out = {name: 0 for name in RANK_FIELDS + RANK_CONTEXT_FIELDS}
     out["average_skill"] = int(getattr(match, "average_skill", 0) or 0)
     for p in getattr(match, "players", []):
-        for name in RANK_FIELDS:
+        for name in RANK_FIELDS + RANK_CONTEXT_FIELDS:
             if int(getattr(p, name, 0) or 0):
                 out[name] += 1
     return out
 
 
+def rank_is_available(rep: dict[str, int]) -> bool:
+    """Достаётся ли ранг. Только по полям со ЗНАЧЕНИЕМ ранга.
+
+    Соседние поля (`mmr_type` и прочие) в решении не участвуют: на живом
+    прогоне ненулевым оказался ровно `mmr_type`, и вердикт по «любому
+    ненулю» соврал в самую дорогую сторону — объявил, что OpenDota для
+    истины по рангам больше не нужна.
+    """
+    return any(rep.get(name) for name in RANK_FIELDS)
+
+
 def print_rank_report(match) -> None:
     rep = rank_report(match)
-    print("\n  ранговые поля в ответе GC (игроков из 10 с ненулём):")
+    print("\n  ранг в ответе GC (игроков из 10 с ненулём):")
     for name in RANK_FIELDS:
+        print(f"    {name:20} {rep[name]}")
+    print("  рядом лежащее (в вердикте НЕ участвует):")
+    for name in RANK_CONTEXT_FIELDS:
         print(f"    {name:20} {rep[name]}")
     print(f"    average_skill (на матч) {rep['average_skill']}"
           "   # 0 — не задан, 1/2/3 — normal/high/very high")
-    if any(rep[n] for n in RANK_FIELDS):
+    if rank_is_available(rep):
         print("    => ранг из GC ДОСТАЁТСЯ: OpenDota не нужен и ради истины")
     else:
-        print("    => рангов в ответе нет: истину по рангам придётся брать")
+        print("    => РАНГОВ В ОТВЕТЕ НЕТ: истину по рангам придётся брать")
         print("       из OpenDota выборочно, иначе точность отбора ослепнет")
 
 

@@ -99,7 +99,7 @@ def test_report_names_the_consequence_either_way(capsys):
     probe = _probe()
 
     probe.print_rank_report(_match())
-    assert "рангов в ответе нет" in capsys.readouterr().out
+    assert "РАНГОВ В ОТВЕТЕ НЕТ" in capsys.readouterr().out
 
     probe.print_rank_report(_match(previous_rank=[80] + [0] * 9))
     assert "ДОСТАЁТСЯ" in capsys.readouterr().out
@@ -342,3 +342,60 @@ def test_failure_reason_is_named_not_numbered():
     from steam.enums import EResult
     reason = probe.detail_failure_reason(_Resp(int(EResult.AccessDenied)))
     assert "AccessDenied" in reason
+
+
+@needs_dota2
+def test_mmr_type_alone_does_not_mean_rank_is_available():
+    """Ровно та ошибка, что случилась на живом прогоне.
+
+    В первом же матче единственным ненулевым полем оказался `mmr_type`,
+    и вердикт «любой ненуль => ранг достаётся» объявил, что OpenDota для
+    истины по рангам больше не нужна. Это неправда: `mmr_type` говорит,
+    КАКОЙ рейтинг считался (соло/пати), и ничего — о его величине.
+
+    Правило, которое тест закрепляет: в вердикт идут поля со ЗНАЧЕНИЕМ
+    ранга, а не поля, лежащие рядом по смыслу.
+    """
+    probe = _probe()
+    rep = probe.rank_report(_match(mmr_type=[1] + [0] * 9))
+    assert rep["mmr_type"] == 1, "поле всё ещё показывается"
+    assert not probe.rank_is_available(rep), "mmr_type выдан за ранг"
+
+
+@needs_dota2
+def test_real_rank_field_does_mean_rank_is_available():
+    probe = _probe()
+    rep = probe.rank_report(_match(previous_rank=[80] + [0] * 9))
+    assert probe.rank_is_available(rep)
+
+
+@needs_dota2
+def test_context_fields_are_shown_but_never_decide(capsys):
+    """Соседние поля видно в отчёте, но вердикт они не двигают."""
+    probe = _probe()
+    for name in probe.RANK_CONTEXT_FIELDS:
+        rep = probe.rank_report(_match(**{name: [1] * 10}))
+        assert rep[name] == 10, name
+        assert not probe.rank_is_available(rep), name
+
+    probe.print_rank_report(_match(mmr_type=[1] * 10))
+    out = capsys.readouterr().out
+    assert "mmr_type" in out
+    assert "РАНГОВ В ОТВЕТЕ НЕТ" in out
+
+
+@needs_dota2
+def test_rank_and_context_fields_do_not_overlap():
+    """Одно поле не может быть и решающим, и справочным."""
+    probe = _probe()
+    assert not (set(probe.RANK_FIELDS) & set(probe.RANK_CONTEXT_FIELDS))
+
+
+@needs_dota2
+def test_all_context_fields_exist_in_the_protocol():
+    from dota2.protobufs.dota_gcmessages_common_pb2 import CMsgDOTAMatch
+    probe = _probe()
+    player = CMsgDOTAMatch.DESCRIPTOR.nested_types_by_name["Player"]
+    names = {f.name for f in player.fields}
+    missing = [n for n in probe.RANK_CONTEXT_FIELDS if n not in names]
+    assert not missing, f"нет таких полей у игрока: {missing}"
