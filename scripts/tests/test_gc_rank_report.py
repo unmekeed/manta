@@ -475,3 +475,56 @@ def test_steam_source_stops_when_valve_runs_out(monkeypatch):
     finally:
         requests.get = original
     assert len(calls) == 2, "после пустой страницы надо остановиться"
+
+
+# -- суточный счёт -----------------------------------------------------------------
+
+def test_tally_accumulates_across_runs(tmp_path, monkeypatch):
+    """Потолок — свойство аккаунта за СУТКИ, а не за один запуск.
+
+    Первый прогон дал 100 солей и кончился списком; второй дал 47 и
+    упёрся в молчание. Вердикт делил 2000 на 47, будто первых ста не
+    было, — то есть занижал потолок вдвое с лишним.
+    """
+    monkeypatch.setenv("GC_STATE_DIR", str(tmp_path))
+    probe = _probe()
+    assert probe.read_tally()["ok"] == 0
+    assert probe.add_to_tally(100)["ok"] == 100
+    tally = probe.add_to_tally(47)
+    assert tally["ok"] == 147
+    assert tally["runs"] == 2
+
+
+def test_tally_resets_on_a_new_day(tmp_path, monkeypatch):
+    """Вчерашние соли к сегодняшнему лимиту отношения не имеют."""
+    import json
+    monkeypatch.setenv("GC_STATE_DIR", str(tmp_path))
+    probe = _probe()
+    (tmp_path / "daily-tally.json").write_text(
+        json.dumps({"date": "2000-01-01", "ok": 999, "runs": 9}))
+    assert probe.read_tally()["ok"] == 0
+
+
+def test_tally_survives_a_corrupted_file(tmp_path, monkeypatch):
+    """Битый файл счёта не должен ронять замер.
+
+    Счёт — вспомогательная величина; терять из-за него сам замер, ради
+    которого поднимали сессию GC, несоразмерно.
+    """
+    monkeypatch.setenv("GC_STATE_DIR", str(tmp_path))
+    probe = _probe()
+    (tmp_path / "daily-tally.json").write_text("не json")
+    assert probe.read_tally()["ok"] == 0
+    assert probe.add_to_tally(5)["ok"] == 5
+
+
+def test_tally_uses_utc_not_local_time(tmp_path, monkeypatch):
+    """Граница суток одна и та же от запуска к запуску.
+
+    Местное время с переводом часов дало бы день длиной 23 или 25 часов,
+    и счёт сбрасывался бы не тогда, когда сбрасывается лимит Valve.
+    """
+    from datetime import datetime, timezone
+    monkeypatch.setenv("GC_STATE_DIR", str(tmp_path))
+    probe = _probe()
+    assert probe._today() == datetime.now(timezone.utc).strftime("%Y-%m-%d")
