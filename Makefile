@@ -15,7 +15,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 .PHONY: candidates-queue candidates-sql-test wp-rates-sql-test pytest-check
-.PHONY: gc-venv gc-probe gc-node gc-login-check
+.PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
 
@@ -222,6 +222,11 @@ gc-login-check: ## Пускает ли Steam НОВЫМ путём аутент�
 	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
 	GC_STATE_DIR=$${GC_STATE_DIR:-$(HOME)/.manta-gc-node} \
 	node scripts/gc-node/login-check.mjs
+
+gc-token:      ## Обменять пароль на refresh-токен для замера (нужно редко)
+	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
+	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
+	node scripts/gc-node/get-token.mjs
 
 gc-probe:      ## Замер GC: ARGS=login | "details --limit 200" | bulk
 	@test -x $(GC_VENV)/bin/python || { echo "сначала make gc-venv"; exit 2; }

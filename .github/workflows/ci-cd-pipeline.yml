@@ -59,7 +59,12 @@ jobs:
           python-version: "3.11"
       - name: Test
         run: |
-          pip install pytest
+          # steam нужен трём тестам сборки входа по токену
+          # (scripts/tests/test_gc_token.py). Без него они помечаются
+          # пропущенными — то есть суть гибридного входа не проверялась
+          # бы в CI вовсе, а файл выглядел бы зелёным. Джоба
+          # изолированная, конфликтовать этому protobuf не с чем.
+          pip install pytest steam==1.4.4
           pytest scripts/tests -q
 
   libs-test:

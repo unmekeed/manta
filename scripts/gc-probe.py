@@ -25,15 +25,21 @@ API — её знает только Game Coordinator. Поэтому сейча
 интерпретатор — гарантированный конфликт. Venv создаётся вне репозитория
 (`make gc-venv`), в git не попадает ничего.
 
-БЕЗОПАСНОСТЬ. Логин и пароль читаются ТОЛЬКО из окружения и не попадают
-ни в лог, ни в вывод. Кладутся в ~/manta-train.env, который вне git:
+ВХОД. Пароль этот скрипт не видит вовсе — он входит по refresh-токену
+из ~/.manta-gc/refresh-token. Так вышло не из красоты: steam==1.4.4
+логинится устаревшим сообщением (пароль открытым полем в ClientLogon),
+Valve этот путь отключила, и на верный пароль приходит InvalidPassword.
+Нового механизма в библиотеке нет и не будет — 1.4.4 последняя на PyPI.
 
-    STEAM_BOT_LOGIN=...
-    STEAM_BOT_PASSWORD=...
+Поэтому пароль на токен меняет Node, у которого библиотека
+поддерживаемая, а замер остаётся питоновским:
 
-Первый запуск интерактивный: Steam пришлёт код на почту, скрипт его
-спросит. Дальше сессия переиспользуется из ~/.manta-gc/ и вопросов
-больше не будет.
+    make gc-node      # один раз
+    make gc-token     # редко: токен живёт месяцами
+    make gc-probe ARGS=login
+
+Токен равносилен паролю: лежит с правами 0600 вне репозитория, не
+печатается и не попадает в сообщения об ошибках.
 
 ЧТО ЗАМЕР НЕ ДЕЛАЕТ. Ничего не пишет в базы, не трогает очередь
 кандидатов (только SELECT — иначе отобрал бы кандидатов у живого
@@ -122,10 +128,21 @@ def salt_is_real(url: str, timeout: float = 20.0) -> bool:
 # -- клиент -----------------------------------------------------------------------
 
 def connect():
-    """Логин в Steam и подключение к GC Dota 2.
+    """Логин в Steam по refresh-токену и подключение к GC Dota 2.
 
-    Возвращает (steam_client, dota_client). Первый запуск спросит код
-    Steam Guard; дальше сессия берётся из CREDENTIAL_DIR.
+    Возвращает (steam_client, dota_client).
+
+    Вход идёт ТОКЕНОМ, а не паролем, и это вынужденно. steam==1.4.4
+    логинится устаревшим сообщением — пароль открытым полем в
+    ClientLogon, — Valve этот путь отключила, и на верный пароль
+    приходит InvalidPassword. Нового механизма в библиотеке нет и не
+    будет: 1.4.4 — последняя версия на PyPI, в master та же строка.
+
+    Поэтому пароль на токен меняет Node (`make gc-token`), у которого
+    библиотека поддерживаемая, а сюда приезжает готовый токен. Всё
+    остальное — Game Coordinator, режимы замера, проверка соли на CDN —
+    осталось питоновским: переписывать работающий код ради чужой
+    сломанной аутентификации незачем.
     """
     try:
         from dota2.client import Dota2Client
@@ -133,10 +150,15 @@ def connect():
     except ImportError:
         die("нет библиотек steam/dota2 — сначала `make gc-venv`")
 
-    login = os.getenv("STEAM_BOT_LOGIN")
-    password = os.getenv("STEAM_BOT_PASSWORD")
-    if not login or not password:
-        die("нет STEAM_BOT_LOGIN / STEAM_BOT_PASSWORD в ~/manta-train.env")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from gc_token import (TokenError, check_expiry,  # noqa: E402
+                          login_with_token, read_token)
+
+    try:
+        token = read_token()
+        print(check_expiry(token))
+    except TokenError as exc:
+        die(str(exc))
 
     CREDENTIAL_DIR.mkdir(parents=True, exist_ok=True)
     CREDENTIAL_DIR.chmod(0o700)
@@ -145,10 +167,15 @@ def connect():
     steam.set_credential_location(str(CREDENTIAL_DIR))
     dota = Dota2Client(steam)
 
-    print(f"логин {login[:2]}*** …")     # имя не печатаем целиком
-    result = steam.cli_login(username=login, password=password)
+    print("вход по токену …")
+    result = login_with_token(steam, token)
     if result != 1:                       # EResult.OK
-        die(f"Steam отказал: {result!r}")
+        hint = ""
+        if int(result) == 5:              # InvalidPassword
+            hint = ("\nПри входе ТОКЕНОМ это значит, что токен отозван или "
+                    "просрочен, а не что пароль неверен.\n"
+                    "Обновить: make gc-token")
+        die(f"Steam отказал: {result!r}{hint}")
     print("Steam: вошли")
 
     dota.launch()
