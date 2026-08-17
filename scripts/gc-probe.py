@@ -125,6 +125,53 @@ def salt_is_real(url: str, timeout: float = 20.0) -> bool:
         return False
 
 
+# -- что ещё лежит в ответе, кроме соли -------------------------------------------
+
+# Поля игрока в CMsgDOTAMatch, из которых МОЖЕТ восстанавливаться ранг.
+# «Может» — потому что наличие поля в протоколе и его заполнение Valve в
+# ответе на чужой запрос это разные вещи, а протокол закрытый.
+RANK_FIELDS = ("previous_rank", "rank_change", "rank_tier_updated",
+               "search_rank", "mmr_type")
+
+
+def rank_report(match) -> dict[str, int]:
+    """Сколько игроков матча имеют НЕнулевое значение в ранговых полях.
+
+    Зачем это в замере соли. Сейчас ранг каждого игрока приезжает
+    бесплатно вместе с солью из /matches/{id} OpenDota, и на нём стоит
+    измерение точности отбора (`_observe` в sources/candidates.py):
+    правило берёт матч по двум известным рангам из десяти, и только факт
+    показывает, не набираем ли мы мусор. Если соль начнёт приходить из
+    GC, этот источник истины исчезнет — если только его не отдаёт сам GC.
+
+    Спрашивать это отдельным замером незачем: ответы уже получены, поля
+    уже в них, стоит проверка ноль запросов. А ответ меняет проект: при
+    заполненных рангах GC заменяет OpenDota полностью, при пустых —
+    придётся гнать выборку матчей через OpenDota ради одной лишь истины.
+    """
+    out = {name: 0 for name in RANK_FIELDS}
+    out["average_skill"] = int(getattr(match, "average_skill", 0) or 0)
+    for p in getattr(match, "players", []):
+        for name in RANK_FIELDS:
+            if int(getattr(p, name, 0) or 0):
+                out[name] += 1
+    return out
+
+
+def print_rank_report(match) -> None:
+    rep = rank_report(match)
+    print("\n  ранговые поля в ответе GC (игроков из 10 с ненулём):")
+    for name in RANK_FIELDS:
+        print(f"    {name:20} {rep[name]}")
+    print(f"    average_skill (на матч) {rep['average_skill']}"
+          "   # 0 — не задан, 1/2/3 — normal/high/very high")
+    if any(rep[n] for n in RANK_FIELDS):
+        print("    => ранг из GC ДОСТАЁТСЯ: OpenDota не нужен и ради истины")
+    else:
+        print("    => рангов в ответе нет: истину по рангам придётся брать")
+        print("       из OpenDota выборочно, иначе точность отбора ослепнет")
+
+
 # -- клиент -----------------------------------------------------------------------
 
 def connect():
@@ -240,6 +287,10 @@ def probe_details(match_ids: list[int], delay_s: float, limit: int) -> int:
                 else:
                     ok += 1
                     streak = 0
+                    # По первому же успешному матчу смотрим, отдаёт ли GC
+                    # ранги. Один раз: это свойство протокола, а не матча.
+                    if ok == 1:
+                        print_rank_report(resp.match)
                     # Первые пять проверяем на CDN: дальше смысла нет,
                     # соль либо работает, либо нет — это свойство пути,
                     # а не отдельного матча.
@@ -308,6 +359,7 @@ def probe_bulk(matches_requested: int, hero_id: int | None) -> int:
         print(f"  осталось:         {getattr(resp, 'results_remaining', '—')}")
 
         if with_salt:
+            print_rank_report(with_salt[0])
             url = replay_url_from_match(with_salt[0])
             good = salt_is_real(url)
             print(f"  соль первого матча подтверждена CDN: "
