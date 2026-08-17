@@ -15,7 +15,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 .PHONY: candidates-queue candidates-sql-test wp-rates-sql-test pytest-check
-.PHONY: gc-venv gc-probe
+.PHONY: gc-venv gc-probe gc-node gc-login-check
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
 
@@ -212,6 +212,16 @@ gc-venv:       ## Отдельное окружение для замера Game
 	@echo "готово: $(GC_VENV)"
 	@echo "дальше — логин и пароль бота в $(MANTA_TRAIN_ENV):"
 	@echo "  STEAM_BOT_LOGIN=... / STEAM_BOT_PASSWORD=..."
+
+gc-node:       ## Поставить steam-user для проверки входа новым путём
+	cd scripts/gc-node && npm install --silent --no-fund --no-audit
+	@echo "готово: scripts/gc-node/node_modules"
+
+gc-login-check: ## Пускает ли Steam НОВЫМ путём аутентификации (проверка гипотезы)
+	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
+	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
+	GC_STATE_DIR=$${GC_STATE_DIR:-$(HOME)/.manta-gc-node} \
+	node scripts/gc-node/login-check.mjs
 
 gc-probe:      ## Замер GC: ARGS=login | "details --limit 200" | bulk
 	@test -x $(GC_VENV)/bin/python || { echo "сначала make gc-venv"; exit 2; }
