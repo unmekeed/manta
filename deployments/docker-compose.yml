@@ -2,6 +2,45 @@
 # Облегчённые одноузловые версии всех хранилищ и брокера.
 name: manta
 
+x-collector-env:
+  # Настройки СБОРА, приходящие из окружения машины (спринт 143).
+  #
+  # Имена И УМОЛЧАНИЯ выведены из исходника коллектора, а не подобраны на
+  # глаз. Умолчание тут не украшение: `${VAR:-}` задаёт переменную ПУСТОЙ
+  # строкой, а это не то же самое, что «не задана». int("") падает с
+  # ValueError, то есть коллектор не стартовал бы вовсе.
+  #
+  # METRICS_PORT сюда НЕ входит намеренно: он у каждого сервиса свой, и
+  # общее значение занял бы первый стартовавший (инцидент 2026-07-27).
+  collector-env: &collector-env
+      BUDGET_RETRY_S: "${BUDGET_RETRY_S:-3600}"
+      CANDIDATES_LIMIT: "${CANDIDATES_LIMIT:-20}"
+      COLLECTOR_SHARD_COUNT: "${COLLECTOR_SHARD_COUNT:-1}"
+      COLLECTOR_SHARD_ID: "${COLLECTOR_SHARD_ID:-0}"
+      LEAGUE_BATCH: "${LEAGUE_BATCH:-8}"
+      LEAGUE_MAX_AGE_DAYS: "${LEAGUE_MAX_AGE_DAYS:-30}"
+      LEAGUE_TIERS: "${LEAGUE_TIERS:-premium,professional}"
+      OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
+      OPENDOTA_BURST_SLEEP_S: "${OPENDOTA_BURST_SLEEP_S:-90}"
+      OPENDOTA_LIMIT: "${OPENDOTA_LIMIT:-3}"
+      OPENDOTA_MIN_PATCH: "${OPENDOTA_MIN_PATCH:-}"
+      OPENDOTA_MIN_RANK: "${OPENDOTA_MIN_RANK:-80}"
+      STRATZ_API_TOKEN: "${STRATZ_API_TOKEN:-}"
+      STRATZ_BATCH_SIZE: "${STRATZ_BATCH_SIZE:-1}"
+      STRATZ_DETAIL_BUDGET: "${STRATZ_DETAIL_BUDGET:-}"
+      STRATZ_ID_LAG: "${STRATZ_ID_LAG:-90000}"
+      STRATZ_ID_LAG_MAX: "${STRATZ_ID_LAG_MAX:-400000}"
+      STRATZ_ID_LAG_MIN: "${STRATZ_ID_LAG_MIN:-30000}"
+      STRATZ_KILLS_CUMULATIVE: "${STRATZ_KILLS_CUMULATIVE:-}"
+      STRATZ_LIMIT: "${STRATZ_LIMIT:-40}"
+      STRATZ_MIN_PATCH: "${STRATZ_MIN_PATCH:-}"
+      STRATZ_MIN_RANK: "${STRATZ_MIN_RANK:-${OPENDOTA_MIN_RANK:-80}}"
+      STRATZ_QUOTA_FLOOR: "${STRATZ_QUOTA_FLOOR:-500}"
+      STRATZ_RETRY_ATTEMPTS: "${STRATZ_RETRY_ATTEMPTS:-3}"
+      STRATZ_SKIP_FRESHEST: "${STRATZ_SKIP_FRESHEST:-0}"
+      TIMELINE_DETAIL_BUDGET: "${TIMELINE_DETAIL_BUDGET:-}"
+      TIMELINE_LIMIT: "${TIMELINE_LIMIT:-30}"
+
 services:
   postgres:
     image: postgres:16
@@ -144,18 +183,6 @@ services:
       CLICKHOUSE_DB: manta
       CLICKHOUSE_USER: dota
       CLICKHOUSE_PASSWORD: ${MANTA_DB_PASSWORD:-dota_dev_password}
-      # Настройки МАШИНЫ, а не стенда (спринт 143). Дома сервисы живут
-      # процессами и читают ~/manta-train.env сами; в Docker его не видит
-      # никто, поэтому нужные переменные пробрасываются сюда.
-      #
-      # Без этого на VPS коллектор запускался с шардом по умолчанию (0 из
-      # 1, то есть «беру всё») и собирал ТЕ ЖЕ матчи, что домашние машины.
-      # Не отказ, не ошибка в логах — просто удвоенная работа и сожжённая
-      # квота, заметные только по счётчикам.
-      COLLECTOR_SHARD_ID: "${COLLECTOR_SHARD_ID:-0}"
-      COLLECTOR_SHARD_COUNT: "${COLLECTOR_SHARD_COUNT:-1}"
-      OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
-      STRATZ_API_TOKEN: "${STRATZ_API_TOKEN:-}"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
@@ -169,10 +196,12 @@ services:
       context: ..
       dockerfile: apps/data-collector/Dockerfile
     environment:
-      <<: *app-env
+      <<: [*app-env, *collector-env]
       COLLECTOR_SOURCE: opendota-public   # Immortal-паблики текущего патча
       COLLECTOR_INTERVAL_SECONDS: "60"
-      OPENDOTA_LIMIT: "3"
+      # OPENDOTA_LIMIT здесь БОЛЬШЕ НЕ ЗАДАЁТСЯ. Зашитая тройка молча
+      # перебивала значение из окружения машины: вписал 2 в свой файл —
+      # получил 3, и никакой ошибки. Умолчание живёт в самом коллекторе.
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
