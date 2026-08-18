@@ -194,9 +194,36 @@ check_ports() {
         return
     fi
 
+    # ПОРТЫ, КОТОРЫЕ ДЕРЖИМ МЫ САМИ, конфликтом не считаются.
+    #
+    # Скрипт идемпотентен: его гоняют повторно после сбоя и после git
+    # pull. На машине, где стек уже поднят, docker-proxy честно держит все
+    # тринадцать портов — это и есть желаемое состояние, а не помеха.
+    # Первая версия проверки об этом не знала и отказывалась работать на
+    # успешно развёрнутой машине. Ложная тревога хуже отсутствия проверки:
+    # она учит игнорировать себя.
+    local ours=""
+    if command -v docker >/dev/null && command -v python3 >/dev/null; then
+        ours=$($COMPOSE --profile apps --profile monitoring ps --format json 2>/dev/null |
+            python3 -c "import json,sys
+out=set()
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: rows=json.loads(line)
+    except ValueError: continue
+    for r in (rows if isinstance(rows,list) else [rows]):
+        for pub in (r.get('Publishers') or []):
+            if pub.get('PublishedPort'): out.add(str(pub['PublishedPort']))
+print(' '.join(sorted(out)))" 2>/dev/null)
+    fi
+
     local listening busy=""
     listening=$($lister 2>/dev/null)
     for port in $ports; do
+        if [ -n "$ours" ] && printf '%s\n' $ours | grep -qx "$port"; then
+            continue
+        fi
         # Ищем ИМЕННО этот порт на loopback или на всех адресах: строка
         # «:15432» не должна считаться занятым 5432.
         if printf '%s\n' "$listening" |
@@ -213,14 +240,19 @@ check_ports() {
 
     if [ -n "$busy" ]; then
         echo
-        echo "   Порты, нужные стеку, уже заняты:$busy"
+        echo "   Порты, нужные стеку, заняты ЧУЖИМИ процессами:$busy"
+        echo "   (порты собственных контейнеров Manta сюда не попадают)"
         echo "   Обычная причина — системная служба, поставленная образом"
         echo "   VPS. Посмотреть и выключить, если она не нужна:"
         echo "       ss -tlnp | grep -E ':($(echo "$busy" | tr ' ' '|' | sed 's/^|//'))\\b'"
         echo "       systemctl disable --now postgresql   # к примеру"
         die "конфликт портов — стек не поднимался, ничего не сломано"
     fi
-    ok "все $(printf '%s\n' "$ports" | grep -c .) портов свободны"
+    if [ -n "$ours" ]; then
+        ok "чужих процессов на наших портах нет ($(printf '%s\n' $ours | grep -c .) держит уже поднятый стек)"
+    else
+        ok "все $(printf '%s\n' "$ports" | grep -c .) портов свободны"
+    fi
 }
 
 build_images() {

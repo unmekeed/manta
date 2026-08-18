@@ -541,3 +541,105 @@ def test_port_check_runs_before_the_stack_starts():
     assert "check_ports" in src, "предполётная проверка портов не вызывается"
     assert src.index("check_ports") < src.index("up -d"), \
         "проверка портов идёт после подъёма стека"
+
+
+# -- свои порты не считаются конфликтом ------------------------------------------
+
+def run_check_ports_with_compose(tmp_path, listening_lines, our_ports):
+    """Прогнать check_ports со стабами ss И docker compose ps."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("grep", "bash", "sort", "tr", "sed", "head", "python3"):
+        w = shutil.which(tool)
+        link = bin_dir / tool
+        if w and not link.exists():
+            link.symlink_to(w)
+    body = "".join(f"printf '%s\\n' {shlex.quote(l)}\n" for l in listening_lines)
+    (bin_dir / "ss").write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+    (bin_dir / "ss").chmod(0o755)
+
+    pubs = ",".join('{"PublishedPort":%s,"URL":"127.0.0.1"}' % p for p in our_ports)
+    (bin_dir / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        f"""printf '%s\\n' '{{"Name":"manta-x","Publishers":[{pubs}]}}'\n""",
+        encoding="utf-8")
+    (bin_dir / "docker").chmod(0o755)
+
+    deploy = tmp_path / "deployments"
+    deploy.mkdir(exist_ok=True)
+    (deploy / "docker-compose.vps.yml").write_text(
+        (SCRIPT.parents[1] / "deployments" / "docker-compose.vps.yml"
+         ).read_text(encoding="utf-8"), encoding="utf-8")
+
+    harness = f"""
+set -uo pipefail
+export PATH="{bin_dir}"
+COMPOSE="docker compose"
+say()  {{ printf '\\n>> %s\\n' "$1"; }}
+ok()   {{ printf '   OK   %s\\n' "$1"; }}
+warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
+die()  {{ printf 'ОСТАНОВ: %s\\n' "$1" >&2; exit 1; }}
+{_functions("check_ports")}
+check_ports
+"""
+    proc = subprocess.run([shutil.which("bash"), "-c", harness],
+                          capture_output=True, text=True, cwd=tmp_path,
+                          env={"PATH": str(bin_dir)})
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+DOCKER_PROXY = [
+    'LISTEN 0 4096 127.0.0.1:%d 0.0.0.0:* users:(("docker-proxy",pid=1,fd=4))' % p
+    for p in (3000, 5432, 6379, 8080, 8123, 9000, 9092, 9500, 9501, 9600)]
+
+
+def test_own_running_stack_is_not_a_conflict(tmp_path):
+    """Порты, которые держит НАШ же стек, конфликтом не считаются.
+
+    Скрипт идемпотентен: его гоняют повторно после сбоя и после git pull.
+    На машине с уже поднятым стеком docker-proxy честно держит все порты
+    — это желаемое состояние, а не помеха. Первая версия проверки об этом
+    не знала и отказывалась работать на успешно развёрнутой машине.
+
+    Ложная тревога хуже отсутствия проверки: она учит игнорировать себя.
+    """
+    ours = [3000, 5432, 6379, 8080, 8123, 9000, 9092, 9500, 9501, 9600]
+    rc, out = run_check_ports_with_compose(tmp_path, DOCKER_PROXY, ours)
+    assert rc == 0, out
+    assert "ОСТАНОВ" not in out
+
+
+def test_foreign_process_is_still_a_conflict(tmp_path):
+    """Чужой процесс на нашем порту остаётся конфликтом.
+
+    Послабление ради идемпотентности не должно превратить проверку в
+    декорацию: порт, которого нет среди опубликованных нашим стеком,
+    по-прежнему обязан останавливать установку.
+    """
+    rc, out = run_check_ports_with_compose(
+        tmp_path,
+        ['LISTEN 0 244 127.0.0.1:5432 0.0.0.0:* users:(("postgres",pid=9,fd=6))'],
+        our_ports=[3000])          # 5432 наш стек НЕ публикует
+    assert rc != 0, out
+    assert "5432" in out
+
+
+def test_own_port_match_is_exact_not_substring(tmp_path):
+    """«Свой» порт сравнивается ЦЕЛИКОМ, а не как подстрока.
+
+    Сегодня среди тринадцати наших портов ни один не является подстрокой
+    другого, поэтому неточное сравнение ничего не ломает — и мутация,
+    заменяющая `grep -qx` на `grep -q`, проходит незамеченной. Это
+    свойство СПИСКА, а не кода: добавь порт 500 рядом с 9500 или 3 рядом
+    с 3000 — и чужой процесс начнёт молча считаться своим.
+
+    Здесь проверяется само сравнение: стек «публикует» 15432, а чужой
+    процесс сидит на 5432. При поиске подстроки 5432 нашлось бы внутри
+    15432, и конфликт был бы пропущен.
+    """
+    rc, out = run_check_ports_with_compose(
+        tmp_path,
+        ['LISTEN 0 244 127.0.0.1:5432 0.0.0.0:* users:(("чужой",pid=9,fd=6))'],
+        our_ports=[15432])
+    assert rc != 0, f"чужой порт принят за свой по подстроке:\n{out}"
+    assert "5432" in out
