@@ -1,7 +1,12 @@
-// Мини-карта смертей-ошибок (C6): стилизованная схема карты Dota (без
-// ассетов Valve) — половины Radiant/Dire, диагональная река, точки смертей.
+// Мини-карта смертей-ошибок (C6): точки смертей поверх подложки карты.
+//
+// Со спринта 139 подложка — настоящая карта 7.41, общая с тепловыми
+// картами (MapFrame). Раньше схема была скопирована в оба компонента.
+//
 // Координаты приходят из отчёта в долях карты, (0,0) — юго-запад; SVG
-// рисует сверху вниз, поэтому y инвертируется.
+// рисует сверху вниз, поэтому y инвертируется здесь, при отрисовке.
+
+import MapFrame from "./MapFrame";
 
 export interface DeathPoint {
   x: number;
@@ -12,7 +17,13 @@ export interface DeathPoint {
 
 const S = 100; // сторона viewBox
 
-export default function DeathMap({ deaths }: { deaths: DeathPoint[] }) {
+export default function DeathMap({
+  deaths,
+  calibrate = false,
+}: {
+  deaths: DeathPoint[];
+  calibrate?: boolean;
+}) {
   return (
     <svg
       className="death-map map-frame"
@@ -20,16 +31,7 @@ export default function DeathMap({ deaths }: { deaths: DeathPoint[] }) {
       role="img"
       aria-label="Карта смертей"
     >
-      {/* половины карты: юго-запад — Radiant, северо-восток — Dire */}
-      <polygon points={`0,${S} ${S},${S} 0,0`} className="half radiant" />
-      <polygon points={`${S},0 ${S},${S} 0,0`} className="half dire" />
-      {/* река по диагонали северо-запад → юго-восток */}
-      <line x1={0} y1={0} x2={S} y2={S} className="river" />
-      {/* линии для ориентира */}
-      <line x1={4} y1={96} x2={96} y2={96} className="lane" />
-      <line x1={4} y1={96} x2={4} y2={4} className="lane" />
-      <line x1={4} y1={4} x2={96} y2={4} className="lane" />
-      <line x1={96} y1={96} x2={96} y2={4} className="lane" />
+      <MapFrame S={S} calibrate={calibrate} />
 
       {deaths.map((d, i) => (
         <circle

@@ -89,6 +89,29 @@ jobs:
           pip install pytest grpcio
           pytest libs/tests -q
 
+  frontend-test:
+    # Фронт до спринта 139 не проверялся вовсе. Появился повод: подложка
+    # карты держит СВОЮ копию границ карты (фронт не может импортировать
+    # libs/dota_map.py), а копия расходится с оригиналом не падением, а
+    # кривым наложением — метки лягут мимо, и никто не узнает.
+    #
+    # Сборку тоже гоняем: tsc -b ловит рассогласование пропсов, которое
+    # тесты компонентов сами по себе не увидят.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
   cpp-parser:
     runs-on: ubuntu-latest
     steps:

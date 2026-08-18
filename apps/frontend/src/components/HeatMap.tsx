@@ -1,14 +1,21 @@
-// Тепловая карта матча (спринт 111): сетка 32×32 поверх той же
-// стилизованной схемы карты, что у DeathMap — половины Radiant/Dire и
-// река по диагонали, без ассетов Valve.
+// Тепловая карта матча (спринт 111): сетка 32×32 поверх подложки карты.
+//
+// Со спринта 139 подложка — настоящая карта 7.41, общая с картой
+// смертей, и живёт в MapFrame. Раньше схема была скопирована в оба
+// компонента, а границы карты задавались в проекте тремя разными
+// числами; под общей подложкой такое расхождение стало бы видно глазом.
 //
 // Клетки приходят разреженно: [gx, gy, n]. Пустые не рисуются вовсе —
 // это и есть «там никого не было», рисовать их прозрачными смысла нет.
 //
-// Ось Y инвертируется, как в DeathMap: агрегат считает (0,0) юго-западом
-// (база Radiant), а SVG рисует сверху вниз. Перепутать здесь особенно
-// легко и особенно дорого — карта получится правдоподобной, просто
-// зеркальной, и заметить это можно только зная, где обычно фармят.
+// Ось Y инвертируется: агрегат считает (0,0) юго-западом (база Radiant),
+// а SVG рисует сверху вниз. Переворот делается ЗДЕСЬ и только здесь —
+// в coords.ts единичное пространство остаётся с началом на юго-западе.
+// Перепутать особенно легко и особенно дорого: карта получится
+// правдоподобной, просто зеркальной, и заметить это можно только зная,
+// где обычно фармят.
+
+import MapFrame from "./MapFrame";
 
 export type Cell = [number, number, number]; // gx, gy, n
 
@@ -27,6 +34,10 @@ export interface HeatMapProps {
   grid: number;
   /** Какие стороны показывать; обе — наложением. */
   show: { radiant: boolean; dire: boolean };
+  /** Сетка и оси поверх подложки — чтобы сверить совмещение. */
+  calibrate?: boolean;
+  /** Масштаб подложки; прокидывается из панели при калибровке. */
+  fraction?: number;
 }
 
 function cells(list: Cell[], maxN: number, grid: number, cls: string) {
@@ -55,6 +66,8 @@ export default function HeatMap({
   maxN,
   grid,
   show,
+  calibrate = false,
+  fraction,
 }: HeatMapProps) {
   return (
     <svg
@@ -63,14 +76,7 @@ export default function HeatMap({
       role="img"
       aria-label="Тепловая карта"
     >
-      <polygon points={`0,${S} ${S},${S} 0,0`} className="half radiant" />
-      <polygon points={`${S},0 ${S},${S} 0,0`} className="half dire" />
-      <line x1={0} y1={0} x2={S} y2={S} className="river" />
-      <line x1={4} y1={96} x2={96} y2={96} className="lane" />
-      <line x1={4} y1={96} x2={4} y2={4} className="lane" />
-      <line x1={4} y1={4} x2={96} y2={4} className="lane" />
-      <line x1={96} y1={96} x2={96} y2={4} className="lane" />
-
+      <MapFrame S={S} calibrate={calibrate} grid={grid} fraction={fraction} />
       {show.radiant && cells(radiant, maxN, grid, "r")}
       {show.dire && cells(dire, maxN, grid, "d")}
     </svg>

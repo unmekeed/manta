@@ -6,4 +6,10 @@ export default defineConfig({
   plugins: [react()],
   server: { proxy: { "/api": "http://localhost:8080" } },
   preview: { proxy: { "/api": "http://localhost:8080" } },
+  test: {
+    // jsdom, а не node: подложка карты проверяется через отрисовку —
+    // подменять её заглушкой значило бы проверять заглушку.
+    environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
+  },
 });

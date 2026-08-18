@@ -9,6 +9,7 @@
 import { useState } from "react";
 
 import HeatMap, { type Cell } from "./HeatMap";
+import { storeFraction, storedFraction } from "../map/coords";
 import type { HeatmapKind, Heatmaps, HeatmapPhase } from "../lib/api";
 
 const PHASES: { key: HeatmapPhase; label: string }[] = [
@@ -30,6 +31,10 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
   const [phase, setPhase] = useState<HeatmapPhase>("early");
   const [kind, setKind] = useState<HeatmapKind>("presence");
   const [sides, setSides] = useState({ radiant: true, dire: true });
+  // Калибровка выключена по умолчанию: она нужна, чтобы ПРОВЕРИТЬ
+  // совмещение подложки с метками, а не чтобы смотреть карту каждый день.
+  const [calibrate, setCalibrate] = useState(false);
+  const [fraction, setFraction] = useState(storedFraction);
 
   // Матч без координат — это НЕ пустая карта. У JSON-матчей (источник
   // opendota_timeline) позиций нет в принципе, и молча показать пустое
@@ -94,6 +99,8 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
           maxN={block?.max_n ?? 0}
           grid={maps.grid}
           show={sides}
+          calibrate={calibrate}
+          fraction={fraction}
         />
         <div className="heat-legend">
           <label>
@@ -116,6 +123,44 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
             />
             <span className="swatch d" /> Dire
           </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={calibrate}
+              onChange={(e) => setCalibrate(e.target.checked)}
+            />
+            Калибровка
+          </label>
+          {calibrate && (
+            <div className="calibrate-box">
+              <label className="cal-slider">
+                Масштаб подложки
+                <input
+                  type="range"
+                  min={0.6}
+                  max={1.1}
+                  step={0.005}
+                  value={fraction}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setFraction(v);
+                    storeFraction(v);
+                  }}
+                />
+                <code>{fraction.toFixed(3)}</code>
+              </label>
+              <p className="muted">
+                Центр подложки измерен по симметрии карты и не двигается;
+                неизвестен только масштаб — по самой картинке он не
+                определяется, потому что скриншот захватывает и заграничные
+                скалы. Сверять надо не сетку, а МЕТКИ: варды у Рошана
+                обязаны лечь на яму Рошана, смерти на линии — на линию,
+                фарм — в лес, а не на реку. Подобранное значение
+                сохраняется в браузере; чтобы оно стало общим для всех,
+                пропишите его в PLAYABLE_FRACTION (src/map/coords.ts).
+              </p>
+            </div>
+          )}
           {block ? (
             <p className="muted">
               Насыщенность — доля от максимума ({block.max_n} в клетке).
