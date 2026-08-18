@@ -643,3 +643,126 @@ def test_own_port_match_is_exact_not_substring(tmp_path):
         our_ports=[15432])
     assert rc != 0, f"чужой порт принят за свой по подстроке:\n{out}"
     assert "5432" in out
+
+
+# -- контейнеры действительно работают -------------------------------------------
+
+def run_verify(tmp_path, containers):
+    """Прогнать verify_running со стабом docker.
+
+    containers: [(имя, состояние, число перезапусков)].
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("grep", "bash", "sed", "sleep"):
+        w = shutil.which(tool)
+        link = bin_dir / tool
+        if w and not link.exists():
+            link.symlink_to(w)
+
+    names = "\n".join(n for n, _, _ in containers)
+    # docker inspect -f ФОРМАТ ИМЯ  ->  $1=inspect $2=-f $3=формат $4=имя.
+    # Первая версия стаба искала имя в $3 и формат в $2 — и отвечала
+    # пустотой на всё, отчего проверка считала контейнеры живыми.
+    cases = "".join(
+        f'''  if [ "$4" = "{n}" ]; then
+    case "$3" in
+      *Status*) printf '%s\\n' "{st}" ;;
+      *RestartCount*) printf '%s\\n' "{rc}" ;;
+    esac
+    exit 0
+  fi\n''' for n, st, rc in containers)
+    (bin_dir / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "ps" ]; then\n'
+        f'  printf "%s\\n" "{names}"\n  exit 0\nfi\n'
+        'if [ "$1" = "inspect" ]; then\n'
+        f"{cases}"
+        '  exit 1\nfi\n'
+        'if [ "$1" = "logs" ]; then printf "строка лога\\n"; exit 0; fi\n'
+        "exit 0\n", encoding="utf-8")
+    (bin_dir / "docker").chmod(0o755)
+
+    harness = f"""
+set -uo pipefail
+export PATH="{bin_dir}"
+VERIFY_GRACE_S=0
+say()  {{ printf '\\n>> %s\\n' "$1"; }}
+ok()   {{ printf '   OK   %s\\n' "$1"; }}
+warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
+die()  {{ printf 'ОСТАНОВ: %s\\n' "$1" >&2; exit 1; }}
+{_functions("verify_running")}
+verify_running
+"""
+    proc = subprocess.run([shutil.which("bash"), "-c", harness],
+                          capture_output=True, text=True,
+                          env={"PATH": str(bin_dir)})
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_all_running_passes(tmp_path):
+    rc, out = run_verify(tmp_path, [("manta-a", "running", "0"),
+                                    ("manta-b", "running", "1")])
+    assert rc == 0, out
+    assert "все контейнеры работают" in out
+
+
+def test_restarting_container_fails_the_install(tmp_path):
+    """Перезапускающийся контейнер — это НЕ «Готово».
+
+    `compose up -d` возвращает успех, как только контейнеры созданы.
+    Упавший через секунду сервис под restart: unless-stopped уходит в
+    бесконечный цикл, а установка рапортует об успехе. Ровно так и вышло
+    на живой машине: семь коллекторов подняты, один крутится по кругу,
+    скрипт вышел с нулём.
+    """
+    rc, out = run_verify(tmp_path, [("manta-a", "running", "0"),
+                                    ("manta-timeline-collector-1", "restarting", "9")])
+    assert rc != 0, out
+    assert "manta-timeline-collector-1" in out
+    assert "НЕ готов" in out
+
+
+def test_failed_container_logs_are_shown(tmp_path):
+    """Показаны последние строки лога упавшего.
+
+    Иначе диагностика начинается с отдельного похода за `docker logs`, а
+    имя контейнера ещё надо угадать среди четырнадцати.
+    """
+    rc, out = run_verify(tmp_path, [("manta-x", "exited", "0")])
+    assert "строка лога" in out
+
+
+def test_exited_container_is_not_ignored(tmp_path):
+    """Молча вышедший контейнер — тоже отказ.
+
+    Он не перезапускается и потому не бросается в глаза, но сервиса нет.
+    """
+    rc, out = run_verify(tmp_path, [("manta-x", "exited", "0")])
+    assert rc != 0
+
+
+def test_survivor_with_many_restarts_is_reported_but_not_fatal(tmp_path):
+    """Пережил перезапуски, но сейчас жив — предупреждение, не отказ.
+
+    Kafka и ClickHouse честно перезапускаются на старте, пока ждут
+    соседей. Считать это провалом значило бы ронять установку на
+    нормальном поведении.
+    """
+    rc, out = run_verify(tmp_path, [("manta-kafka-1", "running", "5")])
+    assert rc == 0, out
+    assert "перезапускался" in out
+
+
+def test_verification_actually_runs_at_the_end_of_the_stack_step():
+    """verify_running ВЫЗЫВАЕТСЯ, и после миграций.
+
+    Безупречная функция, которую никто не зовёт, — это отсутствующая
+    функция. А до миграций звать её нельзя: сервисы, которым нужна
+    схема, честно перезапускаются, пока её нет, и проверка объявила бы
+    отказом нормальный порядок вещей.
+    """
+    src = _functions("start_stack")
+    assert "verify_running" in src, "проверка живости не вызывается"
+    assert src.index("migrate") < src.index("verify_running"), \
+        "проверка живости идёт до миграций"

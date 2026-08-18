@@ -255,6 +255,56 @@ print(' '.join(sorted(out)))" 2>/dev/null)
     fi
 }
 
+verify_running() {
+    say "контейнеры живут, а не перезапускаются"
+
+    # ЗАЧЕМ. `compose up -d` возвращает успех, как только контейнеры
+    # СОЗДАНЫ. Упавший через секунду сервис под `restart: unless-stopped`
+    # уходит в бесконечный цикл перезапусков — и установка при этом
+    # рапортует «Готово».
+    #
+    # Так и вышло на живой машине: семь коллекторов подняты, один из них
+    # перезапускается по кругу, а скрипт уже напечатал итог и вышел с
+    # нулём. Про такую поломку узнают, когда заметят, что данные не
+    # приходят.
+    #
+    # Ждём осознанно: сервисам нужно время на старт, и мгновенная
+    # проверка объявила бы падением обычную инициализацию.
+    local grace="${VERIFY_GRACE_S:-25}"
+    printf '   даю %s с на старт...\n' "$grace"
+    sleep "$grace"
+
+    local bad=""
+    for name in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^manta-'); do
+        local state restarts
+        state=$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null)
+        restarts=$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null)
+        case "$state" in
+            running)
+                # Перезапуски бывают и у выживших: важно, что сейчас жив.
+                [ "${restarts:-0}" -gt 3 ] && \
+                    warn "$name живёт, но перезапускался $restarts раз"
+                ;;
+            restarting|exited|dead)
+                bad="$bad $name"
+                warn "$name: состояние $state, перезапусков ${restarts:-?}"
+                ;;
+        esac
+    done
+
+    if [ -n "$bad" ]; then
+        echo
+        echo "   Не работают:$bad"
+        echo "   Последние строки каждого:"
+        for name in $bad; do
+            echo "   --- $name"
+            docker logs --tail 12 "$name" 2>&1 | sed 's/^/       /'
+        done
+        die "часть сервисов не поднялась — стек НЕ готов к работе"
+    fi
+    ok "все контейнеры работают"
+}
+
 build_images() {
     say "сборка образов (по одному)"
 
@@ -390,6 +440,8 @@ start_stack() {
     say "миграции"
     ./scripts/pg-migrate.sh && ./scripts/ch-migrate.sh || die "миграции не прошли"
     ok "миграции применены"
+
+    verify_running
 }
 
 # -- 6. расписание -------------------------------------------------------------
