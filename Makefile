@@ -18,7 +18,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
-.PHONY: backup-drill heartbeat tg-test map-calibrate
+.PHONY: backup-drill heartbeat tg-test map-calibrate farm-core-backfill
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -254,6 +254,10 @@ collect-report: ## Почему упал темп сбора + покрытие 
 
 backfill:      ## Пересчёт фич по сохранённому JSON, без вызовов API: ARGS="--limit 50"
 	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs python3 -m collector.backfill $(ARGS)
+
+farm-core-backfill: ## Досчитать farm_core на старых матчах: ARGS="--dry-run"
+	cd apps/feature-extractor && PYTHONPATH=src:$(CURDIR)/libs \
+		python3 tools/backfill_farm_core.py $(ARGS)
 
 ranks-harvest: ## Посеять кэш рангов из сохранённого JSON в MinIO, без вызовов API
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh harvest $(ARGS)

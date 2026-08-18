@@ -186,6 +186,29 @@ def test_cores_use_the_last_sample_not_the_first():
     assert {f"h{i}" for i in (1, 2, 3)} <= cores
 
 
+def test_no_last_hits_at_all_means_no_cores():
+    """Про добитки ничего не известно — коров НЕТ, а не первые трое.
+
+    Сортировка нулей молча выбрала бы первых троих по номеру слота, и
+    это выглядело бы как честный отбор коров. По такой карте потом
+    читают, где фармит керри.
+
+    Случай не выдуманный: досчёт farm_core на старых матчах ходит в
+    EconomyTimeline отдельным запросом, и пустой ответ там возможен.
+    """
+    assert core_heroes([], TEAMS_5V5, HEROES_5V5) == set()
+    zeros = _economy([(i, 0) for i in range(10)])
+    assert core_heroes(zeros, TEAMS_5V5, HEROES_5V5) == set()
+
+
+def test_team_without_last_hits_is_skipped_not_guessed():
+    """Нет данных у ОДНОЙ стороны — коров нет только у неё."""
+    lh = [(0, 300), (1, 250), (2, 200), (3, 40), (4, 20)] + \
+         [(i, 0) for i in range(5, 10)]
+    cores = core_heroes(_economy(lh), TEAMS_5V5, HEROES_5V5)
+    assert cores == {f"h{i}" for i in (0, 1, 2)}
+
+
 def test_core_ranking_is_stable_when_last_hits_tie():
     """Одинаковые добитки не должны давать РАЗНЫЕ карты при переразборе.
 
