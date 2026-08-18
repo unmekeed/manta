@@ -19,7 +19,11 @@ ClickHouse отвечает — и встало на
 поэтому хостовые не нужны никому.
 """
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 MIGRATORS = sorted(SCRIPTS.glob("*-migrate.sh"))
@@ -109,3 +113,84 @@ def test_every_migrator_says_so_when_the_container_is_missing():
         code = code_of(path)
         assert "docker ps" in code, \
             f"{path.name}: не проверяет, что контейнер вообще запущен"
+
+
+# -- пароль из файла секретов ----------------------------------------------------
+
+def run_migrator_env(tmp_path, script: Path, train_env: str, preset: dict):
+    """Прогнать начало мигратора и напечатать, какие пароли он взял.
+
+    Исполняется настоящий код скрипта до первого обращения к docker:
+    сам docker подменён заглушкой, которая сразу сообщает, что контейнера
+    нет, — до запросов дело не доходит, а переменные уже разобраны.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("grep", "bash", "sort", "tr", "sed", "head", "cat"):
+        w = shutil.which(tool)
+        link = bin_dir / tool
+        if w and not link.exists():
+            link.symlink_to(w)
+    (bin_dir / "docker").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (bin_dir / "docker").chmod(0o755)
+
+    env_file = tmp_path / "train.env"
+    env_file.write_text(train_env, encoding="utf-8")
+
+    # Берём из скрипта всё до первой команды docker ps — там разбор
+    # переменных и заканчивается.
+    src = script.read_text(encoding="utf-8")
+    head = src.split("docker ps")[0]
+    harness = head + '\nprintf "CH=%s PG=%s\\n" "${CLICKHOUSE_PASSWORD:-}" "${POSTGRES_PASSWORD:-}"\n'
+    proc = subprocess.run(
+        [shutil.which("bash"), "-c", harness],
+        capture_output=True, text=True, cwd=script.parents[1],
+        env={"PATH": str(bin_dir), "HOME": str(tmp_path),
+             "MANTA_TRAIN_ENV": str(env_file), **preset})
+    return proc.stdout + proc.stderr
+
+
+SECRETS = "CLICKHOUSE_PASSWORD=изфайла\nPOSTGRES_PASSWORD=изфайла\n"
+
+
+@pytest.mark.parametrize("name", [m.name for m in MIGRATORS])
+def test_password_is_taken_from_the_secrets_file(tmp_path, name):
+    """Мигратор берёт пароль из ~/manta-train.env.
+
+    Без этого он молча подставлял дев-умолчание из репозитория — то есть
+    заведомо неверный пароль на машине, где секрет сгенерирован при
+    установке. На домашней машине не всплывало никогда: там дев-умолчание
+    и есть настоящий пароль.
+
+    Вскрылось на VPS, причём ПОСЛЕ того, как миграции Postgres прошли:
+    psql ходит через unix-сокет, где в образе стоит trust, и пароль там
+    не проверялся вовсе. Совпадение, а не исправность.
+    """
+    out = run_migrator_env(tmp_path, SCRIPTS / name, SECRETS, {})
+    assert "изфайла" in out, out
+
+
+@pytest.mark.parametrize("name", [m.name for m in MIGRATORS])
+def test_explicit_environment_wins_over_the_file(tmp_path, name):
+    """Явно переданный пароль НЕ затирается файлом.
+
+    Учения по восстановлению передают свой пароль временным базам
+    (backup-drill.sh). Подмена его боевым увела бы миграции не туда — и
+    это ровно та ошибка, ради защиты от которой учения и заводились.
+    """
+    out = run_migrator_env(tmp_path, SCRIPTS / name, SECRETS,
+                           {"CLICKHOUSE_PASSWORD": "учебный",
+                            "POSTGRES_PASSWORD": "учебный"})
+    assert "изфайла" not in out, out
+    assert "учебный" in out, out
+
+
+@pytest.mark.parametrize("name", [m.name for m in MIGRATORS])
+def test_missing_secrets_file_is_not_a_crash(tmp_path, name):
+    """Файла нет — работаем на умолчаниях, а не падаем.
+
+    Домашняя машина и CI живут без него.
+    """
+    (tmp_path / "train.env").unlink(missing_ok=True)
+    out = run_migrator_env(tmp_path, SCRIPTS / name, "", {})
+    assert "CH=" in out, out
