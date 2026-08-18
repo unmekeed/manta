@@ -262,11 +262,22 @@ def vision_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
 
 # -- Площадь под обзором (волна 1 каталога, спринт 90) ------------------------
 
-# Координаты вардов OpenDota — клетки карты; игровая часть укладывается
-# примерно в квадрат 64..192 по обеим осям.
-MAP_MIN, MAP_MAX = 64, 192
-# Радиус обзора обс-варда: 1600 игровых юнитов при ~130 юнитах на клетку.
-WARD_VISION_CELLS = 12.5
+# Границы карты и переводы координат — из общего модуля libs/dota_map.py.
+# До спринта 139 они жили здесь своей копией (64..192), в mapcells.py —
+# другой (MAP_HALF = 8000), и системы расходились на 2.4%. Под общей
+# подложкой это развело бы тепловые пятна и варды на глаз.
+#
+# Заодно выяснилось, КТО был неправ: радиус обзора ниже выведен из 1600
+# игровых юнитов, и при шаге клетки 128 он даёт ровно 12.5 — то есть
+# клеточная система была согласована с ±8192, а 8000 в mapcells не
+# следовало ниоткуда.
+from dota_map import CELL_MAX, CELL_MIN, UNITS_PER_CELL, cell_to_unit, unit_to_grid
+
+MAP_MIN, MAP_MAX = CELL_MIN, CELL_MAX
+# Радиус обзора обс-варда в игровых юнитах — это игровая константа, а не
+# свойство нашей сетки. В клетки он переводится, а не записывается.
+WARD_VISION_UNITS = 1600.0
+WARD_VISION_CELLS = WARD_VISION_UNITS / UNITS_PER_CELL
 # Сторона растровой сетки. 64 даёт клетку примерно в две карт-клетки:
 # мельче — квадратичный рост стоимости бэкфилла на тысячах матчей,
 # крупнее — варды в одном лесу перестают отличаться от разнесённых.
@@ -297,10 +308,8 @@ def _covered(wards: tuple, grid: int = VISION_GRID) -> int:
     не различает и счётчик obs_wards_diff.
     """
     cells: set[tuple[int, int]] = set()
-    span = MAP_MAX - MAP_MIN
     for x, y in wards:
-        gx = int((x - MAP_MIN) / span * grid)
-        gy = int((y - MAP_MIN) / span * grid)
+        gx, gy = unit_to_grid(*cell_to_unit(x, y), grid)
         for dx, dy in _DISC:
             cx, cy = gx + dx, gy + dy
             if 0 <= cx < grid and 0 <= cy < grid:

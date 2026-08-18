@@ -18,7 +18,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
-.PHONY: backup-drill heartbeat tg-test
+.PHONY: backup-drill heartbeat tg-test map-calibrate
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -295,6 +295,9 @@ backup:        ## Слепок датасета в MANTA_BACKUP_DIR с рота�
 
 backup-drill:  ## УЧЕНИЯ: восстановить слепок во ВРЕМЕННЫЕ базы и сверить строки
 	./scripts/backup-drill.sh $(ARGS)
+
+map-calibrate: ## Замерить настоящие границы карты по своим данным (спринт 139)
+	PYTHONPATH=libs python3 tools/map-calibrate.py
 
 heartbeat:     ## Сторож: состояние одним сообщением в Telegram (для cron)
 	./scripts/heartbeat.sh

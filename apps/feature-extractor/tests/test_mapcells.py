@@ -9,8 +9,15 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "libs"))
 
-from extractor.mapcells import (GRID, MAP_HALF,  # noqa: E402
+# Граница карты берётся из общего модуля, а не из mapcells: у величины
+# должно быть ОДНО имя и одно место. Раньше mapcells держал собственную
+# WORLD_HALF = 8000, скопированную из нормировки диагонали, — и именно так
+# в проекте завелись три несогласованных представления карты.
+from dota_map import WORLD_HALF  # noqa: E402
+
+from extractor.mapcells import (GRID,  # noqa: E402
                                 build_cells, cell, phase_of)
 
 HERO_TEAM = {"npc_dota_hero_axe": 2, "npc_dota_hero_lina": 3}
@@ -30,13 +37,13 @@ def test_phase_boundaries():
 
 
 def test_cell_maps_corners_and_centre():
-    assert cell(-MAP_HALF, -MAP_HALF) == (0, 0)
-    assert cell(MAP_HALF, MAP_HALF) == (GRID - 1, GRID - 1)
+    assert cell(-WORLD_HALF, -WORLD_HALF) == (0, 0)
+    assert cell(WORLD_HALF, WORLD_HALF) == (GRID - 1, GRID - 1)
     assert cell(0, 0) == (GRID // 2, GRID // 2)
 
 
 def test_cell_rejects_out_of_map_and_nan():
-    assert cell(MAP_HALF * 2, 0) is None
+    assert cell(WORLD_HALF * 2, 0) is None
     assert cell(float("nan"), 0) is None
     assert cell(None, 0) is None
     assert cell("нет", 0) is None

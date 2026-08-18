@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import math
 
+from dota_map import in_bounds, unit_to_grid, world_to_unit
+
 from .features import FIGHT_R, _normalize_hero
 
 # Сторона квадратной сетки. 32 даёт клетку примерно 500 игровых единиц —
@@ -31,9 +33,15 @@ from .features import FIGHT_R, _normalize_hero
 # десятках матчей и тяжелеет квадратично. Крупнее: лес перестаёт
 # отличаться от линии, а именно это различие карта и должна показывать.
 GRID = 32
-# Половина стороны игровой карты в юнитах (совпадает с MAP_HALF_DIAG,
-# по которому нормируются позиционные фичи).
-MAP_HALF = 8000.0
+# Границы карты и переводы координат живут в libs/dota_map.py — одном
+# месте на весь проект.
+#
+# Раньше здесь стояло MAP_HALF = 8000.0 с комментарием «совпадает с
+# MAP_HALF_DIAG, по которому нормируются позиционные фичи». Это была
+# ошибка: MAP_HALF_DIAG — половина ДИАГОНАЛИ, а тут нужна половина
+# СТОРОНЫ, и отличаются они в √2 раз. Пока тепловая карта рисовалась
+# своей самодельной схемой, расхождение было незаметно; под общей
+# подложкой оно разъедет тепловые пятна и варды.
 
 # Границы фаз в игровых секундах. По времени, а не по доле матча:
 # 10-я минута значит одно и то же в игре на 25 и на 60 минут.
@@ -62,11 +70,9 @@ def cell(x, y) -> tuple[int, int] | None:
         return None
     if math.isnan(fx) or math.isnan(fy):
         return None
-    if abs(fx) > MAP_HALF or abs(fy) > MAP_HALF:
+    if not in_bounds(fx, fy):
         return None
-    gx = int((fx + MAP_HALF) / (2 * MAP_HALF) * GRID)
-    gy = int((fy + MAP_HALF) / (2 * MAP_HALF) * GRID)
-    return min(gx, GRID - 1), min(gy, GRID - 1)
+    return unit_to_grid(*world_to_unit(fx, fy), GRID)
 
 
 def _add(acc: dict, phase: str, team: int, kind: str, pos) -> None:

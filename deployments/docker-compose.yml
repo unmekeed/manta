@@ -148,7 +148,10 @@ services:
 
   data-collector:
     profiles: ["apps"]
-    build: ../apps/data-collector
+    # Контекст сборки — КОРЕНЬ монорепо: образу нужен libs/ (см. Dockerfile).
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
     environment:
       <<: *app-env
       COLLECTOR_SOURCE: opendota-public   # Immortal-паблики текущего патча
@@ -175,7 +178,10 @@ services:
 
   feature-extractor:
     profiles: ["apps"]
-    build: ../apps/feature-extractor
+    # Контекст сборки — КОРЕНЬ монорепо: образу нужен libs/ (см. Dockerfile).
+    build:
+      context: ..
+      dockerfile: apps/feature-extractor/Dockerfile
     environment: *app-env
     depends_on:
       kafka: { condition: service_healthy }
@@ -184,7 +190,10 @@ services:
 
   ml-service:
     profiles: ["apps"]
-    build: ../apps/ml-service
+    # Контекст сборки — КОРЕНЬ монорепо: образу нужен libs/ (см. Dockerfile).
+    build:
+      context: ..
+      dockerfile: apps/ml-service/Dockerfile
     command: ["-m", "app"]
     environment:
       <<: *app-env
@@ -197,7 +206,10 @@ services:
 
   ml-autotrain:
     profiles: ["apps"]
-    build: ../apps/ml-service
+    # Контекст сборки — КОРЕНЬ монорепо: образу нужен libs/ (см. Dockerfile).
+    build:
+      context: ..
+      dockerfile: apps/ml-service/Dockerfile
     command: ["-m", "training.auto"]
     environment:
       <<: *app-env
