@@ -360,3 +360,81 @@ def test_go_image_copies_every_replace_target(mod):
         assert any(str(target).startswith(c.rstrip("/")) or
                    c.rstrip("/").startswith(str(target)) for c in copies), \
             f"{d.name}: {target} не копируется в образ (COPY: {copies})"
+
+
+# -- зависимости самих модулей libs (спринт 143) ----------------------------------
+
+# Имя импорта не всегда равно имени пакета. Словарь маленький и ведётся
+# руками СОЗНАТЕЛЬНО: вывести соответствие неоткуда, зато забытая пара
+# ловится сразу — тест не найдёт пакет в requirements и упадёт.
+IMPORT_TO_PACKAGE = {
+    "grpc": "grpcio",
+    "yaml": "PyYAML",
+    "sklearn": "scikit-learn",
+}
+STDLIB_HINT = {
+    "__future__", "logging", "os", "sys", "json", "math", "re", "time",
+    "typing", "pathlib", "dataclasses", "datetime", "collections", "bisect",
+    "itertools", "functools", "subprocess", "hashlib", "random", "shutil",
+}
+
+
+def libs_module_imports(module: str) -> set[str]:
+    """Сторонние импорты модуля libs (по имени импорта, не пакета)."""
+    path = LIBS / f"{module}.py"
+    if not path.exists():
+        path = LIBS / module / "__init__.py"
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8")
+    names = set(re.findall(r"^\s*import\s+([a-zA-Z_][\w]*)", text, re.M))
+    names |= set(re.findall(r"^\s*from\s+([a-zA-Z_][\w]*)", text, re.M))
+    return {n for n in names if n not in STDLIB_HINT and not n.startswith("_")}
+
+
+def test_libs_modules_have_third_party_imports():
+    """Страховка от проверки пустого множества."""
+    assert "grpc" in libs_module_imports("manta_grpc"), \
+        "разбор импортов libs сломан"
+
+
+@pytest.mark.parametrize("app", containerized())
+def test_image_installs_dependencies_of_the_libs_it_imports(app):
+    """Мало положить libs в образ — нужны и ЗАВИСИМОСТИ этих модулей.
+
+    Спринт 139 починил «libs нет в образе» и на этом остановился. Файл
+    оказался на месте, а импортировать его было нечем: libs/manta_grpc
+    тянет grpc, и в requirements коллектора grpcio не было. Все семь
+    коллекторов падали на старте и перезапускались по кругу.
+
+    Проверка упаковки, написанная тогда, обходила это СОЗНАТЕЛЬНО: она
+    искала модуль через find_spec, не выполняя его, «чтобы не требовать
+    grpc и lightgbm». То есть ровно та зависимость, что сломалась, была
+    вынесена за скобки — и запись об этом стоит в комментарии к тесту.
+    """
+    req_path = APPS / app / "requirements.txt"
+    if not req_path.exists():
+        pytest.skip(f"{app}: нет requirements.txt")
+    # Имена на PyPI пишутся через дефис (prometheus-client), имена
+    # импорта — через подчёркивание (prometheus_client). Сравнение «в
+    # лоб» объявляло бы отсутствующим уже объявленный пакет: ложная
+    # тревога на верной конфигурации.
+    def norm(name: str) -> str:
+        return name.lower().replace("_", "-")
+
+    # Комментарии выбрасываются. Пакет, упомянутый в пояснении, не
+    # устанавливается — а проверка по подстроке считала его объявленным.
+    # Третий случай за развёртывание, когда собственная проверка
+    # спотыкается о прозу: до этого были backup-drill и мигратор.
+    req = norm("\n".join(
+        l.split("#", 1)[0] for l in req_path.read_text(encoding="utf-8").splitlines()))
+
+    missing = []
+    for module in sorted(apps_importing_libs()[app]):
+        for imp in sorted(libs_module_imports(module)):
+            pkg = IMPORT_TO_PACKAGE.get(imp, imp)
+            if norm(pkg) not in req:
+                missing.append(f"{module} → import {imp} → пакет {pkg}")
+    assert not missing, (
+        f"{app}: импортирует модули libs, но их зависимостей нет в "
+        f"requirements.txt:\n  " + "\n  ".join(missing))
