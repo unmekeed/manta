@@ -7,6 +7,20 @@ grpcio>=1.60
 prometheus-client>=0.20
 # Клиент MLflow Model Registry (REGISTRY_BACKEND=mlflow, Гл. 10.6).
 mlflow-skinny>=3
+# registry/store.py: MinioBackend — реестр моделей ПО УМОЛЧАНИЮ
+# (MODEL_PATH=registry://win_probability/production). Импорт стоит внутри
+# __init__ — «по месту: тесты живут на фейке», — и потому не попадался на
+# глаза. На VPS ml-service падал на первом же resolve() с
+# ModuleNotFoundError и перезапускался по кругу; дома сервис живёт
+# процессом, где minio уже стоит от коллектора.
+minio>=7.2
+# training/tune.py: подбор гиперпараметров. Тоже импорт внутри функции, и
+# расписание этот путь в контейнере не трогает — но руками он запускается
+# (`docker run ... -m training.tune`, см. Dockerfile). Решать, какой из
+# импортов «по-настоящему» нужен, — ровно то рассуждение, из-за которого
+# не было ни grpcio, ни minio. Правило «объявлено всё, что импортируется»
+# обходится дешевле исключений из него.
+optuna>=3.6
 # После mlflow: его пин protobuf<7 консервативен, а gRPC-стабы собраны
 # gencode 7.x — ставим protobuf последним, чтобы он выиграл.
 protobuf>=7.35

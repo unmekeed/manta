@@ -20,24 +20,20 @@
 """
 from __future__ import annotations
 
-import json
 import math
-from pathlib import Path
+
+from manta_data import load_json as _load
 
 RADIANT, DIRE = 2, 3
 
 # Стоимости и тиры — из констант OpenDota, снимок в libs/data. Точные
 # цены меняются патчами; для diff-фичи важен порядок величин, а не копейки.
-_DATA = Path(__file__).resolve().parents[4] / "libs" / "data"
-
-
-def _load(name: str, default):
-    try:
-        return json.loads((_DATA / name).read_text())
-    except Exception:  # noqa: BLE001 — словарь опционален
-        return default
-
-
+#
+# Путь к снимку раньше считался здесь: `parents[4] / "libs" / "data"`.
+# Четыре шага вверх — раскладка монорепо; в образе от /app/src/collector их
+# всего три, и модуль падал с IndexError на ИМПОРТЕ, роняя все семь
+# коллекторов в цикл перезапусков (VPS, 2026-08-18). Резолвер живёт в libs
+# рядом с самими данными — см. libs/manta_data.py.
 _ITEM_COST: dict[str, int] = _load("item_costs.json", {})
 _HEROES: dict[str, dict] = _load("heroes.json", {})
 _HERO_BY_ID: dict[int, str] = {v["id"]: k for k, v in _HEROES.items()

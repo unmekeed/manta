@@ -10,32 +10,37 @@ partial=true, пока список ошибок пуст и нарратив ш
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+from manta_data import load_json
+
+from .heatmaps import build_heatmaps, heatmaps_available
 
 REPORT_VERSION = "0.2.0"  # 0.2.0: hero_id из словаря, errors (ΔWP)
 
 # Словарь героев (libs/data/heroes.json, снапшот OpenDota constants):
-# npc_dota_hero_* → числовой id и локализованное имя. Путь зависит от
-# раскладки (монорепо: <root>/libs/data; docker-образ: /app/libs/data),
-# поэтому кандидаты перебираются; HEROES_PATH переопределяет.
+# npc_dota_hero_* → числовой id и локализованное имя.
+#
+# Здесь стоял перебор кандидатов: сначала путь монорепо (parents[4]), потом
+# путь образа (parents[2]), а цикл ловил и OSError, и IndexError — то есть
+# обе раскладки были предусмотрены ЯВНО, и комментарий это описывал. Но
+# IndexError бросал не цикл, а СБОРКА СПИСКА, до первой попытки: в образе
+# от /app/src/reportgen четырёх шагов вверх нет. Задуманная запасная
+# дорожка была недостижима, и report-generator падал на импорте.
+#
+# Теперь путь не вычисляется вовсе (libs/manta_data.py), а HEROES_PATH
+# остаётся: dev-recover.sh задаёт его точечно.
 
-
-from .heatmaps import build_heatmaps, heatmaps_available
 
 def _load_heroes() -> dict:
-    import os
-    here = Path(__file__).resolve()
-    candidates = [Path(os.environ["HEROES_PATH"])] if os.getenv("HEROES_PATH") else []
-    candidates += [
-        here.parents[4] / "libs" / "data" / "heroes.json",  # монорепо
-        here.parents[2] / "libs" / "data" / "heroes.json",  # /app в образе
-    ]
-    for c in candidates:
+    override = os.getenv("HEROES_PATH")
+    if override:
         try:
-            return json.loads(c.read_text())
-        except (OSError, IndexError):
-            continue
-    return {}
+            return json.loads(Path(override).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return load_json("heroes.json", {})
 
 
 HEROES = _load_heroes()

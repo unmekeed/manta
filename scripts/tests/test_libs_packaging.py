@@ -36,6 +36,7 @@ data/heroes.json), но в PYTHONPATH не попадал. Каталог в о�
 который раньше без них обходился. Такой импорт добавляют, не думая о
 Dockerfile, — как и случилось в этом спринте.
 """
+import ast
 import re
 import shutil
 import subprocess
@@ -367,11 +368,23 @@ def test_go_image_copies_every_replace_target(mod):
 # Имя импорта не всегда равно имени пакета. Словарь маленький и ведётся
 # руками СОЗНАТЕЛЬНО: вывести соответствие неоткуда, зато забытая пара
 # ловится сразу — тест не найдёт пакет в requirements и упадёт.
-IMPORT_TO_PACKAGE = {
-    "grpc": "grpcio",
-    "yaml": "PyYAML",
-    "sklearn": "scikit-learn",
+IMPORT_TO_PACKAGE: dict[str, tuple[str, ...]] = {
+    "grpc": ("grpcio",),
+    "yaml": ("PyYAML",),
+    "sklearn": ("scikit-learn",),
+    # `from google.protobuf import ...` в сгенерированных стабах: пакет
+    # занимает namespace-каталог google/, а называется protobuf.
+    "google": ("protobuf",),
+    # Урезанный клиент даёт тот же модуль mlflow, что и полный; годится
+    # любой из двух. Перечислены оба, а не «любой, чьё имя начинается
+    # с mlflow»: второе пропустило бы опечатку.
+    "mlflow": ("mlflow-skinny", "mlflow"),
 }
+
+
+def acceptable_packages(imp: str) -> set[str]:
+    """Каким пакетом может быть удовлетворён импорт (нормализованно)."""
+    return {norm(p) for p in IMPORT_TO_PACKAGE.get(imp, (imp,))}
 STDLIB_HINT = {
     "__future__", "logging", "os", "sys", "json", "math", "re", "time",
     "typing", "pathlib", "dataclasses", "datetime", "collections", "bisect",
@@ -392,10 +405,138 @@ def libs_module_imports(module: str) -> set[str]:
     return {n for n in names if n not in STDLIB_HINT and not n.startswith("_")}
 
 
+def norm(name: str) -> str:
+    """Имя пакета в сравнимом виде.
+
+    На PyPI пишут через дефис (prometheus-client), импортируют через
+    подчёркивание (prometheus_client). Сравнение «в лоб» объявляло бы
+    отсутствующим уже объявленный пакет — ложная тревога на верной
+    конфигурации.
+    """
+    return name.lower().replace("_", "-")
+
+
+def parse_requirements(text: str) -> set[str]:
+    """Что реально ставится по такому requirements.txt.
+
+    Имя выделяется РАЗБОРОМ строки, а не поиском подстроки. Подстрока
+    считала бы объявленным пакет, чьё имя лишь входит в чужое, и —
+    что случалось трижды за развёртывание — пакет, упомянутый в
+    комментарии. Комментарий тут отрезается первым делом.
+
+    Разбор вынесен из чтения файла НАРОЧНО: пока он умел только читать
+    ml-service, проверить его можно было лишь на живом файле, а там нет
+    ни закомментированного пакета, ни имени-подстроки. Мутация «считать
+    комментарии за строки» такую проверку пережила.
+    """
+    out = set()
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~;\[\s]", line, maxsplit=1)[0]
+        if name:
+            out.add(norm(name))
+    return out
+
+
+def declared_packages(app: str) -> set[str]:
+    """Что ставится из requirements.txt сервиса."""
+    path = APPS / app / "requirements.txt"
+    return parse_requirements(path.read_text(encoding="utf-8")) if path.exists() else set()
+
+
+def test_parse_requirements_ignores_what_is_not_installed():
+    """Опаснее всего разбор, который возвращает ЛИШНЕЕ.
+
+    Недостающая зависимость тогда снова пройдёт: сторож увидит нужное
+    имя там, где стоит лишь упоминание о нём. Все три случая — из
+    жизни этого развёртывания.
+    """
+    got = parse_requirements(
+        "minio>=7.2\n"
+        "# grpcio>=1.60 — поставим потом\n"      # закомментировано = не стоит
+        "prometheus-client>=0.20  # метрики\n"   # хвостовой комментарий
+        "-r base.txt\n"                          # не пакет
+        "uvicorn[standard]==0.30\n"
+        "\n")
+    assert got == {"minio", "prometheus-client", "uvicorn"}
+    assert "grpcio" not in got, "закомментированный пакет считается стоящим"
+    assert "base.txt" not in got and "метрики" not in got
+
+
+def test_declared_packages_reads_a_known_file():
+    """Страховка от разбора, который перестал что-либо находить."""
+    pkgs = declared_packages("ml-service")
+    assert {"minio", "scikit-learn", "protobuf", "optuna"} <= pkgs
+
+
 def test_libs_modules_have_third_party_imports():
     """Страховка от проверки пустого множества."""
     assert "grpc" in libs_module_imports("manta_grpc"), \
         "разбор импортов libs сломан"
+
+
+def app_source_imports(app: str) -> dict[str, str]:
+    """{имя импорта: где впервые встречен} — сторонние импорты самого сервиса.
+
+    Учитываются импорты ЛЮБОЙ глубины, включая те, что стоят внутри
+    функций. Именно так был спрятан `minio`: `from minio import Minio`
+    внутри `MinioBackend.__init__`, с пометкой «импорт по месту: тесты
+    живут на фейке». Из-за неё зависимость не попалась на глаза при сборке
+    образа, а реестр моделей на MinIO — путь ПО УМОЛЧАНИЮ: ml-service на
+    VPS падал на первом же resolve().
+    """
+    src = APPS / app / "src"
+    local = {p.stem for p in src.rglob("*.py")}
+    local |= {d.name for d in src.rglob("*") if d.is_dir()}
+    stdlib = set(sys.stdlib_module_names)
+
+    found: dict[str, str] = {}
+    for py in sorted(src.rglob("*.py")):
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.add(node.module.split(".")[0])
+        for n in names - stdlib - local - libs_module_names():
+            found.setdefault(n, str(py.relative_to(ROOT)))
+    return found
+
+
+def test_app_source_imports_finds_the_hidden_one():
+    """Разбор видит импорт, спрятанный внутри функции.
+
+    Без этого проверка ниже осталась бы зелёной при сломанном разборе:
+    ничего не нашла — значит, всё объявлено.
+    """
+    found = app_source_imports("ml-service")
+    assert "minio" in found, "импорт внутри функции не найден"
+    assert "lightgbm" in found
+    assert "registry" not in found, "свой же модуль принят за сторонний"
+    assert "json" not in found, "стандартная библиотека принята за стороннюю"
+
+
+@pytest.mark.parametrize("app", containerized())
+def test_image_installs_everything_the_service_imports(app):
+    """Всё, что сервис импортирует, объявлено в его requirements.
+
+    Правило без исключений — и это осознанный выбор. Рассуждение «этот
+    импорт по-настоящему не нужен, путь ведь не запускается» уже дало два
+    креш-цикла подряд: grpcio (спринт 143) и minio с optuna (144). Оба
+    раза дома всё работало, потому что сервисы живут процессами в общем
+    окружении, где нужный пакет уже стоит от соседа.
+    """
+    if not (APPS / app / "requirements.txt").exists():
+        pytest.skip(f"{app}: нет requirements.txt")
+    declared = declared_packages(app)
+    missing = [f"{imp} (пакет {'/'.join(sorted(acceptable_packages(imp)))}) — {where}"
+               for imp, where in sorted(app_source_imports(app).items())
+               if not acceptable_packages(imp) & declared]
+    assert not missing, (
+        f"{app}: импортирует, но не устанавливает:\n  " + "\n  ".join(missing))
 
 
 @pytest.mark.parametrize("app", containerized())
@@ -412,29 +553,17 @@ def test_image_installs_dependencies_of_the_libs_it_imports(app):
     grpc и lightgbm». То есть ровно та зависимость, что сломалась, была
     вынесена за скобки — и запись об этом стоит в комментарии к тесту.
     """
-    req_path = APPS / app / "requirements.txt"
-    if not req_path.exists():
+    if not (APPS / app / "requirements.txt").exists():
         pytest.skip(f"{app}: нет requirements.txt")
-    # Имена на PyPI пишутся через дефис (prometheus-client), имена
-    # импорта — через подчёркивание (prometheus_client). Сравнение «в
-    # лоб» объявляло бы отсутствующим уже объявленный пакет: ложная
-    # тревога на верной конфигурации.
-    def norm(name: str) -> str:
-        return name.lower().replace("_", "-")
-
-    # Комментарии выбрасываются. Пакет, упомянутый в пояснении, не
-    # устанавливается — а проверка по подстроке считала его объявленным.
-    # Третий случай за развёртывание, когда собственная проверка
-    # спотыкается о прозу: до этого были backup-drill и мигратор.
-    req = norm("\n".join(
-        l.split("#", 1)[0] for l in req_path.read_text(encoding="utf-8").splitlines()))
+    declared = declared_packages(app)
 
     missing = []
     for module in sorted(apps_importing_libs()[app]):
         for imp in sorted(libs_module_imports(module)):
-            pkg = IMPORT_TO_PACKAGE.get(imp, imp)
-            if norm(pkg) not in req:
-                missing.append(f"{module} → import {imp} → пакет {pkg}")
+            if not acceptable_packages(imp) & declared:
+                missing.append(
+                    f"{module} → import {imp} → пакет "
+                    f"{'/'.join(sorted(acceptable_packages(imp)))}")
     assert not missing, (
         f"{app}: импортирует модули libs, но их зависимостей нет в "
         f"requirements.txt:\n  " + "\n  ".join(missing))

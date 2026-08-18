@@ -29,7 +29,16 @@ def test_seconds_until_utc_midnight_naive_now_is_utc():
 
 # -- 429: минутный всплеск против исчерпания суток ----------------------------
 
-def _sleep_for_429(remaining: str, source: str = "opendota-timeline") -> int:
+# Момент замера задаётся ЯВНО. Раньше сон до полуночи сверялся с
+# порогом «> 3600», и это правда 23 часа в сутки: в последний час перед
+# полуночью UTC до сброса остаётся меньше часа, и три теста краснели —
+# не из-за кода, а из-за времени запуска. Проверять надо не «долго ли
+# спим», а КАКАЯ ветка выбрана: burst или ожидание сброса.
+NOON = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _sleep_for_429(remaining: str, source: str = "opendota-timeline",
+                   now: datetime | None = NOON) -> int:
     """Сколько коллектор проспит при 429 с таким остатком суточной квоты.
 
     Логика живёт в main() между try/except, поэтому воспроизводим её
@@ -46,7 +55,13 @@ def _sleep_for_429(remaining: str, source: str = "opendota-timeline") -> int:
         return 3600
     if day_left is not None and day_left > BURST_DAY_MARGIN:
         return 90          # присваивается, НЕ max(interval, 90)
-    return seconds_until_utc_midnight()
+    return seconds_until_utc_midnight(now)
+
+
+def _until_reset() -> int:
+    """Сон «до сброса суточной квоты» в тот же момент времени."""
+    from collector.__main__ import seconds_until_utc_midnight
+    return seconds_until_utc_midnight(NOON)
 
 
 def test_429_with_quota_left_is_burst_not_daily():
@@ -69,21 +84,21 @@ def test_burst_sleep_is_shorter_than_cycle_interval():
 def test_429_with_exhausted_quota_sleeps_until_reset():
     """Квота действительно кончилась — ждём сброса, иначе будем долбить
     API впустую и уводить остаток в минус."""
-    assert _sleep_for_429("0") > 3600
-    assert _sleep_for_429("-930") > 3600
+    assert _sleep_for_429("0") == _until_reset()
+    assert _sleep_for_429("-930") == _until_reset()
 
 
 def test_429_near_quota_edge_treated_as_daily():
     """У самой границы оба лимита срабатывают вперемешку — считаем
     исчерпанием, чтобы не крутиться в коротком сне."""
-    assert _sleep_for_429("10") > 3600
+    assert _sleep_for_429("10") == _until_reset()
 
 
 def test_429_without_header_falls_back_to_daily():
     """Заголовка нет — безопаснее переждать: короткий сон при реально
     исчерпанной квоте загонит остаток в минус."""
-    assert _sleep_for_429("?") > 3600
-    assert _sleep_for_429("") > 3600
+    assert _sleep_for_429("?") == _until_reset()
+    assert _sleep_for_429("") == _until_reset()
 
 
 # -- 429 приписывается тому, кто ответил, а не имени источника (спринт 119) ---

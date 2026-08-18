@@ -24,6 +24,7 @@ import grpc
 
 import manta_grpc
 import requests
+from manta_data import load_json
 from prometheus_client import Counter, Gauge
 
 from engine.recommend import suggest
@@ -37,19 +38,24 @@ STATS_MATCHES = Gauge("draft_stats_matches", "Матчей в статистик
 
 
 def _load_hero_dict() -> dict[str, int]:
-    """npc-имя → Valve hero id из libs/data/heroes.json."""
-    here = Path(__file__).resolve()
-    candidates = [Path(os.environ["HEROES_PATH"])] if os.getenv("HEROES_PATH") else []
-    candidates += [here.parents[3] / "libs" / "data" / "heroes.json",
-                   here.parents[1] / "libs" / "data" / "heroes.json"]
-    for c in candidates:
+    """npc-имя → Valve hero id из libs/data/heroes.json.
+
+    Путь не считается шагами вверх (`parents[3]` для монорепо, `parents[1]`
+    для образа): такой перебор ронял коллекторы и report-generator на VPS —
+    в чужой раскладке нужного шага просто нет. Резолвер — libs/manta_data.py.
+    """
+    override = os.getenv("HEROES_PATH")
+    raw = {}
+    if override:
         try:
-            raw = json.loads(c.read_text())
-            return {name: int(v.get("id", 0)) for name, v in raw.items()}
+            raw = json.loads(Path(override).read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            continue
-    logger.warning("heroes.json не найден — статистика будет пустой")
-    return {}
+            raw = {}
+    if not raw:
+        raw = load_json("heroes.json", {})
+    if not raw:
+        logger.warning("heroes.json не найден — статистика будет пустой")
+    return {name: int(v.get("id", 0)) for name, v in raw.items()}
 
 
 class StatsHolder:

@@ -19,8 +19,7 @@ attacker, то в target — в зависимости от типа событ�
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from manta_data import load_json
 
 from .features import _normalize_hero
 from .mapcells import phase_of
@@ -41,14 +40,16 @@ from .mapcells import phase_of
 # Дыры в самой константе остаются (333, 341, 352 отсутствуют и в
 # item_ids, и в снимке dotaconstants на GitHub) — их и обслуживает
 # запасное имя `item_<id>`.
-_ITEM_IDS: dict[int, str] = {}
-try:
-    _raw = json.loads(
-        (Path(__file__).resolve().parents[4] / "libs" / "data"
-         / "item_ids.json").read_text(encoding="utf-8"))
-    _ITEM_IDS = {int(k): v for k, v in _raw.items()}
-except Exception:  # noqa: BLE001 — словарь опционален, id сохраним как есть
-    pass
+#
+# Путь считался тут как `parents[4] / "libs" / "data"` — четыре шага вверх
+# по раскладке монорепо. В образе от /app/src/extractor их три, и
+# IndexError ловил вот этот самый `except`, написанный на случай «файла
+# нет». Отказа не было: feature-extractor поднимался успешно с ПУСТЫМ
+# справочником, и все покупки писались бы как `item_<id>` — та же потеря,
+# ради устранения которой спринт 99 и делался. Резолвер теперь в libs
+# рядом с данными, считать нечего (см. libs/manta_data.py).
+_ITEM_IDS: dict[int, str] = {
+    int(k): v for k, v in load_json("item_ids.json", {}).items()}
 
 # Типы событий ReplayEvents → вид записи в MatchHeroTimings.
 KINDS = {"ITEM_PURCHASE": "item", "ABILITY_CAST": "ability",
