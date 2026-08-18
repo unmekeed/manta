@@ -18,9 +18,16 @@ const PHASES: { key: HeatmapPhase; label: string }[] = [
   { key: "late", label: "Лейтгейм" },
 ];
 
-const KINDS: { key: HeatmapKind; label: string; hint: string }[] = [
-  { key: "presence", label: "Присутствие", hint: "где находились герои" },
-  { key: "farm", label: "Фарм", hint: "где росло золото" },
+// blobs — рисовать пятнами вместо клеток. Пятна там, где величина
+// НЕПРЕРЫВНА: присутствие и фарм — это «сколько времени провели», и
+// плавная форма их и описывает. Смерти, варды, смоки и драки — события,
+// каждое случилось в своей точке, и размазывать их значило бы придумать
+// плавность там, где её нет: один вард превратился бы в облако.
+const KINDS: { key: HeatmapKind; label: string; hint: string; blobs?: boolean }[] = [
+  { key: "presence", label: "Присутствие", hint: "где находились герои", blobs: true },
+  { key: "farm_core", label: "Фарм коров", blobs: true,
+    hint: "маршруты позиций 1–3; фарм саппортов сюда не входит" },
+  { key: "farm", label: "Фарм (все)", hint: "вся команда, включая саппортов", blobs: true },
   { key: "death", label: "Смерти", hint: "где умирали" },
   { key: "ward", label: "Варды", hint: "куда ставили обзор" },
   { key: "smoke", label: "Смоки", hint: "откуда шли под смоком" },
@@ -101,6 +108,7 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
           show={sides}
           calibrate={calibrate}
           fraction={fraction}
+          blobs={KINDS.find((k) => k.key === kind)?.blobs ?? false}
         />
         <div className="heat-legend">
           <label>
@@ -163,13 +171,19 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
           )}
           {block ? (
             <p className="muted">
-              Насыщенность — доля от максимума ({block.max_n} в клетке).
-              Шкала своя у каждого вида: присутствие даёт сотни попаданий,
-              смоки — единицы.
+              {KINDS.find((k) => k.key === kind)?.blobs
+                ? "Цвет — плотность: синий редко, красный чаще всего. "
+                : "Насыщенность — доля от максимума. "}
+              Максимум {block.max_n} в клетке. Шкала своя у каждого вида:
+              присутствие даёт сотни попаданий, смоки — единицы.
             </p>
           ) : (
             <p className="muted">
-              В этой фазе таких событий не было.
+              {kind === "farm_core"
+                ? "Фарм коров считается со спринта 140; этот матч разобран "
+                  + "раньше. Он появится после переразбора — а пока рядом "
+                  + "есть «Фарм (все)»."
+                : "В этой фазе таких событий не было."}
             </p>
           )}
         </div>

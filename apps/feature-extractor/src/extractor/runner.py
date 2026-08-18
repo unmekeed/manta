@@ -22,7 +22,7 @@ from prometheus_client import Counter, Histogram
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
 from .fights import detect_fights
-from .mapcells import build_cells
+from .mapcells import build_cells, core_heroes
 from .timings import build_timings
 from .pseudonym import apply as pseudonymize
 
@@ -196,8 +196,14 @@ class Extractor:
                         exc_info=True)
 
         try:
+            # Коры (позиции 1–3) ранжируются по добиткам из economy — той
+            # же выборки, что прочитана выше. Отдельный запрос ради
+            # ранжирования пяти чисел был бы лишним походом в ClickHouse
+            # на каждый матч.
             crows = build_cells(positions, raw_events, frows,
-                                roster.hero_team)
+                                roster.hero_team,
+                                core_heroes(economy, roster.teams,
+                                            roster.heroes))
             for r in crows:
                 r["match_id"] = match_id
             self._replace_rows("MatchMapCells", match_id, crows)

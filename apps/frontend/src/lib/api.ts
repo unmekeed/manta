@@ -50,6 +50,11 @@ export type HeatmapPhase = "early" | "mid" | "late";
 export type HeatmapKind =
   | "presence"
   | "farm"
+  // farm_core (спринт 140) — тот же безопасный фарм, но только позиций
+  // 1–3. У матчей, разобранных раньше, ключа НЕТ: вид дополняет farm, а
+  // не заменяет его, иначе одно имя означало бы разное в зависимости от
+  // даты разбора матча.
+  | "farm_core"
   | "death"
   | "ward"
   | "smoke"

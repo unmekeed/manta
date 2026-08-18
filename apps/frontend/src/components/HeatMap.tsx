@@ -15,6 +15,7 @@
 // правдоподобной, просто зеркальной, и заметить это можно только зная,
 // где обычно фармят.
 
+import HeatBlobs, { blobsSupported } from "./HeatBlobs";
 import MapFrame from "./MapFrame";
 
 export type Cell = [number, number, number]; // gx, gy, n
@@ -38,6 +39,8 @@ export interface HeatMapProps {
   calibrate?: boolean;
   /** Масштаб подложки; прокидывается из панели при калибровке. */
   fraction?: number;
+  /** Рисовать пятнами вместо клеток — для непрерывных видов. */
+  blobs?: boolean;
 }
 
 function cells(list: Cell[], maxN: number, grid: number, cls: string) {
@@ -68,7 +71,11 @@ export default function HeatMap({
   show,
   calibrate = false,
   fraction,
+  blobs = false,
 }: HeatMapProps) {
+  // Пятна требуют canvas. Где его нет, рисуем клетками: угловатая карта
+  // лучше пустой, а пустая читалась бы как «событий не было».
+  const asBlobs = blobs && blobsSupported();
   return (
     <svg
       className="heat-map map-frame"
@@ -77,8 +84,23 @@ export default function HeatMap({
       aria-label="Тепловая карта"
     >
       <MapFrame S={S} calibrate={calibrate} grid={grid} fraction={fraction} />
-      {show.radiant && cells(radiant, maxN, grid, "r")}
-      {show.dire && cells(dire, maxN, grid, "d")}
+      {asBlobs ? (
+        <>
+          {show.radiant && (
+            <HeatBlobs cells={radiant} grid={grid} maxN={maxN} S={S}
+                       className="heat-blobs" />
+          )}
+          {show.dire && (
+            <HeatBlobs cells={dire} grid={grid} maxN={maxN} S={S}
+                       className="heat-blobs" />
+          )}
+        </>
+      ) : (
+        <>
+          {show.radiant && cells(radiant, maxN, grid, "r")}
+          {show.dire && cells(dire, maxN, grid, "d")}
+        </>
+      )}
     </svg>
   );
 }

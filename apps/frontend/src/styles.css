@@ -110,6 +110,11 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
 .cal-slider { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .cal-slider input[type="range"] { flex: 1; min-width: 120px; }
 .cal-slider code { color: var(--accent); }
+/* Тепловые пятна (спринт 140). Смешивание screen: два слоя (Radiant и
+   Dire) наложением не должны затемнять друг друга — при обычном
+   наложении перекрытие вышло бы темнее обоих слоёв и читалось бы как
+   «здесь никого», хотя там были обе команды. */
+.map-frame .heat-blobs { mix-blend-mode: screen; opacity: 0.85; }
 .death-map .death { stroke-width: 0.7; stroke: #0e1114; cursor: help; }
 .death-map .death.radiant { fill: var(--radiant); }
 .death-map .death.dire { fill: var(--dire); }
