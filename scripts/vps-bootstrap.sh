@@ -161,6 +161,68 @@ setup_firewall() {
 
 # -- 4-5. стек и миграции ------------------------------------------------------
 
+check_ports() {
+    say "занятость портов"
+
+    # ЗАЧЕМ ЗАРАНЕЕ. Без этой проверки конфликт вскрывается посреди
+    # `compose up`: часть контейнеров уже создана, часть запущена, и в
+    # конце — строка вида «failed to bind host port 127.0.0.1:5432/tcp:
+    # address already in use». Из неё видно ОДИН порт из тринадцати, и
+    # неизвестно, кто его занял; после исправления всё повторяется на
+    # следующем порту.
+    #
+    # Первое живое развёртывание встало именно так: на машине уже работал
+    # системный PostgreSQL.
+    #
+    # Список портов берётся из наложения для VPS, а не пишется руками:
+    # записанный, он разошёлся бы при добавлении сервиса, и новый порт
+    # проверялся бы «на живую», то есть никак.
+    local ports
+    ports=$(grep -oE '"127\.0\.0\.1:[0-9]+:' deployments/docker-compose.vps.yml |
+        grep -oE '[0-9]+:$' | tr -d ':' | sort -un)
+    if [ -z "$ports" ]; then
+        warn "не удалось прочитать список портов из наложения — пропускаю"
+        return
+    fi
+
+    # ss есть в Ubuntu из коробки; netstat — запасной путь.
+    local lister=""
+    command -v ss >/dev/null && lister="ss -tlnpH"
+    [ -n "$lister" ] || { command -v netstat >/dev/null && lister="netstat -tlnp"; }
+    if [ -z "$lister" ]; then
+        warn "ни ss, ни netstat не найдены — проверить занятость нечем"
+        return
+    fi
+
+    local listening busy=""
+    listening=$($lister 2>/dev/null)
+    for port in $ports; do
+        # Ищем ИМЕННО этот порт на loopback или на всех адресах: строка
+        # «:15432» не должна считаться занятым 5432.
+        if printf '%s\n' "$listening" |
+           grep -qE "(127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]):$port[[:space:]]"; then
+            busy="$busy $port"
+            local who
+            who=$(printf '%s\n' "$listening" |
+                grep -E "(127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]):$port[[:space:]]" |
+                grep -oE 'users:\(\("[^"]+"' | grep -oE '"[^"]+"' | tr -d '"' |
+                head -1)
+            warn "порт $port занят${who:+ процессом $who}"
+        fi
+    done
+
+    if [ -n "$busy" ]; then
+        echo
+        echo "   Порты, нужные стеку, уже заняты:$busy"
+        echo "   Обычная причина — системная служба, поставленная образом"
+        echo "   VPS. Посмотреть и выключить, если она не нужна:"
+        echo "       ss -tlnp | grep -E ':($(echo "$busy" | tr ' ' '|' | sed 's/^|//'))\\b'"
+        echo "       systemctl disable --now postgresql   # к примеру"
+        die "конфликт портов — стек не поднимался, ничего не сломано"
+    fi
+    ok "все $(printf '%s\n' "$ports" | grep -c .) портов свободны"
+}
+
 build_images() {
     say "сборка образов (по одному)"
 
@@ -241,6 +303,7 @@ start_stack() {
         fi
         return
     fi
+    check_ports
     build_images
     $COMPOSE --profile apps up -d || die "compose up не удался"
     ok "контейнеры подняты"

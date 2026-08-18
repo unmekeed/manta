@@ -17,6 +17,7 @@
 """
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -406,3 +407,137 @@ def test_every_buildable_service_of_compose_is_covered():
     services = json.loads(proc.stdout).get("services", {})
     buildable = [n for n, s in services.items() if "build" in s]
     assert len(buildable) >= 6, f"собираемых сервисов подозрительно мало: {buildable}"
+
+
+# -- предполётная проверка портов ------------------------------------------------
+
+def run_check_ports(tmp_path, listening_lines, overlay=None):
+    """Прогнать check_ports со стабом ss. Возвращает (rc, вывод)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("grep", "bash", "sort", "tr", "sed", "head", "printf", "echo"):
+        w = shutil.which(tool)
+        link = bin_dir / tool
+        if w and not link.exists():
+            link.symlink_to(w)
+    # printf, а не cat: PATH в песочнице состоит из считанных ссылок, и
+    # внешний cat туда не входит. Молча пустой вывод стаба выглядел бы
+    # как «все порты свободны» — то есть тест проверял бы не ту ветку.
+    body = "".join(f"printf '%s\\n' {shlex.quote(l)}\n" for l in listening_lines)
+    (bin_dir / "ss").write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+    (bin_dir / "ss").chmod(0o755)
+
+    # Наложение копируем: функция читает его по относительному пути.
+    deploy = tmp_path / "deployments"
+    deploy.mkdir(exist_ok=True)
+    src = overlay if overlay is not None else (
+        SCRIPT.parents[1] / "deployments" / "docker-compose.vps.yml"
+    ).read_text(encoding="utf-8")
+    (deploy / "docker-compose.vps.yml").write_text(src, encoding="utf-8")
+
+    harness = f"""
+set -uo pipefail
+export PATH="{bin_dir}"
+say()  {{ printf '\\n>> %s\\n' "$1"; }}
+ok()   {{ printf '   OK   %s\\n' "$1"; }}
+warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
+die()  {{ printf 'ОСТАНОВ: %s\\n' "$1" >&2; exit 1; }}
+{_functions("check_ports")}
+check_ports
+"""
+    proc = subprocess.run([shutil.which("bash"), "-c", harness],
+                          capture_output=True, text=True, cwd=tmp_path,
+                          env={"PATH": str(bin_dir)})
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+FREE = ["LISTEN 0 128 127.0.0.1:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))"]
+PG_BUSY = FREE + [
+    'LISTEN 0 244 127.0.0.1:5432 0.0.0.0:* users:(("postgres",pid=900,fd=6))']
+
+
+def test_free_ports_pass(tmp_path):
+    rc, out = run_check_ports(tmp_path, FREE)
+    assert rc == 0, out
+    assert "13" in out, out
+
+
+def test_busy_port_stops_before_anything_starts(tmp_path):
+    """Конфликт портов — остановка ДО запуска, а не посреди него.
+
+    Первое живое развёртывание встало на `failed to bind host port
+    127.0.0.1:5432` уже после того, как половина контейнеров была
+    создана. Из такой ошибки видно один порт из тринадцати и неизвестно,
+    кто его занял; после исправления всё повторяется на следующем.
+    """
+    rc, out = run_check_ports(tmp_path, PG_BUSY)
+    assert rc != 0, out
+    assert "5432" in out
+    assert "ничего не сломано" in out
+
+
+def test_busy_port_names_the_process(tmp_path):
+    """Названо не только «занят», но и КЕМ.
+
+    Без имени процесса диагноз упирается в отдельный поход за ss, а на
+    чужой машине это лишний круг.
+
+    Проверяется ИМЕННО строка предупреждения. Первая версия искала
+    «postgres» во всём выводе и проходила даже без определения процесса:
+    слово встречалось в тексте подсказки («systemctl disable --now
+    postgresql»). Тест зеленел, ничего не проверяя.
+    """
+    rc, out = run_check_ports(tmp_path, PG_BUSY)
+    warns = [l for l in out.splitlines() if "занят" in l]
+    assert warns, out
+    assert any("postgres" in l for l in warns), warns
+
+
+@pytest.mark.parametrize("line,why", [
+    ('LISTEN 0 244 127.0.0.1:15432 0.0.0.0:* users:(("нечто",pid=1,fd=6))',
+     "похожий номер порта"),
+    ('LISTEN 0 244 10.0.0.5:5432 0.0.0.0:* users:(("postgres",pid=9,fd=6))',
+     "тот же порт на ДРУГОМ интерфейсе"),
+])
+def test_not_a_false_positive(tmp_path, line, why):
+    """Ложная тревога хуже отсутствия проверки: та хотя бы не врёт.
+
+    Два случая, и второй важнее. Служба, слушающая 10.0.0.5:5432, НЕ
+    мешает докеру занять 127.0.0.1:5432 — адреса разные. Наивный поиск
+    подстроки «:5432» запретил бы установку на ровном месте, и человек
+    пошёл бы выключать нужную ему службу.
+    """
+    rc, out = run_check_ports(tmp_path, FREE + [line])
+    assert rc == 0, f"{why}: ложное срабатывание\n{out}"
+
+
+def test_port_list_comes_from_the_overlay_not_the_script(tmp_path):
+    """Список портов читается из наложения.
+
+    Записанный в скрипте, он разошёлся бы при добавлении сервиса, и новый
+    порт проверялся бы «на живую», то есть никак.
+    """
+    src = _functions("check_ports")
+    assert "docker-compose.vps.yml" in src
+    for hard in ("5432", "8123", "9092"):
+        assert f'"{hard}"' not in src, f"порт {hard} зашит в скрипт"
+
+    # И проверка на деле: наложение с одним портом даёт один порт.
+    rc, out = run_check_ports(
+        tmp_path, FREE,
+        overlay='services:\n  x:\n    ports:\n      - "127.0.0.1:7777:7777"\n')
+    assert rc == 0
+    assert " 1 " in out or "все 1 " in out, out
+
+
+def test_port_check_runs_before_the_stack_starts():
+    """check_ports вызывается, и вызывается ДО compose up.
+
+    Функция может быть безупречной и не вызываться ни разу — тогда
+    конфликт снова вскроется посреди запуска, когда половина контейнеров
+    уже создана.
+    """
+    src = _functions("start_stack")
+    assert "check_ports" in src, "предполётная проверка портов не вызывается"
+    assert src.index("check_ports") < src.index("up -d"), \
+        "проверка портов идёт после подъёма стека"
