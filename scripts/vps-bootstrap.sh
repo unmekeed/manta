@@ -313,6 +313,19 @@ print(' '.join(n for n,s in d.get('services',{}).items() if 'build' in s))" 2>/d
     ok "образы собраны"
 }
 
+load_host_settings() {
+    # Настройки машины (шард, ключи API) живут в ~/manta-train.env, а
+    # compose подставляет переменные из СВОЕГО окружения. Дома этой
+    # проблемы нет: там сервисы читают файл сами, потому что запускаются
+    # процессами. В Docker его не видит никто.
+    local f="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
+    [ -f "$f" ] || return 0
+    set -a
+    # shellcheck disable=SC1090
+    . "$f"
+    set +a
+}
+
 start_stack() {
     say "стек"
     if [ "$CHECK_ONLY" = "1" ]; then
@@ -335,6 +348,7 @@ start_stack() {
         fi
         return
     fi
+    load_host_settings
     check_ports
     build_images
     $COMPOSE --profile apps up -d || die "compose up не удался"

@@ -144,6 +144,18 @@ services:
       CLICKHOUSE_DB: manta
       CLICKHOUSE_USER: dota
       CLICKHOUSE_PASSWORD: ${MANTA_DB_PASSWORD:-dota_dev_password}
+      # Настройки МАШИНЫ, а не стенда (спринт 143). Дома сервисы живут
+      # процессами и читают ~/manta-train.env сами; в Docker его не видит
+      # никто, поэтому нужные переменные пробрасываются сюда.
+      #
+      # Без этого на VPS коллектор запускался с шардом по умолчанию (0 из
+      # 1, то есть «беру всё») и собирал ТЕ ЖЕ матчи, что домашние машины.
+      # Не отказ, не ошибка в логах — просто удвоенная работа и сожжённая
+      # квота, заметные только по счётчикам.
+      COLLECTOR_SHARD_ID: "${COLLECTOR_SHARD_ID:-0}"
+      COLLECTOR_SHARD_COUNT: "${COLLECTOR_SHARD_COUNT:-1}"
+      OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
+      STRATZ_API_TOKEN: "${STRATZ_API_TOKEN:-}"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
