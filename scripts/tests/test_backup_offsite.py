@@ -35,6 +35,9 @@ def _run(body: str, env_setup: str = "", stub_rclone: str | None = None):
     harness = f"""
 set -uo pipefail
 BACKUP_DIR=$(mktemp -d); CLOUD_STATE="$BACKUP_DIR/.cloud"; KEEP_DAYS=7
+# Метка машины (спринт 142): upload_cloud ограничивает ротацию своими
+# слепками, чтобы при обмене между машинами не удалять чужие.
+HOST_LABEL=pc1
 TG_LOG="$BACKUP_DIR/tg"; : >"$TG_LOG"
 tg() {{ echo "$1" >>"$TG_LOG"; }}
 {_functions()}
@@ -83,8 +86,12 @@ def test_successful_upload_copies_then_prunes():
     lines = [l for l in r.stdout.splitlines() if l.startswith("rclone ")]
     assert lines[0].startswith("rclone copy"), lines
     assert any(l.startswith("rclone delete") for l in lines), lines
-    # Ротация ограничена нашими слепками — чужие файлы в общей папке целы.
-    assert any("manta-dataset-*.tar" in l for l in lines), lines
+    # Ротация ограничена СВОИМИ слепками. Общая маска (спринт 142 её
+    # заменил) означала бы, что машина с меньшим KEEP_DAYS удаляет
+    # слепки соседа — то есть чинит себе место за счёт чужой истории,
+    # причём ровно в той папке, через которую идёт обмен.
+    prune = [l for l in lines if l.startswith("rclone delete")][0]
+    assert "manta-dataset-pc1-*.tar" in prune, prune
 
 
 def test_prune_never_runs_before_copy():

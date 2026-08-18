@@ -43,6 +43,13 @@ TRAIN_ENV="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
 
 BACKUP_DIR="${MANTA_BACKUP_DIR:-$HOME/manta-backups}"
 KEEP_DAYS="${KEEP_DAYS:-7}"
+# Метка машины в имени слепка (спринт 142). Без неё две машины кладут в
+# один облачный каталог файлы с одинаковым шаблоном имени, и обмен между
+# ними невозможен в принципе: нельзя отличить свой слепок от чужого, а
+# значит нельзя и втянуть чужой. Санитайзим: имя уходит в путь rclone, и
+# пробел или слэш в hostname сломали бы его молча.
+HOST_LABEL=$(printf '%s' "${MANTA_HOST_LABEL:-$(hostname)}" |
+    tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)
 CLOUD_REMOTE="${MANTA_CLOUD_REMOTE:-}"
 STATE="$BACKUP_DIR/.last-status"
 CLOUD_STATE="$BACKUP_DIR/.last-cloud-status"
@@ -89,7 +96,11 @@ upload_cloud() {
     # Ротация в облаке — тем же окном KEEP_DAYS и только после успешной
     # загрузки. --include ограничивает удаление нашими слепками: если ремоут
     # указывает в общую папку, чужие файлы не трогаем.
-    rclone delete --min-age "${KEEP_DAYS}d" --include 'manta-dataset-*.tar' \
+    # Ротация трогает ТОЛЬКО свои слепки. Раньше маска была общая, и при
+    # обмене между машинами машина с меньшим KEEP_DAYS удаляла бы чужие
+    # слепки — то есть чинила бы себе место за счёт чужой истории.
+    rclone delete --min-age "${KEEP_DAYS}d" \
+        --include "manta-dataset-$HOST_LABEL-*.tar" \
         "$CLOUD_REMOTE" 2>/dev/null || true
     [ "$(cat "$CLOUD_STATE" 2>/dev/null)" = "fail" ] && \
         tg "✅ <b>Manta</b>: оффсайт-бэкап снова проходит"
@@ -99,13 +110,15 @@ upload_cloud() {
 docker ps --format '{{.Names}}' 2>/dev/null | grep -q manta-clickhouse-1 \
     || fail "ClickHouse не запущен (make recover?)"
 
-out="$BACKUP_DIR/manta-dataset-$(date -u +%Y%m%dT%H%M).tar"
+out="$BACKUP_DIR/manta-dataset-$HOST_LABEL-$(date -u +%Y%m%dT%H%M).tar"
 echo ">> слепок: $out"
 ./scripts/dataset-sync.sh export "$out" || fail "dataset-sync export упал"
 [ -s "$out" ] || fail "архив пустой"
 
-# Ротация — только после успешного слепка.
-removed=$(find "$BACKUP_DIR" -maxdepth 1 -name 'manta-dataset-*.tar' \
+# Ротация — только после успешного слепка и только по СВОИМ файлам: в
+# каталоге могут лежать втянутые слепки соседа (см. peer-sync.sh), и
+# удалять их по своему окну хранения мы не вправе.
+removed=$(find "$BACKUP_DIR" -maxdepth 1 -name "manta-dataset-$HOST_LABEL-*.tar" \
     -mtime "+$KEEP_DAYS" -print -delete | wc -l)
 
 size=$(du -h "$out" | cut -f1)
