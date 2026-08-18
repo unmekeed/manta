@@ -92,19 +92,92 @@ def test_presence_counts_only_living_heroes():
     assert _by_kind(rows, "presence") == []
 
 
-def test_farm_excludes_positions_next_to_an_enemy():
-    """Фарм — присутствие там, где рядом НЕТ врага. Именно это отличает
-    фарм-маршрут от маршрута к драке."""
-    together = build_cells(
-        [_snap(60, "npc_dota_hero_axe", 0, 0),
-         _snap(60, "npc_dota_hero_lina", 100, 100)], [], [], HERO_TEAM)
-    assert _by_kind(together, "presence")
-    assert _by_kind(together, "farm") == []
+# Ростер для карт фарма: экономика приходит по player_id, а позиции — по
+# имени героя, и связывает их этот словарь.
+HEROES = {0: "npc_dota_hero_axe", 1: "npc_dota_hero_lina"}
 
-    apart = build_cells(
-        [_snap(60, "npc_dota_hero_axe", -6000, -6000),
-         _snap(60, "npc_dota_hero_lina", 6000, 6000)], [], [], HERO_TEAM)
-    assert len(_by_kind(apart, "farm")) == 2
+
+def _eco(pid, samples):
+    """Сэмплы экономики игрока: [(время, добитки)]."""
+    return [{"player_id": pid, "game_time": t, "lh": lh} for t, lh in samples]
+
+
+def _farm_cells(positions, economy):
+    return _by_kind(build_cells(positions, [], [], HERO_TEAM,
+                                economy=economy, heroes=HEROES), "farm")
+
+
+def test_farm_counts_only_intervals_where_last_hits_grew():
+    """Фарм — там, где РОС счётчик добиток, а не там, где было безопасно.
+
+    До спринта 141 фарм определялся как «жив и рядом нет врага». Это
+    подмена измерения признаком, и здесь она проверяется прямо: обе
+    позиции одинаково безопасны, различает их только счётчик.
+    """
+    positions = [_snap(60, "npc_dota_hero_axe", -6000, -6000),
+                 _snap(70, "npc_dota_hero_axe", -5000, -5000)]
+    grew = _farm_cells(positions, _eco(0, [(60, 10), (70, 14), (80, 14)]))
+    assert len(grew) == 1, "фармом должен быть только первый интервал"
+
+    idle = _farm_cells(positions, _eco(0, [(60, 10), (70, 10), (80, 10)]))
+    assert idle == [], "счётчик не рос — фарма не было"
+
+
+def test_fountain_does_not_count_as_farm():
+    """РЕГРЕСС на баг, который и заставил переписать определение.
+
+    Герой воскрес и ждёт телепорта: жив, врагов рядом нет, стоит в углу
+    карты. По старому определению каждый такой интервал попадал в карту
+    фарма, и на подложке вырастало яркое пятно ровно там, где не фармят
+    никогда. Добитки при этом, разумеется, не растут.
+    """
+    fountain = [_snap(900, "npc_dota_hero_axe", -7000, -7000),
+                _snap(910, "npc_dota_hero_axe", -7000, -7000),
+                _snap(920, "npc_dota_hero_axe", -7000, -7000)]
+    economy = _eco(0, [(900, 120), (910, 120), (920, 120), (930, 120)])
+    rows = build_cells(fountain, [], [], HERO_TEAM,
+                       economy=economy, heroes=HEROES)
+    assert _by_kind(rows, "presence"), "на фонтане герой БЫЛ — это факт"
+    assert _by_kind(rows, "farm") == [], "но не фармил"
+
+
+def test_contested_lane_farm_still_counts():
+    """Фарм под давлением — такой же фарм.
+
+    Условие «рядом нет врага» не добавлено к новому, а убрано совсем:
+    оставь его — и с карты пропал бы фарм на оспариваемой линии, а для
+    маршрутов он нужен не меньше лесного.
+    """
+    positions = [_snap(60, "npc_dota_hero_axe", 0, 0),
+                 _snap(60, "npc_dota_hero_lina", 100, 100)]
+    rows = build_cells(positions, [], [], HERO_TEAM,
+                       economy=_eco(0, [(60, 5), (70, 9)]),
+                       heroes=HEROES)
+    assert len(_by_kind(rows, "farm", team=2)) == 1
+
+
+def test_farm_is_not_counted_without_economy():
+    """Нет экономики — фарма нет ВОВСЕ, а не «как раньше».
+
+    Молчаливый откат к старому определению был бы худшим исходом: карта
+    снова светилась бы на фонтане и выглядела бы при этом честной.
+    """
+    positions = [_snap(60, "npc_dota_hero_axe", -6000, -6000)]
+    rows = build_cells(positions, [], [], HERO_TEAM)
+    assert _by_kind(rows, "presence")
+    assert _by_kind(rows, "farm") == []
+
+
+def test_dead_hero_never_farms():
+    """Мёртвый не фармит, даже если счётчик вырос в этом интервале.
+
+    Интервал в десять секунд может захватить и добивание, и смерть сразу
+    после него — тогда труп у фонтана получил бы отметку фарма.
+    """
+    positions = [_snap(60, "npc_dota_hero_axe", -7000, -7000, alive=0)]
+    rows = build_cells(positions, [], [], HERO_TEAM,
+                       economy=_eco(0, [(60, 5), (70, 9)]), heroes=HEROES)
+    assert _by_kind(rows, "farm") == []
 
 
 def test_fight_is_recorded_for_both_sides():
@@ -234,11 +307,16 @@ def test_farm_core_counts_cores_only():
     """Саппорт в безопасной зоне попадает в 'farm', но не в 'farm_core'."""
     hero_team = {"npc_dota_hero_carry": 2, "npc_dota_hero_supp": 2,
                  "npc_dota_hero_lina": 3}
+    heroes = {0: "npc_dota_hero_carry", 1: "npc_dota_hero_supp",
+              2: "npc_dota_hero_lina"}
+    economy = (_eco(0, [(60, 10), (70, 14)]) + _eco(1, [(60, 2), (70, 5)])
+               + _eco(2, [(60, 9), (70, 12)]))
     rows = build_cells(
         [_snap(60, "npc_dota_hero_carry", -6000, -6000),
          _snap(60, "npc_dota_hero_supp", -5000, -5000),
          _snap(60, "npc_dota_hero_lina", 6000, 6000)],
-        [], [], hero_team, cores={"npc_dota_hero_carry"})
+        [], [], hero_team, cores={"npc_dota_hero_carry"},
+        economy=economy, heroes=heroes)
     assert len(_by_kind(rows, "farm", team=2)) == 2
     core = _by_kind(rows, "farm_core", team=2)
     assert len(core) == 1
@@ -253,7 +331,9 @@ def test_farm_core_is_absent_when_cores_are_unknown():
     """
     rows = build_cells(
         [_snap(60, "npc_dota_hero_axe", -6000, -6000),
-         _snap(60, "npc_dota_hero_lina", 6000, 6000)], [], [], HERO_TEAM)
+         _snap(60, "npc_dota_hero_lina", 6000, 6000)], [], [], HERO_TEAM,
+        economy=_eco(0, [(60, 5), (70, 9)]) + _eco(1, [(60, 4), (70, 8)]),
+        heroes=HEROES)
     assert _by_kind(rows, "farm")
     assert _by_kind(rows, "farm_core") == []
 
@@ -266,15 +346,38 @@ def test_farm_core_never_exceeds_farm():
     """
     hero_team = {"npc_dota_hero_carry": 2, "npc_dota_hero_supp": 2,
                  "npc_dota_hero_lina": 3}
+    heroes = {0: "npc_dota_hero_carry", 1: "npc_dota_hero_supp",
+              2: "npc_dota_hero_lina"}
+    economy = (_eco(0, [(60, 10), (120, 20), (180, 30)])
+               + _eco(1, [(60, 2), (120, 4)])
+               + _eco(2, [(60, 9), (120, 18)]))
     rows = build_cells(
         [_snap(60, "npc_dota_hero_carry", -6000, -6000),
          _snap(120, "npc_dota_hero_carry", -6000, -6000),
          _snap(60, "npc_dota_hero_supp", -6000, -6000),
          _snap(60, "npc_dota_hero_lina", 6000, 6000)],
-        [], [], hero_team, cores={"npc_dota_hero_carry"})
+        [], [], hero_team, cores={"npc_dota_hero_carry"},
+        economy=economy, heroes=heroes)
     farm = {(r["phase"], r["gx"], r["gy"]): r["n"]
             for r in _by_kind(rows, "farm", team=2)}
     for r in _by_kind(rows, "farm_core", team=2):
         key = (r["phase"], r["gx"], r["gy"])
         assert key in farm, "клетка farm_core без соответствующей farm"
         assert r["n"] <= farm[key]
+
+
+def test_farm_is_correct_when_economy_arrives_unsorted():
+    """Порядок сэмплов экономики не обещан никем.
+
+    Запрос в бэкфилле идёт без ORDER BY, и ClickHouse вправе отдать
+    строки как угодно. Несортированные сэмплы дают мнимые «падения»
+    счётчика между соседями, и рост находится там, где его не было, —
+    то есть фарм появляется в случайных точках маршрута.
+    """
+    positions = [_snap(60, "npc_dota_hero_axe", -6000, -6000),
+                 _snap(70, "npc_dota_hero_axe", 6000, -6000)]
+    ordered = _eco(0, [(60, 10), (70, 14), (80, 14)])
+    assert len(_farm_cells(positions, ordered)) == 1
+    for shuffled in ([ordered[2], ordered[0], ordered[1]],
+                     list(reversed(ordered))):
+        assert _farm_cells(positions, shuffled) == _farm_cells(positions, ordered)

@@ -3,7 +3,7 @@
 Что считается и откуда:
 
   presence  где сторона находилась          PositionSnapshots
-  farm      где фармила БЕЗОПАСНО            PositionSnapshots
+  farm      где ФАРМИЛА                      PositionSnapshots + EconomyTimeline
   farm_core то же, но ТОЛЬКО позиции 1–3     PositionSnapshots + EconomyTimeline
   death     где погибали герои               ReplayEvents KILL
   ward      где ставили обзор                ReplayEvents WARD_PLACE
@@ -23,11 +23,12 @@
 """
 from __future__ import annotations
 
+import bisect
 import math
 
 from dota_map import in_bounds, unit_to_grid, world_to_unit
 
-from .features import FIGHT_R, _normalize_hero
+from .features import _normalize_hero
 
 # Сторона квадратной сетки. 32 даёт клетку примерно 500 игровых единиц —
 # половина радиуса обзора варда. Мельче: карта становится шумной на
@@ -155,15 +156,92 @@ def core_heroes(economy: list[dict], teams: dict[int, int],
     return out
 
 
+class FarmClock:
+    """Когда каждый герой ФАКТИЧЕСКИ фармил — по росту добиток.
+
+    ЗАЧЕМ ОТДЕЛЬНАЯ СУЩНОСТЬ (спринт 141). До неё «фарм» определялся как
+    «герой жив, и рядом нет врага». Это не измерение фарма, а подмена его
+    признаком безопасности, и подмена дырявая: на ФОНТАНЕ оба условия
+    выполняются идеально. Герой воскрес, врагов рядом нет — и каждые
+    десять секунд ожидания телепорта капали в карту фарма. То же самое
+    происходило до гудка и при закупке, и на карте вырастали яркие пятна
+    ровно там, где не фармят никогда.
+
+    Заметить это можно было только глазом и только после того, как под
+    карту легла настоящая подложка: на стилизованной схеме угол карты
+    ничем не отличался от леса.
+
+    ЧЕМ МЕРЯЕМ. Позиции и экономика пишутся парсером в ОДНОМ цикле, раз в
+    300 тиков, и game_time у них поэтому совпадает тик в тик. Значит для
+    каждого интервала между сэмплами (около десяти секунд) известно, вырос
+    ли у героя счётчик добиток. Вырос — герой в этот интервал фармил, где
+    бы он ни стоял; не вырос — не фармил, даже если стоял в лесу и ему
+    ничего не угрожало.
+
+    Добитки считаются и по крипам линии, и по нейтралам, поэтому лесной
+    маршрут виден так же, как линейный.
+
+    ЧЕГО НЕ ДЕЛАЕТ. Не отличает добивание от подбора рун и не делит
+    интервал: если герой полсэмпла шёл, а полсэмпла бил крипа, весь
+    интервал считается фармом. Точнее сетка сэмплов и не позволяет, а
+    десять секунд — это меньше клетки карты по расстоянию.
+    """
+
+    def __init__(self, economy: list[dict], heroes: dict[int, str]):
+        by_pid: dict[int, list[tuple[int, int]]] = {}
+        for row in economy or []:
+            try:
+                pid = int(row["player_id"])
+                t = int(row.get("game_time") or 0)
+                lh = int(row.get("lh") or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            by_pid.setdefault(pid, []).append((t, lh))
+
+        # hero -> (времена сэмплов, рос ли счётчик в интервале ПОСЛЕ них)
+        self._by_hero: dict[str, tuple[list[int], list[bool]]] = {}
+        for pid, samples in by_pid.items():
+            hero = (heroes or {}).get(pid) or ""
+            if not hero:
+                continue
+            # Сортировка ОБЯЗАТЕЛЬНА: запрос экономики идёт без ORDER BY,
+            # а ClickHouse не обещает порядок. Несортированные сэмплы дают
+            # случайные «падения» счётчика между соседями, и рост
+            # обнаруживается там, где его не было.
+            samples.sort()
+            times = [t for t, _ in samples]
+            grew = [samples[i + 1][1] > samples[i][1]
+                    for i in range(len(samples) - 1)]
+            self._by_hero[_normalize_hero(hero)] = (times, grew)
+
+    def farming(self, hero: str, t: int) -> bool:
+        entry = self._by_hero.get(hero)
+        if entry is None:
+            return False
+        times, grew = entry
+        # Интервал, в который попадает позиция: последний сэмпл не позже t.
+        i = bisect.bisect_right(times, t) - 1
+        return 0 <= i < len(grew) and grew[i]
+
+
 def _presence_and_farm(acc: dict, positions: list[dict],
                        hero_team: dict[str, int],
-                       cores: set[str] | None = None) -> None:
-    """Присутствие и безопасный фарм.
+                       cores: set[str] | None = None,
+                       clock: "FarmClock" = None) -> None:
+    """Присутствие и фарм.
 
-    «Фарм» — не отдельный источник данных, а присутствие ЖИВОГО героя
-    там, где рядом нет врага. Именно это отличает фарм-маршрут от
-    маршрута к драке, и именно это различие видно на карте: у команды,
-    зажатой на своей половине, безопасная зона схлопывается.
+    ПРИСУТСТВИЕ — где живой герой находился. Простой факт, считается как
+    считался.
+
+    ФАРМ — где герой ФАРМИЛ, то есть где он стоял в те интервалы, когда у
+    него рос счётчик добиток (см. FarmClock).
+
+    До спринта 141 фарм определялся иначе: «жив и рядом нет врага».
+    Признак безопасности выдавался за признак фарма, и на фонтане он
+    срабатывал безотказно — герой воскрес, врагов нет, интервал засчитан.
+    Условие про врага теперь убрано СОВСЕМ, а не добавлено к новому:
+    держать оба значило бы выбросить фарм на оспариваемой линии, а он
+    такой же фарм, как лесной, и для маршрутов нужен не меньше.
 
     cores — герои позиций 1–3; для них дополнительно копится 'farm_core'.
     Пустое множество означает «кого считать кором, неизвестно», и тогда
@@ -171,40 +249,38 @@ def _presence_and_farm(acc: dict, positions: list[dict],
     была бы неотличима от честной и врала бы молча.
     """
     cores = cores or set()
-    by_time: dict[int, list[dict]] = {}
+    clock = clock or FarmClock([], {})
     for p in positions:
-        by_time.setdefault(int(p.get("game_time") or 0), []).append(p)
-
-    for t, snap in by_time.items():
+        t = int(p.get("game_time") or 0)
+        hero = _normalize_hero(str(p.get("hero", "")))
+        team = hero_team.get(hero)
+        if not team or not int(p.get("is_alive") or 0):
+            continue
+        c = cell(p.get("x"), p.get("y"))
+        if c is None:
+            continue
         phase = phase_of(t)
-        alive = []
-        for p in snap:
-            team = hero_team.get(_normalize_hero(str(p.get("hero", ""))))
-            if not team or not int(p.get("is_alive") or 0):
-                continue
-            c = cell(p.get("x"), p.get("y"))
-            if c is None:
-                continue
-            hero = _normalize_hero(str(p.get("hero", "")))
-            alive.append((team, float(p["x"]), float(p["y"]), c, hero))
-        for team, x, y, c, hero in alive:
-            key = (phase, team, "presence", c[0], c[1])
+        key = (phase, team, "presence", c[0], c[1])
+        acc[key] = acc.get(key, 0) + 1
+
+        # Нет экономики — нет и фарма: пустой FarmClock отвечает «нет» на
+        # любой вопрос. Отдельной проверки «данные вообще есть» тут была
+        # заведена и убрана: она ничего не меняла, потому что пустой
+        # словарь и так не даёт ни одного положительного ответа.
+        if not clock.farming(hero, t):
+            continue
+        key = (phase, team, "farm", c[0], c[1])
+        acc[key] = acc.get(key, 0) + 1
+        if hero in cores:
+            key = (phase, team, "farm_core", c[0], c[1])
             acc[key] = acc.get(key, 0) + 1
-            near_enemy = any(
-                other_team != team
-                and math.dist((x, y), (ox, oy)) <= FIGHT_R
-                for other_team, ox, oy, _, _ in alive)
-            if not near_enemy:
-                key = (phase, team, "farm", c[0], c[1])
-                acc[key] = acc.get(key, 0) + 1
-                if hero in cores:
-                    key = (phase, team, "farm_core", c[0], c[1])
-                    acc[key] = acc.get(key, 0) + 1
 
 
 def build_cells(positions: list[dict], map_events: list[dict],
                 fights: list[dict], hero_team: dict[str, int],
-                cores: set[str] | None = None
+                cores: set[str] | None = None,
+                economy: list[dict] | None = None,
+                heroes: dict[int, str] | None = None,
                 ) -> list[dict]:
     """Строки MatchMapCells матча (без match_id — его ставит раннер).
 
@@ -215,7 +291,8 @@ def build_cells(positions: list[dict], map_events: list[dict],
     acc: dict[tuple, int] = {}
     hero_team = _norm_team(hero_team or {})
     _presence_and_farm(acc, positions or [], hero_team,
-                       {_normalize_hero(h) for h in (cores or set())})
+                       {_normalize_hero(h) for h in (cores or set())},
+                       FarmClock(economy or [], heroes or {}))
 
     for e in map_events or []:
         kind = {"KILL": "death", "WARD_PLACE": "ward",

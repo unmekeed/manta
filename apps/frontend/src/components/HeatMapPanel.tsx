@@ -26,8 +26,9 @@ const PHASES: { key: HeatmapPhase; label: string }[] = [
 const KINDS: { key: HeatmapKind; label: string; hint: string; blobs?: boolean }[] = [
   { key: "presence", label: "Присутствие", hint: "где находились герои", blobs: true },
   { key: "farm_core", label: "Фарм коров", blobs: true,
-    hint: "маршруты позиций 1–3; фарм саппортов сюда не входит" },
-  { key: "farm", label: "Фарм (все)", hint: "вся команда, включая саппортов", blobs: true },
+    hint: "позиции 1–3: где у них РОС счётчик добиток" },
+  { key: "farm", label: "Фарм (все)", blobs: true,
+    hint: "вся команда, включая саппортов" },
   { key: "death", label: "Смерти", hint: "где умирали" },
   { key: "ward", label: "Варды", hint: "куда ставили обзор" },
   { key: "smoke", label: "Смоки", hint: "откуда шли под смоком" },

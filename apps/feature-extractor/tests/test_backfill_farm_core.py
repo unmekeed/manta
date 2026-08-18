@@ -1,4 +1,4 @@
-"""Тесты досчёта farm_core на старых матчах (спринт 140).
+"""Тесты пересчёта карт фарма на старых матчах (спринты 140–141).
 
 Проверяется главным образом то, чего инструмент НЕ должен делать. Он
 трогает живую витрину, а самая дорогая ошибка здесь — не «не досчитал», а
@@ -26,16 +26,21 @@ class FakeCH:
     бы на него позиции — то есть строки без match_id.
     """
 
-    def __init__(self, pending=None, **tables):
+    def __init__(self, pending=None, existing=None, **tables):
         self.tables = tables
         self.pending = pending or []
+        # Уже лежащие клетки фарма — отдельно от очереди: оба запроса
+        # упоминают MatchMapCells, и различает их только форма.
+        self.existing = existing or []
         self.inserted: list[tuple[str, list[dict]]] = []
         self.executed: list[str] = []
         self.queries: list[str] = []
 
     def select(self, query, params=None):
         self.queries.append(query)
-        if "MatchMapCells" in query:      # запрос очереди
+        if "SELECT phase, team, kind" in query:   # уже лежащие клетки
+            return self.existing
+        if "MatchMapCells" in query:               # запрос очереди
             return self.pending
         for name, rows in self.tables.items():
             if name in query:
@@ -57,13 +62,13 @@ ROSTER = [
     {"player_id": 4, "team": 2, "hero": "npc_dota_hero_supp5"},
     {"player_id": 5, "team": 3, "hero": "npc_dota_hero_enemy"},
 ]
+# По ДВА сэмпла на игрока: со спринта 141 фарм определяется ростом
+# счётчика добиток между сэмплами, и по одной точке его не видно —
+# ранжировать коров можно, а сказать «фармил в этот интервал» нельзя.
 ECONOMY = [
-    {"player_id": 0, "game_time": 1800, "lh": 400},
-    {"player_id": 1, "game_time": 1800, "lh": 300},
-    {"player_id": 2, "game_time": 1800, "lh": 200},
-    {"player_id": 3, "game_time": 1800, "lh": 20},
-    {"player_id": 4, "game_time": 1800, "lh": 10},
-    {"player_id": 5, "game_time": 1800, "lh": 350},
+    r for pid, lh in [(0, 400), (1, 300), (2, 200), (3, 20), (4, 10), (5, 350)]
+    for r in ({"player_id": pid, "game_time": 60, "lh": lh // 2},
+              {"player_id": pid, "game_time": 1800, "lh": lh})
 ]
 
 
@@ -78,6 +83,9 @@ POSITIONS = [
 ]
 
 
+CUTOFF = "2026-01-01 00:00:00"
+
+
 def _ch(pending=None, **over):
     return FakeCH(pending=pending,
                   **{"PlayerMatchFeatures": ROSTER,
@@ -87,17 +95,18 @@ def _ch(pending=None, **over):
 
 # -- чего инструмент не должен делать -------------------------------------------
 
-def test_writes_only_farm_core_rows():
-    """Ни одной строки другого вида.
+def test_writes_only_farm_kinds():
+    """Ни одной строки чужого вида.
 
     Инструмент считает через тот же build_cells, что и раннер, а тот
-    попутно выдаёт presence и farm. Отдать их вместе с farm_core значило
-    бы удвоить уже посчитанное присутствие — карта стала бы вдвое
-    плотнее без единого нового факта.
+    попутно выдаёт presence. Отдать его вместе с фармом значило бы
+    удвоить уже посчитанное присутствие — карта стала бы вдвое плотнее
+    без единого нового факта.
     """
-    rows = bf.farm_core_rows(_ch(), 42)
-    assert rows, "на этих данных farm_core обязан посчитаться"
-    assert {r["kind"] for r in rows} == {"farm_core"}
+    rows = bf.farm_rows(_ch(), 42)
+    assert rows, "на этих данных фарм обязан посчитаться"
+    assert {r["kind"] for r in rows} <= {"farm", "farm_core"}
+    assert "presence" not in {r["kind"] for r in rows}
 
 
 def test_never_deletes_anything():
@@ -108,28 +117,27 @@ def test_never_deletes_anything():
     их сырьё истекло по TTL, и «обновление» стёрло бы данные навсегда.
     """
     ch = _ch()
-    bf.farm_core_rows(ch, 42)
+    bf.farm_rows(ch, 42)
     assert ch.executed == []
     assert not any("DELETE" in q or "ALTER" in q for q in ch.queries)
 
 
 def test_only_cores_are_counted():
-    """Саппорт в безопасной зоне в farm_core не попадает.
+    """Саппорт попадает в farm, но не в farm_core.
 
-    Смотрим на сторону Radiant: там стоят кор и саппорт, в РАЗНЫХ клетках
-    сетки 32×32. Клетка должна остаться одна — саппортовой быть не
-    должно. У Dire в ростере один игрок, и он тоже кор (троих там просто
-    неоткуда взять) — его строка законна и проверке не мешает.
+    Оба фармят (счётчик добиток растёт у обоих) и стоят в РАЗНЫХ клетках
+    сетки 32×32, поэтому у Radiant должно выйти две клетки farm и одна
+    farm_core.
     """
-    rows = bf.farm_core_rows(_ch(), 42)
+    rows = bf.farm_rows(_ch(), 42)
     radiant = [r for r in rows if r["team"] == 2]
-    assert len(radiant) == 1
-    assert radiant[0]["n"] == 1
+    assert len([r for r in radiant if r["kind"] == "farm"]) == 2
+    assert len([r for r in radiant if r["kind"] == "farm_core"]) == 1
 
 
 def test_match_id_is_stamped():
     """Без match_id строки лягут в чужой матч — точнее, в матч 0."""
-    rows = bf.farm_core_rows(_ch(), 4242)
+    rows = bf.farm_rows(_ch(), 4242)
     assert all(r["match_id"] == 4242 for r in rows)
 
 
@@ -138,32 +146,35 @@ def test_match_id_is_stamped():
 @pytest.mark.parametrize("missing", ["PlayerMatchFeatures", "PositionSnapshots"])
 def test_missing_source_yields_nothing_not_garbage(missing):
     """Нет ростера или позиций — пусто, а не строки с пустыми героями."""
-    assert bf.farm_core_rows(_ch(**{missing: []}), 42) == []
+    assert bf.farm_rows(_ch(**{missing: []}), 42) == []
 
 
 def test_no_economy_means_no_rows():
-    """Без добиток ранжировать некого, и вид не пишется ВОВСЕ.
+    """Без экономики матч ПРОПУСКАЕТСЯ, а не пересчитывается в пустоту.
 
-    Посчитанный по всем пятерым, он был бы неотличим от честного и врал
-    бы молча — та же логика, что в раннере.
+    Со спринта 141 экономика нужна для самого определения фарма. Пустой
+    пересчёт погасил бы нулями всё, что уже посчитано, — то есть стёр бы
+    карту у матча, которому просто не хватило источника. Непересчитанный
+    матч честнее обнулённого.
     """
-    assert bf.farm_core_rows(_ch(EconomyTimeline=[]), 42) == []
+    assert bf.farm_rows(_ch(EconomyTimeline=[]), 42) == []
 
 
 # -- выборка очереди ------------------------------------------------------------
 
 def test_pending_query_uses_final_and_filters_by_kind():
-    """FINAL обязателен, а вид проверяется параметром, а не строкой.
+    """FINAL обязателен, виды и отметка идут параметрами, а не строкой.
 
     MatchMapCells — ReplacingMergeTree: без FINAL уже досчитанный матч
     попадал бы в выборку повторно из-за несмёрженных кусков, и счётчики
     прогона врали бы про остаток работы.
     """
     ch = _ch(pending=[{"match_id": 7}, {"match_id": 9}])
-    assert bf.pending_matches(ch, 10) == [7, 9]
+    assert bf.pending_matches(ch, 10, CUTOFF) == [7, 9]
     q = ch.queries[-1]
     assert "FINAL" in q
-    assert "{kind:String}" in q and "{limit:UInt32}" in q
+    assert "{kinds:Array(String)}" in q and "{limit:UInt32}" in q
+    assert "{cutoff:DateTime}" in q
 
 
 # -- прогон целиком -------------------------------------------------------------
@@ -176,18 +187,18 @@ def test_run_never_deletes_and_writes_only_map_cells():
     проверка «ничего не удаляет» смотрела только на сборщик строк.
     """
     ch = _ch(pending=[{"match_id": 7}])
-    bf.run(ch, limit=5, dry_run=False)
+    bf.run(ch, limit=5, dry_run=False, cutoff=CUTOFF)
     assert ch.executed == [], "инструмент выполнил DDL/DML — он не должен"
     assert all(t == "MatchMapCells" for t, _ in ch.inserted)
     for _, rows in ch.inserted:
-        assert {r["kind"] for r in rows} == {"farm_core"}
+        assert {r["kind"] for r in rows} <= {"farm", "farm_core"}
 
 
 def test_dry_run_writes_nothing():
     """Сухой прогон обязан быть по-настоящему сухим: на нём и решают,
     запускать ли настоящий."""
     ch = _ch(pending=[{"match_id": 7}])
-    bf.run(ch, limit=5, dry_run=True)
+    bf.run(ch, limit=5, dry_run=True, cutoff=CUTOFF)
     assert ch.inserted == []
     assert ch.executed == []
 
@@ -199,7 +210,7 @@ def test_empty_queue_is_success_not_failure():
     ненулевой код, и в cron это читалось бы как поломка.
     """
     ch = FakeCH()
-    assert bf.run(ch, limit=5, dry_run=False) == 0
+    assert bf.run(ch, limit=5, dry_run=False, cutoff=CUTOFF) == 0
 
 
 def test_totally_failed_run_is_not_reported_as_success():
@@ -209,7 +220,7 @@ def test_totally_failed_run_is_not_reported_as_success():
     отчёта: работа не сделана, а выглядит сделанной.
     """
     ch = _ch(pending=[{"match_id": 7}], PlayerMatchFeatures=[])
-    assert bf.run(ch, limit=5, dry_run=False) == 1
+    assert bf.run(ch, limit=5, dry_run=False, cutoff=CUTOFF) == 1
     assert ch.inserted == []
 
 
@@ -223,15 +234,15 @@ def test_unusable_match_does_not_read_positions():
     """
     ch = _ch(PlayerMatchFeatures=[])
     ch.queries.clear()
-    assert bf.farm_core_rows(ch, 42) == []
+    assert bf.farm_rows(ch, 42) == []
     assert not any("PositionSnapshots" in q for q in ch.queries)
 
 
 def test_match_without_last_hits_does_not_read_positions():
-    """То же для матча, у которого нет добиток: коров не определить."""
+    """То же для матча без экономики: фарм не определить ничем."""
     ch = _ch(EconomyTimeline=[])
     ch.queries.clear()
-    assert bf.farm_core_rows(ch, 42) == []
+    assert bf.farm_rows(ch, 42) == []
     assert not any("PositionSnapshots" in q for q in ch.queries)
 
 
@@ -246,11 +257,68 @@ def test_skip_reason_distinguishes_missing_roster_from_missing_economy(caplog):
     """
     import logging
     with caplog.at_level(logging.INFO, logger="farm-core-backfill"):
-        bf.farm_core_rows(_ch(PlayerMatchFeatures=[]), 1)
+        bf.farm_rows(_ch(PlayerMatchFeatures=[]), 1)
         no_roster = caplog.text
         caplog.clear()
-        bf.farm_core_rows(_ch(EconomyTimeline=[]), 2)
+        bf.farm_rows(_ch(EconomyTimeline=[]), 2)
         no_economy = caplog.text
     assert "ростер" in no_roster
     assert "ростер" not in no_economy
-    assert "кор" in no_economy
+    assert "экономик" in no_economy
+
+
+# -- гашение старых клеток ------------------------------------------------------
+
+def test_vanished_cells_are_zeroed_not_left_behind():
+    """Клетка, которой в новом расчёте НЕТ, гасится нулём.
+
+    Ради этого пересчёт и затевался. Новое определение убирает целые
+    области — прежде всего фонтан. Вставка замещает клетку по ключу и про
+    ключи, которых в ней нет, не знает: без гашения старое пятно на
+    фонтане осталось бы на карте навсегда, и пересчёт выглядел бы
+    выполненным.
+    """
+    ch = _ch()
+    # Клетка на фонтане, посчитанная старым определением. Такой позиции в
+    # POSITIONS нет, значит в новом расчёте её не будет.
+    ch.existing = [{"phase": "early", "team": 2, "kind": "farm",
+                    "gx": 0, "gy": 0}]
+    rows = bf.farm_rows(ch, 42)
+    zeros = [r for r in rows if r["n"] == 0]
+    assert len(zeros) == 1
+    assert (zeros[0]["gx"], zeros[0]["gy"]) == (0, 0)
+    assert zeros[0]["kind"] == "farm"
+
+
+def test_surviving_cells_are_not_zeroed():
+    """Клетка, которая есть и в новом расчёте, гасится НЕ должна.
+
+    Иначе пересчёт стирал бы ровно то, что подтвердил: строки с одним
+    ключом и разным n схлопнутся по версии, и победить мог бы ноль.
+    """
+    ch = _ch()
+    fresh = bf.farm_rows(ch, 42)
+    live = [(r["phase"], r["team"], r["kind"], r["gx"], r["gy"])
+            for r in fresh if r["n"] > 0]
+    ch2 = _ch()
+    ch2.existing = [{"phase": p, "team": t, "kind": k, "gx": gx, "gy": gy}
+                    for p, t, k, gx, gy in live]
+    rows = bf.farm_rows(ch2, 42)
+    assert [r for r in rows if r["n"] == 0] == []
+
+
+def test_zero_rows_are_dropped_by_the_reader():
+    """Гашение работает только потому, что читатель отбрасывает n <= 0.
+
+    Связь неочевидная и живёт в другом сервисе: измени reportgen фильтр —
+    и погашенные клетки вернутся на карту как пустые, но существующие.
+    Проверяем контракт здесь, чтобы он не разошёлся молча.
+    """
+    sys.path.insert(0, str(ROOT.parents[1] / "apps/report-generator/src"))
+    from reportgen.heatmaps import build_heatmaps
+    section = build_heatmaps([
+        {"phase": "early", "team": 2, "kind": "farm", "gx": 1, "gy": 1, "n": 0},
+        {"phase": "early", "team": 2, "kind": "farm", "gx": 2, "gy": 2, "n": 5},
+    ])
+    cells = section["phases"]["early"]["farm"]["radiant"]
+    assert cells == [[2, 2, 5]]

@@ -200,10 +200,15 @@ class Extractor:
             # же выборки, что прочитана выше. Отдельный запрос ради
             # ранжирования пяти чисел был бы лишним походом в ClickHouse
             # на каждый матч.
+            # economy идёт в карты дважды и за разным: по ней ранжируются
+            # коры (позиции 1–3) и по ней же определяется, в какие
+            # интервалы герой фактически фармил. Отдельных запросов не
+            # заводим — выборка уже прочитана выше.
             crows = build_cells(positions, raw_events, frows,
                                 roster.hero_team,
                                 core_heroes(economy, roster.teams,
-                                            roster.heroes))
+                                            roster.heroes),
+                                economy=economy, heroes=roster.heroes)
             for r in crows:
                 r["match_id"] = match_id
             self._replace_rows("MatchMapCells", match_id, crows)
