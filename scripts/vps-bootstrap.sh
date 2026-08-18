@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Развёртывание Manta на чистом VPS (спринт 143).
+#
+#     ./scripts/vps-bootstrap.sh            # полная установка
+#     ./scripts/vps-bootstrap.sh --check    # только проверить готовность
+#
+# Скрипт ИДЕМПОТЕНТЕН: его можно гонять повторно после сбоя или обновления
+# репозитория, ничего не сломается.
+#
+# ЧТО ОН ДЕЛАЕТ И В КАКОМ ПОРЯДКЕ
+#
+#   1. Пароли. Генерирует их ОДИН раз и кладёт в два файла сразу:
+#      deployments/.env (его читает docker compose) и ~/manta-train.env
+#      (его читают скрипты на хосте — бэкап, миграции, обмен). Файлы
+#      разные, пароль обязан быть один: разъехавшись, они дают не отказ, а
+#      «пароль неверен» из скрипта при живом контейнере.
+#   2. Docker, если его нет.
+#   3. Фаервол: наружу только SSH. Всё остальное — через SSH-туннель.
+#   4. Стек с наложением docker-compose.vps.yml (порты на 127.0.0.1,
+#      потолки памяти).
+#   5. Миграции.
+#   6. Расписание: бэкап, обмен с домашней машиной, сторож.
+#
+# ЧЕГО ОН НЕ ДЕЛАЕТ. Не трогает уже сгенерированный пароль — см. ниже, это
+# самое опасное место всего скрипта. Не настраивает rclone (нужен браузер
+# для OAuth — делается с домашней машины, конфиг переносится). Не заливает
+# датасет: это отдельный шаг, см. docs/SETUP-VPS.md.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+REPO=$(pwd)
+
+ENV_COMPOSE="$REPO/deployments/.env"
+ENV_HOST="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
+COMPOSE="docker compose -f deployments/docker-compose.yml -f deployments/docker-compose.vps.yml"
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+
+say()  { printf '\n>> %s\n' "$1"; }
+ok()   { printf '   OK   %s\n' "$1"; }
+warn() { printf '   ВНИМАНИЕ %s\n' "$1"; }
+die()  { printf '\nОСТАНОВ: %s\n' "$1" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" = "0" ] || command -v sudo >/dev/null || \
+        die "нужен root или sudo"
+}
+SUDO=""
+[ "$(id -u)" = "0" ] || SUDO="sudo"
+
+# -- 1. пароли -----------------------------------------------------------------
+
+gen_password() {
+    # openssl есть на любой Ubuntu; head -c из /dev/urandom — запасной путь.
+    if command -v openssl >/dev/null; then
+        openssl rand -base64 24 | tr -d '/+=' | cut -c1-24
+    else
+        tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+    fi
+}
+
+setup_secrets() {
+    say "пароли"
+
+    # САМОЕ ОПАСНОЕ МЕСТО СКРИПТА.
+    #
+    # Пароль генерируется РОВНО ОДИН РАЗ. Если сгенерировать его заново на
+    # повторном прогоне, тома Postgres и ClickHouse останутся со старым, а
+    # конфиг получит новый — контейнеры перестанут пускать к УЖЕ
+    # СОБРАННЫМ данным. Выглядеть это будет как «база сломалась», а
+    # чинится только ручным восстановлением старого пароля, которого
+    # никто не записал.
+    #
+    # Поэтому: файл есть — не трогаем, что бы в нём ни лежало.
+    if [ -f "$ENV_COMPOSE" ] && grep -q '^MANTA_DB_PASSWORD=' "$ENV_COMPOSE"; then
+        ok "$ENV_COMPOSE уже содержит пароль — не перегенерирую"
+    else
+        [ "$CHECK_ONLY" = "1" ] && { warn "паролей ещё нет"; return; }
+        local pw grafana
+        pw=$(gen_password)
+        grafana=$(gen_password)
+        umask 077
+        cat >"$ENV_COMPOSE" <<EOF
+# Секреты docker compose для этой машины. Сгенерированы vps-bootstrap.sh.
+# В git не попадают: deployments/.env в .gitignore.
+#
+# НЕ МЕНЯТЬ вручную после первого запуска: тома баз созданы с этим
+# паролем, и правка конфига без правки томов закроет доступ к данным.
+MANTA_DB_PASSWORD=$pw
+GRAFANA_ADMIN_PASSWORD=$grafana
+EOF
+        chmod 600 "$ENV_COMPOSE"
+        ok "сгенерирован $ENV_COMPOSE (0600)"
+    fi
+
+    # Тот же пароль — скриптам на хосте. Они ходят в контейнеры напрямую
+    # (docker exec clickhouse-client --password ...), и берут его из
+    # ~/manta-train.env. Два файла, один пароль.
+    local pw
+    pw=$(grep '^MANTA_DB_PASSWORD=' "$ENV_COMPOSE" 2>/dev/null | cut -d= -f2-)
+    [ -n "$pw" ] && [ "$CHECK_ONLY" != "1" ] || return 0
+
+    touch "$ENV_HOST"; chmod 600 "$ENV_HOST"
+    for var in CLICKHOUSE_PASSWORD POSTGRES_PASSWORD; do
+        if grep -q "^$var=" "$ENV_HOST"; then
+            # Уже задан — сверяем, а не переписываем: чужое значение может
+            # быть осознанным, а молча его заменить значит сломать то, что
+            # работало.
+            grep -q "^$var=$pw$" "$ENV_HOST" || \
+                warn "$var в $ENV_HOST не совпадает с deployments/.env"
+        else
+            printf '%s=%s\n' "$var" "$pw" >>"$ENV_HOST"
+        fi
+    done
+    ok "$ENV_HOST согласован с deployments/.env"
+}
+
+# -- 2. docker -----------------------------------------------------------------
+
+setup_docker() {
+    say "docker"
+    if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
+        ok "уже установлен: $(docker --version | cut -d, -f1)"
+        return
+    fi
+    [ "$CHECK_ONLY" = "1" ] && { warn "docker не установлен"; return; }
+    need_root
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq ca-certificates curl gnupg
+    curl -fsSL https://get.docker.com | $SUDO sh || die "установка docker не удалась"
+    # Работать под root каждый раз не нужно, но и перелогин посреди
+    # скрипта невозможен: группа применится со следующей сессии.
+    [ "$(id -u)" = "0" ] || $SUDO usermod -aG docker "$USER" || true
+    ok "docker установлен (перелогиньтесь, чтобы группа применилась)"
+}
+
+# -- 3. фаервол ----------------------------------------------------------------
+
+setup_firewall() {
+    say "фаервол"
+    # Наложение docker-compose.vps.yml прибивает порты к 127.0.0.1, и это
+    # основная защита. Фаервол — вторая линия: docker умеет пробивать
+    # правила ufw, если однажды кто-то опубликует порт без loopback.
+    if ! command -v ufw >/dev/null; then
+        [ "$CHECK_ONLY" = "1" ] && { warn "ufw не установлен"; return; }
+        need_root
+        $SUDO apt-get install -y -qq ufw
+    fi
+    if $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
+        ok "ufw уже включён"
+    else
+        [ "$CHECK_ONLY" = "1" ] && { warn "ufw выключен"; return; }
+        $SUDO ufw --force default deny incoming
+        $SUDO ufw --force default allow outgoing
+        # SSH разрешаем ДО включения: иначе скрипт отрежет сам себя от
+        # машины, и чинить придётся через консоль хостера.
+        $SUDO ufw allow OpenSSH
+        $SUDO ufw --force enable
+        ok "ufw включён, наружу только SSH"
+    fi
+}
+
+# -- 4-5. стек и миграции ------------------------------------------------------
+
+start_stack() {
+    say "стек"
+    if [ "$CHECK_ONLY" = "1" ]; then
+        $COMPOSE ps 2>/dev/null | tail -n +2 | head -20
+        return
+    fi
+    $COMPOSE --profile apps up -d --build || die "compose up не удался"
+    ok "контейнеры подняты"
+
+    say "ожидание готовности баз"
+    for _ in $(seq 1 60); do
+        if docker exec manta-clickhouse-1 clickhouse-client \
+             --user dota --password "$(grep '^MANTA_DB_PASSWORD=' "$ENV_COMPOSE" | cut -d= -f2-)" \
+             -q "SELECT 1" >/dev/null 2>&1; then
+            ok "ClickHouse отвечает"
+            break
+        fi
+        sleep 5
+    done
+
+    say "миграции"
+    ./scripts/pg-migrate.sh && ./scripts/ch-migrate.sh || die "миграции не прошли"
+    ok "миграции применены"
+}
+
+# -- 6. расписание -------------------------------------------------------------
+
+setup_cron() {
+    say "расписание"
+    local marker="# manta-vps"
+    if crontab -l 2>/dev/null | grep -qF "$marker"; then
+        ok "cron уже настроен"
+        return
+    fi
+    [ "$CHECK_ONLY" = "1" ] && { warn "cron не настроен"; return; }
+    # Порядок в сутках: сначала свой бэкап, потом обмен с домашней
+    # машиной, потом сторож — он и доложит, что обе части прошли.
+    { crontab -l 2>/dev/null;
+      printf '%s\n' "$marker"
+      printf '30 3 * * * cd %s && ./scripts/backup.sh\n' "$REPO"
+      printf '0 4 * * * cd %s && ./scripts/peer-sync.sh\n' "$REPO"
+      printf '0 9 * * * cd %s && ./scripts/heartbeat.sh\n' "$REPO"
+    } | crontab -
+    ok "бэкап 03:30, обмен 04:00, сторож 09:00 (UTC)"
+}
+
+# -- поехали -------------------------------------------------------------------
+
+echo "=================================================================="
+echo "  Manta на VPS: $( [ "$CHECK_ONLY" = 1 ] && echo проверка || echo установка )"
+echo "  каталог: $REPO"
+echo "=================================================================="
+
+setup_secrets
+setup_docker
+setup_firewall
+start_stack
+setup_cron
+
+echo
+echo "=================================================================="
+if [ "$CHECK_ONLY" = "1" ]; then
+    echo "  Проверка закончена."
+else
+    echo "  Готово. Дальше — docs/SETUP-VPS.md:"
+    echo "   • перенести rclone.conf с домашней машины (OAuth нужен браузер)"
+    echo "   • дописать в $ENV_HOST метку, шард и ключи API"
+    echo "   • залить датасет: make peer-sync"
+    echo "   • Grafana — только через SSH-туннель, наружу порты закрыты"
+fi
+echo "=================================================================="

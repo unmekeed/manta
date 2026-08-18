@@ -19,6 +19,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
 .PHONY: backup-drill heartbeat tg-test map-calibrate farm-core-backfill peer-sync
+.PHONY: vps-bootstrap vps-up
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -254,6 +255,13 @@ collect-report: ## Почему упал темп сбора + покрытие 
 
 backfill:      ## Пересчёт фич по сохранённому JSON, без вызовов API: ARGS="--limit 50"
 	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs python3 -m collector.backfill $(ARGS)
+
+vps-bootstrap: ## Развернуть Manta на чистом VPS: ARGS=--check
+	./scripts/vps-bootstrap.sh $(ARGS)
+
+vps-up:        ## Поднять стек с наложением для VPS (порты на 127.0.0.1)
+	docker compose -f deployments/docker-compose.yml \
+		-f deployments/docker-compose.vps.yml --profile apps up -d
 
 peer-sync:     ## Втянуть слепки соседних машин из облака: ARGS=--dry-run
 	./scripts/peer-sync.sh $(ARGS)
