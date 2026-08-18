@@ -161,6 +161,64 @@ setup_firewall() {
 
 # -- 4-5. стек и миграции ------------------------------------------------------
 
+build_images() {
+    say "сборка образов (по одному)"
+
+    # ПО ОДНОМУ, а не разом, и это не про аккуратность.
+    #
+    # `compose up --build` собирает ВСЕ образы параллельно. На домашней
+    # машине это удобно, на двухъядерном VPS — нет: одновременно идут три
+    # pip install, npm ci, две сборки Go и компиляция C++-ядра. Памяти не
+    # хватает, и падает то, чему не повезло.
+    #
+    # Хуже другое. Когда одна сборка падает, остальные семь получают
+    # CANCELED, и в выводе остаются двести строк отменённых шагов, среди
+    # которых настоящей ошибки уже не найти. Первый живой прогон на VPS
+    # именно так и закончился: `go mod download` вернул код 1, а ЧТО он
+    # сказал — не сохранилось.
+    #
+    # Последовательная сборка медленнее, но отвечает на вопрос «что
+    # сломалось» с первого раза.
+    local log="/tmp/manta-build.log"
+    : >"$log"
+
+    # Список собираемых сервисов берётся из САМОГО compose, а не пишется
+    # руками: записанный список разошёлся бы при добавлении сервиса, и
+    # новый молча не собирался бы. json + stdlib-модуль json — PyYAML на
+    # голой Ubuntu нет, а python3 есть.
+    local buildable=""
+    if command -v python3 >/dev/null; then
+        buildable=$($COMPOSE --profile apps config --format json 2>/dev/null |
+            python3 -c "import json,sys
+d=json.load(sys.stdin)
+print(' '.join(n for n,s in d.get('services',{}).items() if 'build' in s))" 2>/dev/null)
+    fi
+
+    if [ -z "$buildable" ]; then
+        # Не смогли разобрать — собираем всё одной командой, но с
+        # выключенным bake: без него compose строит последовательно.
+        warn "список сервисов не разобран, собираю всё разом"
+        COMPOSE_BAKE=false $COMPOSE --profile apps build 2>&1 | tee -a "$log" | tail -40 \
+            || die "сборка не удалась, полный вывод: $log"
+        ok "образы собраны"
+        return
+    fi
+
+    local failed=""
+    for svc in $buildable; do
+        printf '   собираю %s ...\n' "$svc"
+        if COMPOSE_BAKE=false $COMPOSE --profile apps build "$svc" >>"$log" 2>&1; then
+            printf '   OK   %s\n' "$svc"
+        else
+            failed="$failed $svc"
+            warn "$svc не собрался, последние строки:"
+            tail -25 "$log" | sed 's/^/      /'
+        fi
+    done
+    [ -z "$failed" ] || die "не собрались:$failed — полный вывод в $log"
+    ok "образы собраны"
+}
+
 start_stack() {
     say "стек"
     if [ "$CHECK_ONLY" = "1" ]; then
@@ -183,7 +241,8 @@ start_stack() {
         fi
         return
     fi
-    $COMPOSE --profile apps up -d --build || die "compose up не удался"
+    build_images
+    $COMPOSE --profile apps up -d || die "compose up не удался"
     ok "контейнеры подняты"
 
     say "ожидание готовности баз"

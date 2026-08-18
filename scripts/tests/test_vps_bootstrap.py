@@ -337,3 +337,72 @@ def test_no_check_section_is_completely_mute(tmp_path):
         body = _functions(name)
         assert re.search(r'\b(ok|warn)\s+"', body), \
             f"раздел {name} может завершиться, ничего не сказав"
+
+
+# -- сборка образов --------------------------------------------------------------
+
+def test_build_list_is_derived_not_hardcoded():
+    """Список собираемых сервисов НЕ записан в скрипте.
+
+    Записанный руками, он разошёлся бы с compose при добавлении сервиса,
+    и новый молча не собирался бы: `up` подтянул бы для него старый образ
+    или упал бы на отсутствующем — но уже в другом месте и с другой
+    ошибкой.
+    """
+    src = _functions("build_images")
+    for name in ("api-gateway", "data-collector", "feature-extractor",
+                 "parser-svc", "ml-service", "frontend"):
+        assert name not in src, f"имя сервиса {name} зашито в скрипт"
+    assert "config --format json" in src, "список не берётся из compose"
+
+
+def test_build_is_sequential_not_parallel():
+    """Сборка идёт ПО ОДНОМУ сервису.
+
+    `compose up --build` собирает восемь образов разом: три pip install,
+    npm ci, две сборки Go и компиляция C++-ядра одновременно. На
+    двухъядерном VPS это не только медленно — при падении одной сборки
+    остальные получают CANCELED, и настоящая ошибка тонет в двухстах
+    строках отменённых шагов. Первый живой прогон закончился именно так.
+    """
+    src = _functions("build_images", "start_stack")
+    assert "up -d --build" not in src, "сборка снова идёт вместе с up"
+    assert 'build "$svc"' in src, "сборка не разбита по сервисам"
+
+
+def test_failed_build_names_the_service_and_keeps_the_log():
+    """При сбое названо, ЧТО не собралось, и сказано, где полный вывод.
+
+    Иначе повторяется первый прогон: код возврата 1 и ни слова о том,
+    какой сервис и почему.
+    """
+    src = _functions("build_images")
+    assert 'failed="$failed $svc"' in src
+    # Проверяем именно СООБЩЕНИЕ об остановке, а не наличие $log где-то в
+    # функции: путь к логу упоминается в ней трижды по другим поводам, и
+    # проверка «$log встречается» проходила бы даже с обезличенным
+    # «сборка не удалась».
+    die_lines = [l for l in src.splitlines() if "die " in l and "failed" in l]
+    assert die_lines, "нет строки остановки при сбое сборки"
+    assert any("$log" in l for l in die_lines), \
+        f"в сообщении о сбое не сказано, где полный вывод: {die_lines}"
+
+
+def test_every_buildable_service_of_compose_is_covered():
+    """Проверка контракта: то, что compose помечает build, скрипт собирает.
+
+    Тест читает compose так же, как это делает скрипт, — если однажды
+    формат вывода `config --format json` изменится, упадёт и тест, а не
+    только установка на чужой машине.
+    """
+    import json
+    compose = SCRIPT.parents[1] / "deployments" / "docker-compose.yml"
+    proc = subprocess.run(
+        ["docker", "compose", "-f", str(compose), "--profile", "apps",
+         "config", "--format", "json"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip("docker compose недоступен")
+    services = json.loads(proc.stdout).get("services", {})
+    buildable = [n for n, s in services.items() if "build" in s]
+    assert len(buildable) >= 6, f"собираемых сервисов подозрительно мало: {buildable}"
