@@ -108,65 +108,93 @@ CLICKHOUSE_PASSWORD="$PASS" PGPASSWORD="$PASS" \
     ./scripts/dataset-sync.sh import "$archive"
 
 # -- 5. сверка -----------------------------------------------------------------
+#
+# Сверяем ДВАЖДЫ и по-разному.
+#
+# Основное — против meta.json из самого архива: он несёт счётчики на
+# момент выгрузки и есть всегда, в том числе на машине, где боевой базы
+# нет вовсе (а это и есть настоящее восстановление после потери).
+#
+# Дополнительно — против живого источника, если он под рукой. Это ловит
+# то, чего манифест не видит: слепок мог быть снят с уже испорченной
+# базы, и сам с собой он сойдётся.
+#
+# Первая версия сверяла ТОЛЬКО с источником и, не найдя его, печатала
+# «сравнить не с чем» одиннадцать раз, после чего объявляла учения
+# пройденными. Ноль сверок — это не успех, это отсутствие проверки.
 
-src_ch() { docker exec "${SRC_CH:-manta-clickhouse-1}" clickhouse-client \
-    --user dota --password "${CLICKHOUSE_PASSWORD_SRC:-dota_dev_password}" \
-    -q "$1" 2>/dev/null || echo "?"; }
+CHECKED=0
+check() {           # check <что> <ожидалось> <получено>
+    if [ "$2" = "?" ] || [ -z "$2" ]; then
+        return 0
+    fi
+    CHECKED=$((CHECKED + 1))
+    if [ "$2" = "$3" ]; then ok "$1: $3"; else bad "$1: ожидалось $2, получено $3"; fi
+}
+
 dst_ch() { docker exec "$DRILL_CH" clickhouse-client \
     --user dota --password "$PASS" -q "$1" 2>/dev/null || echo "?"; }
-src_pg() { docker exec "${SRC_PG:-manta-postgres-1}" psql -U dota -d manta \
-    -tAc "$1" 2>/dev/null || echo "?"; }
 dst_pg() { docker exec "$DRILL_PG" psql -U dota -d manta \
     -tAc "$1" 2>/dev/null || echo "?"; }
+src_ch() { docker exec "${SRC_CH:-manta-clickhouse-1}" clickhouse-client \
+    --user dota --password "${SRC_CH_PASS:-dota_dev_password}" \
+    -q "$1" 2>/dev/null || echo "?"; }
+src_pg() { docker exec "${SRC_PG:-manta-postgres-1}" psql -U dota -d manta \
+    -tAc "$1" 2>/dev/null || echo "?"; }
+
+meta_dir=$(mktemp -d)
+tar -xf "$archive" -C "$meta_dir" --wildcards '*meta.json' 2>/dev/null || true
+meta=$(find "$meta_dir" -name meta.json | head -1)
+want() {            # значение поля из meta.json архива
+    [ -n "$meta" ] || { echo "?"; return; }
+    python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],'?'))" \
+        "$meta" "$1" 2>/dev/null || echo "?"
+}
 
 echo
-echo "== сверка: источник против восстановленного"
-for t in MatchTimelineFeatures PlayerMatchFeatures MatchDraft MatchEvents \
-         MatchFights MatchMapCells MatchHeroTimings \
-         EconomyTimeline PositionSnapshots; do
-    a=$(src_ch "SELECT count() FROM $t")
-    b=$(dst_ch "SELECT count() FROM $t")
-    if [ "$a" = "?" ]; then
-        echo "    --   $t: источник недоступен, сравнить не с чем"
-    elif [ "$a" = "$b" ]; then
-        ok "$t: $b строк"
-    elif [ "$a" = "0" ] && [ "$b" = "0" ]; then
-        ok "$t: пусто в обоих"
-    else
-        bad "$t: источник $a, восстановлено $b"
-    fi
-done
-for t in collectedmatches matchreports; do
-    a=$(src_pg "SELECT count(*) FROM $t")
-    b=$(dst_pg "SELECT count(*) FROM $t")
-    if [ "$a" = "?" ]; then
-        echo "    --   $t: источник недоступен"
-    elif [ "$a" = "$b" ]; then
-        ok "$t: $b строк"
-    else
-        bad "$t: источник $a, восстановлено $b"
-    fi
-done
-
-# Отдельно — то, ради чего датасет и существует. Совпадения счётчиков
-# мало: строки могли восстановиться, а матчи — схлопнуться в дубликаты.
-echo
-echo "== главное: матчей в витрине"
-a=$(src_ch "SELECT count(DISTINCT match_id) FROM MatchTimelineFeatures FINAL")
-b=$(dst_ch "SELECT count(DISTINCT match_id) FROM MatchTimelineFeatures FINAL")
-if [ "$a" = "?" ]; then
-    echo "    --   источник недоступен"
-elif [ "$a" = "$b" ]; then
-    ok "матчей $b — датасет восстановлен полностью"
+echo "== сверка с манифестом архива (эталон на момент выгрузки)"
+if [ -z "$meta" ]; then
+    bad "в архиве нет meta.json — сверять не с чем"
 else
-    bad "источник $a матчей, восстановлено $b"
+    check "матчей в витрине" "$(want matches_in_mart)" \
+          "$(dst_ch 'SELECT count(DISTINCT match_id) FROM MatchTimelineFeatures FINAL')"
+    check "collectedmatches" "$(want collected)" \
+          "$(dst_pg 'SELECT count(*) FROM collectedmatches')"
+    check "matchreports" "$(want reports)" \
+          "$(dst_pg 'SELECT count(*) FROM matchreports')"
+fi
+rm -rf "$meta_dir"
+
+echo
+echo "== сверка с живым источником (если доступен)"
+src_matches=$(src_ch "SELECT count(DISTINCT match_id) FROM MatchTimelineFeatures FINAL")
+if [ "$src_matches" = "?" ]; then
+    echo "    --   боевая база недоступна: сверка с источником пропущена."
+    echo "         Это НЕ провал — манифест выше уже проверен."
+else
+    for t in MatchTimelineFeatures PlayerMatchFeatures MatchDraft MatchEvents \
+             MatchFights MatchMapCells MatchHeroTimings \
+             EconomyTimeline PositionSnapshots; do
+        check "$t" "$(src_ch "SELECT count() FROM $t")" "$(dst_ch "SELECT count() FROM $t")"
+    done
+    for t in collectedmatches matchreports; do
+        check "$t" "$(src_pg "SELECT count(*) FROM $t")" "$(dst_pg "SELECT count(*) FROM $t")"
+    done
 fi
 
 echo
-if [ "$FAILED" -eq 0 ]; then
-    echo "${GREEN}>> УЧЕНИЯ ПРОЙДЕНЫ${OFF}: слепок восстанавливается, данные совпадают."
+if [ "$CHECKED" -eq 0 ]; then
+    # Главная защита от самообмана. Ноль выполненных сверок означает, что
+    # мы ничего не проверили, — а первая версия в этом случае бодро
+    # печатала «учения пройдены».
+    echo "${RED}>> УЧЕНИЯ НЕ ПРОВЕДЕНЫ: ни одной сверки не выполнено${OFF}"
+    echo "Слепок развернулся, но сверить его было не с чем: ни манифеста"
+    echo "в архиве, ни доступной боевой базы. Это не успех."
+    exit 1
+elif [ "$FAILED" -eq 0 ]; then
+    echo "${GREEN}>> УЧЕНИЯ ПРОЙДЕНЫ${OFF}: сверок $CHECKED, расхождений нет."
 else
-    echo "${RED}>> УЧЕНИЯ ПРОВАЛЕНЫ: расхождений $FAILED${OFF}"
+    echo "${RED}>> УЧЕНИЯ ПРОВАЛЕНЫ: расхождений $FAILED из $CHECKED сверок${OFF}"
     echo "Бэкап есть, но восстановить из него ровно то же — нельзя."
     exit 1
 fi

@@ -145,3 +145,92 @@ def test_containers_are_removed_even_on_failure():
     """trap на EXIT: упавший прогон не оставляет контейнеры висеть."""
     assert re.search(r"trap\s+cleanup\s+EXIT", SRC), "нет trap на выход"
     assert "docker rm -f" in SRC
+
+
+# -- вердикт не должен врать ------------------------------------------------------
+
+def _extract_bash_func(name: str) -> str:
+    """Вырезать функцию из скрипта, чтобы проверить её настоящий код."""
+    m = re.search(rf"^{name}\(\) \{{.*?^\}}", SRC, re.M | re.S)
+    assert m, f"функция {name}() не найдена"
+    return m.group()
+
+
+def _run_check(cases: str) -> tuple[int, int, str]:
+    """Прогнать настоящую check() из скрипта. Возвращает (CHECKED, FAILED, вывод)."""
+    prelude = (
+        "FAILED=0\nCHECKED=0\n"
+        "ok() { echo \"OK $1\"; }\n"
+        "bad() { echo \"FAIL $1\"; FAILED=$((FAILED + 1)); }\n"
+    )
+    script = prelude + _extract_bash_func("check") + "\n" + cases + \
+        '\necho "CHECKED=$CHECKED FAILED=$FAILED"\n'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    out = proc.stdout
+    m = re.search(r"CHECKED=(\d+) FAILED=(\d+)", out)
+    return int(m.group(1)), int(m.group(2)), out
+
+
+def test_check_counts_only_real_comparisons():
+    """«Источник недоступен» не считается выполненной сверкой.
+
+    Ровно этим учения и соврали на живой машине: одиннадцать раз подряд
+    сказали «сравнить не с чем» и объявили себя пройденными.
+    """
+    checked, failed, _ = _run_check('check "таблица" "?" "100"')
+    assert checked == 0, "недоступный источник зачтён за сверку"
+    assert failed == 0, "недоступный источник не должен считаться провалом"
+
+
+def test_check_counts_matches_and_mismatches():
+    checked, failed, out = _run_check(
+        'check "совпало" "100" "100"\ncheck "разошлось" "100" "99"')
+    assert checked == 2
+    assert failed == 1
+    assert "OK совпало" in out and "FAIL разошлось" in out
+
+
+def test_empty_expected_is_not_a_comparison():
+    """Пустая строка от упавшего запроса — тоже «не сравнили»."""
+    checked, _, _ = _run_check('check "таблица" "" "0"')
+    assert checked == 0
+
+
+def test_zero_checks_cannot_be_reported_as_success():
+    """Главная защита: ноль сверок — это провал, а не «пройдено».
+
+    Проверяется текстом скрипта: у ветки успеха обязано стоять условие на
+    CHECKED, иначе учения снова смогут отчитаться, ничего не проверив.
+    """
+    assert re.search(r'if\s+\[\s+"\$CHECKED"\s+-eq\s+0\s+\]', SRC), (
+        "нет проверки «ни одной сверки не выполнено»")
+    # Успех печатается ПОСЛЕ этой проверки, то есть только при CHECKED > 0.
+    zero = SRC.index('"$CHECKED" -eq 0')
+    success = SRC.index("УЧЕНИЯ ПРОЙДЕНЫ")
+    assert zero < success, "успех печатается раньше проверки числа сверок"
+
+
+def test_manifest_fields_are_actually_compared_not_just_mentioned():
+    """Каждое поле манифеста уходит именно в check(), а не просто есть в файле.
+
+    Первая версия этого теста искала названия полей в тексте скрипта — и
+    пропускала мутацию, где вызов check() заменён на двоеточие: строка с
+    полем оставалась на месте, тест был доволен, а сверка не выполнялась.
+    Проверять надо употребление, а не присутствие.
+
+    Настоящее восстановление происходит там, где боевой базы НЕТ — иначе
+    восстанавливать было бы нечего. Манифест единственное, с чем в этот
+    момент можно свериться, поэтому он и основной.
+    """
+    assert "meta.json" in SRC, "манифест архива не читается вовсе"
+    for field in ("matches_in_mart", "collected", "reports"):
+        pattern = rf'check\s+"[^"]+"\s+"\$\(want {field}\)"'
+        assert re.search(pattern, SRC), (
+            f"поле манифеста {field} не передаётся в check()")
+
+
+def test_missing_manifest_is_a_failure_not_a_skip():
+    """Архив без манифеста — это провал сверки, а не повод её пропустить."""
+    m = re.search(r'if \[ -z "\$meta" \]; then\s*\n\s*(\w+)', SRC)
+    assert m, "нет ветки на отсутствующий манифест"
+    assert m.group(1) == "bad", f"отсутствие манифеста обрабатывается как {m.group(1)}"
