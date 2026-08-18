@@ -1,4 +1,15 @@
-"""Общие модули libs/ обязаны попадать В ОБРАЗ (спринт 139).
+"""Сборка образа не должна искать за границей своего контекста (139, 143).
+
+Спринт 139 закрыл эту дыру у питоновских сервисов, спринт 143 — у Go.
+Второй случай доказал, что сторож был написан слишком узко: он знал про
+`libs/` и про Python, поэтому api-gateway, который через `replace` в
+go.mod тянет `../../proto/gen/go`, прошёл мимо него и упал только на
+живой VPS.
+
+Общее правило у обоих случаев одно: КАЖДЫЙ путь, нужный сборке, обязан
+лежать внутри объявленного контекста. COPY не умеет выходить за него, и
+нарушение вскрывается не при сборке образа на машине разработчика (там
+всё собирается из исходников на хосте), а при первом развёртывании.
 
 ЧТО СЛУЧИЛОСЬ. Спринт 139 свёл координаты карты в libs/dota_map.py, и
 data-collector с feature-extractor начали импортировать оттуда. Тогда и
@@ -249,3 +260,103 @@ def test_imports_resolve_inside_the_image_layout(app, tmp_path):
     assert proc.returncode == 0, (
         f"{app}: в раскладке образа импорт не разрешается — "
         f"{proc.stderr.strip()}\nPYTHONPATH={env.group(1)}")
+
+
+# -- то же правило для Go (спринт 143) --------------------------------------------
+
+GO_MODULES = sorted(APPS.glob("*/go.mod")) + sorted(APPS.glob("*/*/go.mod"))
+
+
+def go_services() -> list[Path]:
+    """Каталоги Go-сервисов, у которых есть свой Dockerfile.
+
+    go.mod может лежать глубже каталога сервиса (parser-svc держит его в
+    svc/), поэтому Dockerfile ищется вверх по дереву до apps/.
+    """
+    out = []
+    for mod in GO_MODULES:
+        d = mod.parent
+        while d != APPS and d.parent != d:
+            if (d / "Dockerfile").exists():
+                out.append(mod)
+                break
+            d = d.parent
+    return out
+
+
+def go_replace_paths(mod: Path) -> list[str]:
+    """Относительные пути из директив replace."""
+    text = mod.read_text(encoding="utf-8")
+    return [m.group(1) for m in
+            re.finditer(r"^replace\s+\S+\s+=>\s+(\.\.?/\S+)", text, re.M)]
+
+
+def test_some_go_module_uses_replace():
+    """Страховка от проверки пустого множества.
+
+    Если разбор go.mod однажды сломается, проверка ниже начнёт проходить,
+    ничего не проверяя, — а именно она ловит поломку, стоившую живого
+    развёртывания.
+    """
+    assert GO_MODULES, "не найдено ни одного go.mod — разбор сломан"
+    assert any(go_replace_paths(m) for m in GO_MODULES), \
+        "ни одного replace — разбор сломан или директива исчезла"
+
+
+@pytest.mark.parametrize("mod", go_services(), ids=lambda m: m.parent.name)
+def test_go_replace_targets_are_inside_the_build_context(mod):
+    """Путь из replace обязан лежать ВНУТРИ контекста сборки.
+
+    Именно это и упало на VPS: go.mod api-gateway ссылается на
+    ../../proto/gen/go, контекст был apps/api-gateway, и `go mod
+    download` не нашёл /proto/gen/go/go.mod. На домашней машине это не
+    всплывало — там `go build` идёт на хосте, где путь существует.
+    """
+    replaces = go_replace_paths(mod)
+    if not replaces:
+        pytest.skip("модуль без replace — выходить за контекст незачем")
+
+    # Ищем сервис в compose так же, как для питоновских: по Dockerfile.
+    d = mod.parent
+    while not (d / "Dockerfile").exists():
+        d = d.parent
+    dockerfile = (d / "Dockerfile").relative_to(ROOT)
+
+    services = compose_services()
+    users = {n: s for n, s in services.items()
+             if build_of(s)[1].replace("../", "").endswith(str(dockerfile))
+             or build_of(s)[0] == f"../{d.relative_to(ROOT)}"}
+    assert users, f"{d.name}: сервис не найден в docker-compose.yml"
+
+    for name, svc in users.items():
+        ctx = (COMPOSE.parent / build_of(svc)[0]).resolve()
+        for rel in replaces:
+            target = (mod.parent / rel).resolve()
+            assert target.exists(), f"{name}: путь {rel} не существует вовсе"
+            assert target.is_relative_to(ctx), (
+                f"{name}: replace ведёт в {target}, а контекст сборки {ctx} — "
+                f"COPY туда не дотянется, и `go mod download` упадёт")
+
+
+@pytest.mark.parametrize("mod", go_services(), ids=lambda m: m.parent.name)
+def test_go_image_copies_every_replace_target(mod):
+    """Мало быть внутри контекста — путь должен ещё и КОПИРОВАТЬСЯ в образ.
+
+    Контекст можно расширить до корня репозитория и на этом успокоиться:
+    сборка тогда падает не на «нет каталога», а позже и невнятнее.
+    """
+    replaces = go_replace_paths(mod)
+    if not replaces:
+        pytest.skip("модуль без replace")
+    d = mod.parent
+    while not (d / "Dockerfile").exists():
+        d = d.parent
+    body = "\n".join(l for l in (d / "Dockerfile").read_text(encoding="utf-8")
+                     .splitlines() if not l.lstrip().startswith("#"))
+    copies = [m.group(1) for m in
+              re.finditer(r"^\s*COPY\s+(?!--from)(\S+)", body, re.M)]
+    for rel in replaces:
+        target = (mod.parent / rel).resolve().relative_to(ROOT)
+        assert any(str(target).startswith(c.rstrip("/")) or
+                   c.rstrip("/").startswith(str(target)) for c in copies), \
+            f"{d.name}: {target} не копируется в образ (COPY: {copies})"

@@ -127,7 +127,11 @@ services:
 
   api-gateway:
     profiles: ["apps"]
-    build: ../apps/api-gateway
+    # Контекст сборки — КОРЕНЬ монорепо: go.mod ссылается на proto/gen/go
+    # за пределами каталога сервиса (см. Dockerfile).
+    build:
+      context: ..
+      dockerfile: apps/api-gateway/Dockerfile
     ports:
       - "8080:8080"
     environment: &app-env
