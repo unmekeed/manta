@@ -20,11 +20,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CH_DB="${CLICKHOUSE_DB:-manta}"
+# Контейнер параметризован, как в dataset-sync.sh: учения по
+# восстановлению (scripts/backup-drill.sh) накатывают схему на
+# ВРЕМЕННУЮ базу тем же кодом. Дубль логики миграций разошёлся бы
+# с оригиналом ровно тогда, когда проверять восстановление важнее
+# всего.
+CH_CONTAINER="${CH_CONTAINER:-manta-clickhouse-1}"
 # ВАЖНО: без -i. С проброшенным stdin clickhouse-client на запросе INSERT
 # начинает читать секцию данных из stdin и висит вечно, если stdin — не
 # закрытый терминал (ровно так recover замирал на записи в журнал).
 # Файлы миграций подаются отдельным вызовом с -i, где stdin нужен по делу.
-CLI=(docker exec manta-clickhouse-1 clickhouse-client
+CLI=(docker exec "$CH_CONTAINER" clickhouse-client
      --user "${CLICKHOUSE_USER:-dota}"
      --password "${CLICKHOUSE_PASSWORD:-dota_dev_password}"
      --connect_timeout 10 --receive_timeout 300)
@@ -56,7 +62,7 @@ for f in infra/migrations/clickhouse/*.sql; do
         continue
     fi
     echo ">> $b"
-    docker exec -i manta-clickhouse-1 clickhouse-client \
+    docker exec -i "$CH_CONTAINER" clickhouse-client \
         --user "${CLICKHOUSE_USER:-dota}" \
         --password "${CLICKHOUSE_PASSWORD:-dota_dev_password}" \
         --multiquery < "$f"

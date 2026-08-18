@@ -1,0 +1,110 @@
+# Наложение для публичного VPS. Применяется ПОВЕРХ docker-compose.yml:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d
+#
+# (или просто `make vps-up` из корня).
+#
+# Базовый файл писался для домашней машины за NAT, и там открытые наружу
+# порты безвредны. На VPS с белым адресом это другое: Postgres, ClickHouse,
+# MinIO, Kafka, Grafana и панель MinIO публикуются на 0.0.0.0 с паролем
+# `dota_dev_password`, который лежит в git. Такую базу находят сканерами
+# за часы, а не за месяцы.
+#
+# ЧТО ДЕЛАЕТ ЭТОТ ФАЙЛ. Две вещи и ничего больше:
+#
+#   1. Прибивает КАЖДЫЙ публикуемый порт к 127.0.0.1. Снаружи не остаётся
+#      ничего; доступ — через SSH-туннель (см. docs/SETUP-VPS.md).
+#   2. Ставит потолки памяти. Без них ClickHouse на 8 ГБ машине съедает
+#      всё и роняет соседей — он рассчитывает лимиты от ВСЕЙ памяти
+#      хоста, не зная, что делит её с Kafka и Postgres.
+#
+# Пароли этот файл НЕ меняет: они приходят из окружения (см. bootstrap),
+# и класть их сюда значило бы вернуть в git ровно то, от чего уходим.
+#
+# ВАЖНО: каждый новый порт в базовом файле надо добавлять и сюда, иначе
+# он окажется открыт наружу. Это стережёт тест
+# scripts/tests/test_vps_compose.py — он сверяет два файла и падает,
+# если появился порт без loopback-привязки.
+name: manta
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+    mem_limit: 1g
+    restart: unless-stopped
+
+  clickhouse:
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    # Потолок процесса ставится и снаружи (mem_limit), и внутри
+    # (max_server_memory_usage): только внешний ClickHouse не видит и
+    # продолжает планировать запросы под всю память хоста, получая OOM
+    # вместо внятного «превышен лимит памяти».
+    mem_limit: 3g
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: 0
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    restart: unless-stopped
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+    mem_limit: 256m
+    restart: unless-stopped
+
+  kafka:
+    ports:
+      - "127.0.0.1:9092:9092"
+    # JVM: самый прожорливый сосед после ClickHouse.
+    mem_limit: 1500m
+    restart: unless-stopped
+
+  minio:
+    ports:
+      - "127.0.0.1:9500:9000"
+      - "127.0.0.1:9501:9001"
+    mem_limit: 512m
+    restart: unless-stopped
+
+  mlflow:
+    ports:
+      - "127.0.0.1:9600:5000"
+    mem_limit: 384m
+    restart: unless-stopped
+
+  api-gateway:
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 256m
+    restart: unless-stopped
+
+  ml-service:
+    ports:
+      - "127.0.0.1:50051:50051"
+    # Замер: библиотеки (lightgbm+sklearn+numpy+grpc) держат ~200 МиБ,
+    # модель — единицы мегабайт. Гигабайт был выдан на глаз.
+    mem_limit: 768m
+    restart: unless-stopped
+
+  frontend:
+    ports:
+      - "127.0.0.1:3000:80"
+    mem_limit: 256m
+    restart: unless-stopped
+
+  prometheus:
+    ports:
+      - "127.0.0.1:9090:9090"
+    mem_limit: 384m
+    restart: unless-stopped
+
+  grafana:
+    ports:
+      - "127.0.0.1:3001:3000"
+    mem_limit: 256m
+    restart: unless-stopped

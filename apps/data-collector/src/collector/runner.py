@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,6 +31,75 @@ TOPIC = "match.downloaded"
 # чем сдвинуть курсор через него. Очередь важнее одного матча: при
 # часовом интервале это максимум 3 часа простоя вместо бесконечного.
 MAX_TRANSIENT_RETRIES = 3
+
+# Сколько суток держать .dem в S3 после выгрузки.
+#
+# До этого не удалялось НИЧЕГО: ни политики, ни вызова remove_object во
+# всём монорепо — реплеи копились вечно. Дома это терпимо, потому что
+# матчей мало; при цели 2000 матчей в сутки это 113 ГиБ в день и 3.4 ТБ
+# в месяц, то есть переполнение диска VPS на первой же неделе.
+#
+# Трое суток. Срок выбран по деньгам и по тому, ради чего реплеи вообще
+# хранятся, — а хранятся они ради ПЕРЕРАЗБОРА, когда парсер научится
+# извлекать новое (так было в треках F и G).
+#
+# Арифметика, которую стоит держать перед глазами (58 МиБ на матч):
+#
+#     темп      3 суток      14 суток
+#      300        51 ГиБ       238 ГиБ
+#      600       102 ГиБ       476 ГиБ
+#     2000       340 ГиБ      1586 ГиБ
+#
+# При нынешних 300–600 матчах в сутки трое суток стоят около сотни
+# рублей в месяц дополнительного диска — незаметно. При целевых 2000 и
+# сроке в две недели это уже 2379 ₽/мес, дороже самого сервера. Порог
+# полезно знать, упираться в него сегодня незачем.
+#
+# Важно: для переразбора хранить сам реплей не обязательно. Пока Valve
+# держит его у себя (около двух недель), достаточно СОЛИ — двадцать
+# байт против 58 мегабайт. Соль всё равно нужна GC-пути, и когда она
+# будет храниться, этот срок можно сокращать смелее.
+#
+# Само удаление делает MinIO по расписанию: наш код только объявляет
+# правило. Это надёжнее собственного сборщика мусора — он умирает вместе
+# с процессом, а правило переживает перезапуски.
+REPLAY_RETENTION_DAYS = int(os.getenv("REPLAY_RETENTION_DAYS", "3"))
+
+
+def _ensure_replay_retention(client: Minio, bucket: str) -> None:
+    """Объявить правило удаления .dem, если его ещё нет.
+
+    Идемпотентно и не роняет коллектор: MinIO старых версий и совместимые
+    S3 без поддержки lifecycle просто откажут, и это не повод не собирать
+    матчи. Но молчать нельзя — без правила диск кончится, и знать об этом
+    надо заранее, а не по «no space left on device».
+    """
+    from minio.commonconfig import ENABLED, Filter
+    from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
+
+    if REPLAY_RETENTION_DAYS <= 0:
+        logger.warning("REPLAY_RETENTION_DAYS=%d — реплеи НЕ удаляются, "
+                       "диск будет расти на ~58 МиБ с каждого матча",
+                       REPLAY_RETENTION_DAYS)
+        return
+    try:
+        current = client.get_bucket_lifecycle(bucket)
+    except Exception:  # noqa: BLE001 — правила нет либо не поддерживается
+        current = None
+    if current and current.rules:
+        return
+    config = LifecycleConfig([
+        Rule(status=ENABLED, rule_id="manta-replay-retention",
+             rule_filter=Filter(prefix=""),
+             expiration=Expiration(days=REPLAY_RETENTION_DAYS)),
+    ])
+    try:
+        client.set_bucket_lifecycle(bucket, config)
+        logger.info("правило хранения реплеев: удаление через %d суток",
+                    REPLAY_RETENTION_DAYS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("не удалось задать правило хранения реплеев (%s). "
+                       "Реплеи будут копиться — следи за диском", exc)
 
 
 @dataclass
@@ -79,6 +149,7 @@ class Collector:
                          secret_key=cfg.s3_secret_key, secure=cfg.s3_secure)
         if not self._s3.bucket_exists(cfg.s3_bucket):
             self._s3.make_bucket(cfg.s3_bucket)
+        _ensure_replay_retention(self._s3, cfg.s3_bucket)
 
     # -- persistence ---------------------------------------------------------
 

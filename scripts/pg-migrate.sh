@@ -12,7 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export PGPASSWORD="${PGPASSWORD:-dota_dev_password}"
-PSQL=(psql -h "${POSTGRES_HOST:-localhost}" -U "${POSTGRES_USER:-dota}"
+PSQL=(psql -h "${POSTGRES_HOST:-localhost}" -p "${POSTGRES_PORT:-5432}"
+      -U "${POSTGRES_USER:-dota}"
       -d "${POSTGRES_DB:-manta}" -v ON_ERROR_STOP=1 -qtA)
 
 # Файлы, существовавшие до появления журнала — только их можно баселайнить.

@@ -18,6 +18,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
+.PHONY: backup-drill
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -291,6 +292,9 @@ dataset-import: ## Идемпотентно влить слепок: make datase
 
 backup:        ## Слепок датасета в MANTA_BACKUP_DIR с ротацией KEEP_DAYS (E1)
 	./scripts/backup.sh
+
+backup-drill:  ## УЧЕНИЯ: восстановить слепок во ВРЕМЕННЫЕ базы и сверить строки
+	./scripts/backup-drill.sh $(ARGS)
 
 loadtest:      ## Нагрузочные тесты NFR-PERF/SCAL (D5): make loadtest ARGS="--only rest"
 	python3 scripts/loadtest.py $(ARGS)

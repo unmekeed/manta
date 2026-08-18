@@ -1,0 +1,147 @@
+"""Тесты учений по восстановлению (scripts/backup-drill.sh, спринт 138).
+
+Сам прогон требует Docker и живых баз — он и есть учения. Здесь
+проверяется то, что можно проверить без них и что дороже всего стоит
+ошибиться: чтобы учения ни при каких обстоятельствах не записали чужой
+слепок в БОЕВУЮ базу.
+
+Цена ошибки несимметрична. Провалившиеся учения — это плохая новость.
+Учения, восстановившие старый слепок поверх рабочих данных, — это
+затёртые курсоры коллекторов и отчёты, то есть потеря, ради защиты от
+которой бэкапы и заводились.
+"""
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+DRILL = Path(__file__).resolve().parents[1] / "backup-drill.sh"
+SRC = DRILL.read_text(encoding="utf-8")
+
+PROD_CH = "manta-clickhouse-1"
+PROD_PG = "manta-postgres-1"
+
+
+def _run(env: dict, args: tuple = (), timeout: int = 30):
+    import os
+    return subprocess.run(["bash", str(DRILL), *args],
+                          env={**os.environ, **env},
+                          capture_output=True, text=True, timeout=timeout)
+
+
+# -- защита от записи в боевую базу ------------------------------------------------
+
+@pytest.mark.parametrize("var,value", [
+    ("CH_CONTAINER", PROD_CH),
+    ("PG_CONTAINER", PROD_PG),
+    ("CH_CONTAINER", "какой-то-чужой"),
+])
+def test_refuses_to_target_anything_but_drill_containers(var, value):
+    """Переменная из чужого шелла не должна увести учения в production."""
+    proc = _run({var: value})
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "ОТКАЗ" in proc.stderr
+
+
+@pytest.mark.parametrize("var", ["CH_CONTAINER", "PG_CONTAINER"])
+def test_allows_drill_containers(var):
+    """Собственные временные имена проходят проверку.
+
+    Иначе защита была бы бесполезной: она обязана пропускать ровно то,
+    ради чего написана, — иначе её просто снимут.
+    """
+    proc = _run({var: "manta-drill-clickhouse",
+                 "MANTA_BACKUP_DIR": "/nonexistent-on-purpose"})
+    # Дальше упрётся в отсутствие слепка, но НЕ в отказ по контейнеру.
+    assert "ОТКАЗ" not in proc.stderr
+
+
+def test_import_is_invoked_only_against_drill_containers():
+    """Статическая проверка: импорт и миграции нацелены на временные базы.
+
+    Проверка защиты в начале скрипта охраняет ВХОДНЫЕ переменные, но не
+    то, что написано ниже по тексту. Опечатка в имени контейнера у самого
+    вызова import прошла бы мимо неё — и записала бы слепок в боевую
+    базу. Здесь читается текст скрипта.
+    """
+    for call in re.finditer(r"dataset-sync\.sh import|ch-migrate\.sh|"
+                            r"pg-migrate\.sh", SRC):
+        # Берём строки перед вызовом: переменные окружения задаются там же.
+        start = SRC.rfind("\n", 0, max(0, call.start() - 200))
+        context = SRC[start:call.end()]
+        if "migrate" in call.group() or "import" in call.group():
+            assert PROD_CH not in context, f"боевой ClickHouse рядом с {call.group()}"
+            assert PROD_PG not in context, f"боевой Postgres рядом с {call.group()}"
+
+
+def test_production_names_appear_only_as_read_sources():
+    """Боевые имена в скрипте есть, но только для ЧТЕНИЯ счётчиков.
+
+    Сверять восстановленное не с чем, кроме источника, поэтому читать из
+    production необходимо. Но каждое такое место обязано быть чтением:
+    ни INSERT, ни import, ни миграции.
+    """
+    for line in SRC.splitlines():
+        if PROD_CH in line or PROD_PG in line:
+            assert "SELECT" in line or "src_" in line or "#" in line, (
+                f"боевой контейнер вне чтения: {line.strip()}")
+
+
+# -- выбор архива ------------------------------------------------------------------
+
+def test_missing_archive_fails_clearly(tmp_path):
+    proc = _run({"MANTA_BACKUP_DIR": str(tmp_path)})
+    assert proc.returncode == 2
+    assert "нет слепков" in proc.stderr
+
+
+def test_empty_archive_is_rejected(tmp_path):
+    """Пустой файл — не слепок.
+
+    Без этой проверки учения бы «прошли» на нулевом архиве: восстановить
+    из ничего нечего, счётчики сошлись бы на нулях, и мы получили бы
+    зелёный отчёт о неработающем бэкапе.
+    """
+    empty = tmp_path / "manta-dataset-20260101T0000.tar"
+    empty.touch()
+    proc = _run({"MANTA_BACKUP_DIR": str(tmp_path)})
+    assert proc.returncode == 2
+    assert "пуст" in proc.stderr
+
+
+def test_newest_archive_is_picked(tmp_path):
+    """Без аргумента берётся САМЫЙ СВЕЖИЙ слепок.
+
+    Проверять восстановление на позавчерашнем архиве значит проверять не
+    то, что будешь восстанавливать.
+    """
+    import os
+    import time
+    old = tmp_path / "manta-dataset-20260101T0000.tar"
+    new = tmp_path / "manta-dataset-20260817T0000.tar"
+    for f in (old, new):
+        f.write_bytes(b"x" * 100)
+    os.utime(old, (time.time() - 86400, time.time() - 86400))
+
+    proc = _run({"MANTA_BACKUP_DIR": str(tmp_path)}, timeout=60)
+    assert str(new) in proc.stdout, proc.stdout
+
+
+# -- изоляция ----------------------------------------------------------------------
+
+def test_drill_ports_do_not_clash_with_production():
+    """Учения не занимают боевые порты.
+
+    Иначе их нельзя было бы гонять на работающей машине — а именно там
+    они и нужны, потому что проверяют боевой слепок.
+    """
+    assert "55432" in SRC and "58123" in SRC
+    for prod_port in (":5432:", ":8123:", ":9000:"):
+        assert prod_port not in SRC, f"боевой порт {prod_port} в учениях"
+
+
+def test_containers_are_removed_even_on_failure():
+    """trap на EXIT: упавший прогон не оставляет контейнеры висеть."""
+    assert re.search(r"trap\s+cleanup\s+EXIT", SRC), "нет trap на выход"
+    assert "docker rm -f" in SRC
