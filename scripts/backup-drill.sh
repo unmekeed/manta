@@ -184,20 +184,45 @@ fi
 rm -rf "$meta_dir"
 
 echo
-echo "== сверка с живым источником (если доступен)"
-src_matches=$(src_ch "SELECT count(DISTINCT match_id) FROM MatchTimelineFeatures FINAL")
-if [ "$src_matches" = "?" ]; then
-    echo "    --   боевая база недоступна: сверка с источником пропущена."
-    echo "         Это НЕ провал — манифест выше уже проверен."
+echo "== живая база против слепка (справочно, на вердикт не влияет)"
+# Сравнивать слепок с ТЕКУЩИМ состоянием как «должно совпасть» — ошибка.
+# Слепок снят когда-то; с тех пор шёл сбор, и живая база законно ушла
+# вперёд. Первый живой прогон на двухнедельном архиве дал из-за этого
+# девять «провалов» и вердикт «восстановить ровно то же нельзя» — при
+# полностью сошедшемся манифесте.
+#
+# Полезное направление здесь ровно одно и обратное: живая база НЕ ДОЛЖНА
+# отставать от слепка. Меньше строк, чем в старой копии, — это признак
+# потери данных, и вот об этом сказать стоит.
+LOST=0
+grew() {            # grew <что> <в слепке> <в живой базе>
+    if [ "$3" = "?" ] || [ -z "$3" ]; then return 0; fi
+    if [ "$3" -lt "$2" ] 2>/dev/null; then
+        echo "    ${RED}ОТСТАЁТ${OFF} $1: в слепке $2, в живой базе $3"
+        LOST=$((LOST + 1))
+    else
+        echo "    ок      $1: слепок $2 → живая база $3"
+    fi
+}
+
+src_probe=$(src_ch "SELECT count() FROM MatchTimelineFeatures")
+if [ "$src_probe" = "?" ]; then
+    echo "    --   боевая база недоступна: пропущено (на вердикт не влияет)"
 else
     for t in MatchTimelineFeatures PlayerMatchFeatures MatchDraft MatchEvents \
              MatchFights MatchMapCells MatchHeroTimings \
              EconomyTimeline PositionSnapshots; do
-        check "$t" "$(src_ch "SELECT count() FROM $t")" "$(dst_ch "SELECT count() FROM $t")"
+        grew "$t" "$(dst_ch "SELECT count() FROM $t")" "$(src_ch "SELECT count() FROM $t")"
     done
     for t in collectedmatches matchreports; do
-        check "$t" "$(src_pg "SELECT count(*) FROM $t")" "$(dst_pg "SELECT count(*) FROM $t")"
+        grew "$t" "$(dst_pg "SELECT count(*) FROM $t")" "$(src_pg "SELECT count(*) FROM $t")"
     done
+    if [ "$LOST" -gt 0 ]; then
+        echo
+        echo "    ${RED}ВНИМАНИЕ${OFF}: живая база отстаёт от слепка по $LOST таблицам."
+        echo "    Это не провал учений, но повод разобраться: данные могли"
+        echo "    быть потеряны уже ПОСЛЕ снятия этой копии."
+    fi
 fi
 
 echo

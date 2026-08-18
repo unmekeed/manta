@@ -229,10 +229,6 @@ def test_manifest_fields_are_actually_compared_not_just_mentioned():
     пропускала мутацию, где вызов check() заменён на двоеточие: строка с
     полем оставалась на месте, тест был доволен, а сверка не выполнялась.
     Проверять надо употребление, а не присутствие.
-
-    Настоящее восстановление происходит там, где боевой базы НЕТ — иначе
-    восстанавливать было бы нечего. Манифест единственное, с чем в этот
-    момент можно свериться, поэтому он и основной.
     """
     assert "meta.json" in SRC, "манифест архива не читается вовсе"
     for field in ("matches_in_mart", "collected", "reports"):
@@ -279,3 +275,72 @@ def test_clickhouse_queries_name_the_database():
     for fn in ("dst_ch", "src_ch"):
         body = _extract_bash_func(fn)
         assert "--database" in body, f"{fn}() не указывает базу"
+
+
+# -- живая база против слепка ------------------------------------------------------
+
+def _run_grew(cases: str) -> tuple[int, str]:
+    """Прогнать настоящую grew() из скрипта. Возвращает (LOST, вывод)."""
+    prelude = "LOST=0\nRED=''\nOFF=''\n"
+    script = prelude + _extract_bash_func("grew") + "\n" + cases + \
+        '\necho "LOST=$LOST"\n'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    m = re.search(r"LOST=(\d+)", proc.stdout)
+    return int(m.group(1)), proc.stdout
+
+
+def test_live_database_ahead_of_snapshot_is_normal():
+    """Слепок старый, база с тех пор росла — это НЕ расхождение.
+
+    Первый живой прогон сравнивал двухнедельный архив с сегодняшней базой
+    как «должно совпасть» и выдал девять провалов с вердиктом
+    «восстановить ровно то же нельзя» — при полностью сошедшемся
+    манифесте. Вывод был ложный: база законно ушла вперёд на две недели
+    сбора.
+    """
+    lost, out = _run_grew('grew "collectedmatches" "4407" "9312"')
+    assert lost == 0, "рост живой базы зачтён за потерю"
+    assert "ОТСТАЁТ" not in out
+
+
+def test_live_database_behind_snapshot_is_an_alarm():
+    """Обратное направление — настоящий признак потери данных.
+
+    Живая база, где строк МЕНЬШЕ, чем в старой копии, означает, что
+    что-то пропало уже после снятия слепка. Ради этого сравнение с
+    источником и остаётся.
+    """
+    lost, out = _run_grew('grew "collectedmatches" "9312" "4407"')
+    assert lost == 1
+    assert "ОТСТАЁТ" in out
+
+
+def test_equal_counts_are_fine():
+    lost, _ = _run_grew('grew "таблица" "100" "100"')
+    assert lost == 0
+
+
+def test_unavailable_source_prints_nothing_at_all():
+    """Недоступный источник — молчание, а не строка «ок … → ?».
+
+    Без охраны сравнение «?» с числом просто ложно, и ветка уходит в
+    «ок», печатая «слепок 100 → живая база ?». Счётчики при этом целы,
+    поэтому проверять надо именно ВЫВОД: строка «ок» про несостоявшееся
+    сравнение — это отчёт об успехе там, где ничего не сравнивали.
+    """
+    lost, out = _run_grew('grew "таблица" "100" "?"')
+    assert lost == 0
+    assert "ОТСТАЁТ" not in out
+    assert out.strip() == "LOST=0", f"напечатано лишнее: {out!r}"
+
+
+def test_source_comparison_never_fails_the_drill():
+    """Сравнение с источником справочное и на вердикт не влияет.
+
+    Вердикт выносит манифест: он отвечает на вопрос «восстанавливается ли
+    архив в то, что в нём записано». Состояние живой базы к этому вопросу
+    отношения не имеет.
+    """
+    grew_body = _extract_bash_func("grew")
+    assert "FAILED" not in grew_body, "grew() трогает счётчик вердикта"
+    assert "CHECKED" not in grew_body, "grew() зачитывается за сверку"
