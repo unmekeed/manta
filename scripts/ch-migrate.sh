@@ -35,6 +35,14 @@ CLI=(docker exec "$CH_CONTAINER" clickhouse-client
      --password "${CLICKHOUSE_PASSWORD:-dota_dev_password}"
      --connect_timeout 10 --receive_timeout 300)
 
+# Контейнер должен быть запущен. Без проверки ошибка выглядит как
+# «Error: No such container» посреди вывода, и непонятно, чей это
+# контейнер и почему его ждали (спринт 143 — по образцу pg-migrate.sh).
+docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CH_CONTAINER" || {
+    echo "ОСТАНОВ: контейнер $CH_CONTAINER не запущен — накатывать некуда" >&2
+    exit 1
+}
+
 q() { "${CLI[@]}" --database "$CH_DB" --query "$1" </dev/null; }
 
 q "CREATE TABLE IF NOT EXISTS SchemaMigrations (

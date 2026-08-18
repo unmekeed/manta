@@ -97,7 +97,11 @@ done
 echo ">> накатываю миграции на временные базы"
 CH_CONTAINER="$DRILL_CH" CLICKHOUSE_PASSWORD="$PASS" \
     ./scripts/ch-migrate.sh >/dev/null
-PGPASSWORD="$PASS" POSTGRES_PORT="$DRILL_PG_PORT" \
+# Контейнером, а не портом: со спринта 143 pg-migrate запускает psql
+# внутри контейнера, и хостовый порт ему больше не нужен. Оставь тут
+# POSTGRES_PORT — миграции ушли бы в ПРОДОВУЮ базу, потому что контейнер
+# по умолчанию manta-postgres-1.
+PG_CONTAINER="$DRILL_PG" PGPASSWORD="$PASS" \
     ./scripts/pg-migrate.sh >/dev/null
 
 # -- 4. импорт настоящим кодом -------------------------------------------------

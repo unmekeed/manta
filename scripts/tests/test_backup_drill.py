@@ -19,6 +19,14 @@ import pytest
 DRILL = Path(__file__).resolve().parents[1] / "backup-drill.sh"
 SRC = DRILL.read_text(encoding="utf-8")
 
+# Тот же скрипт БЕЗ комментариев. Структурные проверки ниже смотрят на то,
+# рядом с какими переменными стоит вызов, — и комментарий, объясняющий
+# «оставь тут POSTGRES_PORT, миграции ушли бы в manta-postgres-1»,
+# срабатывал на них как настоящий вызов. Комментарий в базу не пишет;
+# проверять надо код.
+CODE = "\n".join(
+    line for line in SRC.splitlines() if not line.lstrip().startswith("#"))
+
 PROD_CH = "manta-clickhouse-1"
 PROD_PG = "manta-postgres-1"
 
@@ -66,10 +74,10 @@ def test_import_is_invoked_only_against_drill_containers():
     базу. Здесь читается текст скрипта.
     """
     for call in re.finditer(r"dataset-sync\.sh import|ch-migrate\.sh|"
-                            r"pg-migrate\.sh", SRC):
+                            r"pg-migrate\.sh", CODE):
         # Берём строки перед вызовом: переменные окружения задаются там же.
-        start = SRC.rfind("\n", 0, max(0, call.start() - 200))
-        context = SRC[start:call.end()]
+        start = CODE.rfind("\n", 0, max(0, call.start() - 200))
+        context = CODE[start:call.end()]
         if "migrate" in call.group() or "import" in call.group():
             assert PROD_CH not in context, f"боевой ClickHouse рядом с {call.group()}"
             assert PROD_PG not in context, f"боевой Postgres рядом с {call.group()}"
