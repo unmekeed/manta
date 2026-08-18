@@ -326,6 +326,20 @@ load_host_settings() {
     set +a
 }
 
+collector_profiles() {
+    # Условные коллекторы включаются ровно по тем же признакам, что и в
+    # dev-recover.sh, — иначе две машины собирали бы разное при
+    # одинаковом файле настроек.
+    #
+    # Почему профилями, а не «пусть падает»: STRATZ без токена падает на
+    # старте, а restart: unless-stopped превратил бы это в ровный шум в
+    # логах — поломка, неотличимая от работы.
+    local p=""
+    [ -n "${STRATZ_API_TOKEN:-}" ] && p="$p --profile stratz"
+    [ "${CANDIDATES_ENABLED:-0}" = "1" ] && p="$p --profile candidates"
+    printf '%s' "$p"
+}
+
 start_stack() {
     say "стек"
     if [ "$CHECK_ONLY" = "1" ]; then
@@ -351,7 +365,15 @@ start_stack() {
     load_host_settings
     check_ports
     build_images
-    $COMPOSE --profile apps up -d || die "compose up не удался"
+    local profiles
+    profiles=$(collector_profiles)
+    if [ -n "$profiles" ]; then
+        ok "дополнительные коллекторы:$profiles"
+    else
+        warn "stratz и candidates выключены (нет токена / не включены)"
+    fi
+    # shellcheck disable=SC2086
+    $COMPOSE --profile apps $profiles up -d || die "compose up не удался"
     ok "контейнеры подняты"
 
     say "ожидание готовности баз"

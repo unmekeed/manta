@@ -198,10 +198,135 @@ services:
     environment:
       <<: [*app-env, *collector-env]
       COLLECTOR_SOURCE: opendota-public   # Immortal-паблики текущего патча
-      COLLECTOR_INTERVAL_SECONDS: "60"
+      COLLECTOR_INTERVAL_SECONDS: "${PUBLIC_REPLAY_INTERVAL:-3600}"
+      METRICS_PORT: "9105"
       # OPENDOTA_LIMIT здесь БОЛЬШЕ НЕ ЗАДАЁТСЯ. Зашитая тройка молча
       # перебивала значение из окружения машины: вписал 2 в свой файл —
       # получил 3, и никакой ошибки. Умолчание живёт в самом коллекторе.
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  timeline-collector:
+    # Таймлайны публичных матчей — основной приток витрины.
+    profiles: ["apps"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: opendota-timeline
+      COLLECTOR_INTERVAL_SECONDS: "${TIMELINE_INTERVAL:-1800}"
+      TIMELINE_LIMIT: "${TIMELINE_LIMIT:-10}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9108"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  pro-timeline-collector:
+    # Про-матчи: ЭТАЛОН гейта. Лимит приходит из PRO_TIMELINE_LIMIT, а
+      # переменная внутри всё равно TIMELINE_LIMIT — так же, как в
+      # dev-recover.sh. Подставить сюда обычный TIMELINE_LIMIT значит
+      # молча сжечь квоту про-потоком.
+    profiles: ["apps"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: opendota-timeline-pro
+      COLLECTOR_INTERVAL_SECONDS: "${PRO_TIMELINE_INTERVAL:-3600}"
+      TIMELINE_LIMIT: "${PRO_TIMELINE_LIMIT:-5}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9110"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  league-collector:
+    # Про-матчи вглубь по лигам: окно /proMatches выбирается за сутки,
+      # и эталон перестаёт расти без этого источника.
+    profiles: ["apps"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: opendota-league
+      COLLECTOR_INTERVAL_SECONDS: "${LEAGUE_INTERVAL:-3600}"
+      TIMELINE_LIMIT: "${LEAGUE_LIMIT:-6}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9117"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  pro-replay-collector:
+    # Реплейный путь про-матчей.
+    profiles: ["apps"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: opendota
+      COLLECTOR_INTERVAL_SECONDS: "${PRO_REPLAY_INTERVAL:-3600}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9109"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  stratz-collector:
+    # ТОЛЬКО при заданном STRATZ_API_TOKEN: без него источник падает на
+      # старте, а restart: unless-stopped превратил бы это в ровный шум
+      # в логах. Поэтому отдельный профиль, включаемый bootstrap'ом.
+    profiles: ["apps", "stratz"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: stratz-timeline
+      COLLECTOR_INTERVAL_SECONDS: "${STRATZ_INTERVAL:-1800}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9115"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  candidates-collector:
+    # Своя разбивка: качает по 58 МиБ на матч и делит квоту с
+      # остальными. Включается осознанно (CANDIDATES_ENABLED=1).
+    profiles: ["apps", "candidates"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: candidates
+      COLLECTOR_INTERVAL_SECONDS: "${CANDIDATES_INTERVAL:-900}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9116"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
