@@ -150,10 +150,22 @@ def test_containers_are_removed_even_on_failure():
 # -- вердикт не должен врать ------------------------------------------------------
 
 def _extract_bash_func(name: str) -> str:
-    """Вырезать функцию из скрипта, чтобы проверить её настоящий код."""
-    m = re.search(rf"^{name}\(\) \{{.*?^\}}", SRC, re.M | re.S)
-    assert m, f"функция {name}() не найдена"
-    return m.group()
+    """Вырезать ровно ОДНУ функцию из скрипта, чтобы проверить её код.
+
+    Наивная регулярка «до `}` в начале строки» здесь не годится: часть
+    функций однострочные и закрываются `; }` в конце строки. Она
+    захватывала кусок до следующей многострочной функции — и проверка
+    «есть ли --database в dst_ch» оказывалась довольна тем, что флаг
+    нашёлся в соседней src_ch. Мутация, снимавшая флаг именно с dst_ch,
+    из-за этого выживала.
+    """
+    start = SRC.index(f"{name}() {{")
+    tail = SRC[start:]
+    # Конец — первое из: `; }` в конце строки либо `}` в начале строки.
+    ends = [m.start() for m in re.finditer(r";\s*\}\s*$", tail, re.M)]
+    ends += [m.start() for m in re.finditer(r"^\}", tail, re.M)]
+    assert ends, f"не найден конец функции {name}()"
+    return tail[:min(ends) + 2]
 
 
 def _run_check(cases: str) -> tuple[int, int, str]:
@@ -234,3 +246,36 @@ def test_missing_manifest_is_a_failure_not_a_skip():
     m = re.search(r'if \[ -z "\$meta" \]; then\s*\n\s*(\w+)', SRC)
     assert m, "нет ветки на отсутствующий манифест"
     assert m.group(1) == "bad", f"отсутствие манифеста обрабатывается как {m.group(1)}"
+
+
+def test_failed_query_is_distinguished_from_wrong_data():
+    """«Запрос не выполнился» и «пришло другое число» — разные беды.
+
+    Первое означает сломанный запрос САМИХ учений, второе — испорченный
+    бэкап. На первом живом прогоне это была именно первая беда (забытый
+    --database у clickhouse-client), и сообщение «получено ?» увело бы
+    искать проблему в данных, которых оно не касается.
+    """
+    _, failed, out = _run_check('check "витрина" "2070" "?"')
+    assert failed == 1, "неудавшийся запрос обязан считаться провалом"
+    assert "ЗАПРОС НЕ ВЫПОЛНИЛСЯ" in out
+    assert "не бэкап виноват" in out
+
+
+def test_wrong_number_says_what_came_instead():
+    _, failed, out = _run_check('check "витрина" "2070" "2069"')
+    assert failed == 1
+    assert "получено 2069" in out
+    assert "ЗАПРОС НЕ ВЫПОЛНИЛСЯ" not in out
+
+
+def test_clickhouse_queries_name_the_database():
+    """Таблицы живут в `manta`, а не в базе по умолчанию.
+
+    dataset-sync.sh пишет всюду полное имя `manta.MatchTimelineFeatures`
+    именно поэтому. Учения обращались коротким именем и получали пустой
+    ответ на верно восстановленных данных.
+    """
+    for fn in ("dst_ch", "src_ch"):
+        body = _extract_bash_func(fn)
+        assert "--database" in body, f"{fn}() не указывает базу"

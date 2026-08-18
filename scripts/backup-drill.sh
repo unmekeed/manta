@@ -129,16 +129,34 @@ check() {           # check <что> <ожидалось> <получено>
         return 0
     fi
     CHECKED=$((CHECKED + 1))
-    if [ "$2" = "$3" ]; then ok "$1: $3"; else bad "$1: ожидалось $2, получено $3"; fi
+    if [ "$2" = "$3" ]; then
+        ok "$1: $3"
+    elif [ "$3" = "?" ] || [ -z "$3" ]; then
+        # Отличать «запрос не выполнился» от «пришло другое число» важно:
+        # первое означает сломанный ЗАПРОС учений, второе — испорченный
+        # бэкап. На первом живом прогоне это была ровно первая беда
+        # (забытый --database), и сообщение «получено ?» увело бы искать
+        # проблему в данных.
+        bad "$1: ожидалось $2, но ЗАПРОС НЕ ВЫПОЛНИЛСЯ (не бэкап виноват)"
+    else
+        bad "$1: ожидалось $2, получено $3"
+    fi
 }
 
+# --database обязателен. Без него clickhouse-client ищет таблицу в базе
+# по умолчанию для пользователя, а наши живут в `manta` — dataset-sync
+# поэтому и пишет всюду `manta.MatchTimelineFeatures` полным именем.
+# Первый живой прогон дал из-за этого «ожидалось 2070, получено ?»: данные
+# восстановились верно, а сломан был запрос учений.
+CH_DB="${CLICKHOUSE_DB:-manta}"
 dst_ch() { docker exec "$DRILL_CH" clickhouse-client \
-    --user dota --password "$PASS" -q "$1" 2>/dev/null || echo "?"; }
+    --user dota --password "$PASS" --database "$CH_DB" \
+    -q "$1" 2>/dev/null || echo "?"; }
 dst_pg() { docker exec "$DRILL_PG" psql -U dota -d manta \
     -tAc "$1" 2>/dev/null || echo "?"; }
 src_ch() { docker exec "${SRC_CH:-manta-clickhouse-1}" clickhouse-client \
     --user dota --password "${SRC_CH_PASS:-dota_dev_password}" \
-    -q "$1" 2>/dev/null || echo "?"; }
+    --database "$CH_DB" -q "$1" 2>/dev/null || echo "?"; }
 src_pg() { docker exec "${SRC_PG:-manta-postgres-1}" psql -U dota -d manta \
     -tAc "$1" 2>/dev/null || echo "?"; }
 
