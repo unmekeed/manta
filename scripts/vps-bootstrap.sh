@@ -164,7 +164,23 @@ setup_firewall() {
 start_stack() {
     say "стек"
     if [ "$CHECK_ONLY" = "1" ]; then
-        $COMPOSE ps 2>/dev/null | tail -n +2 | head -20
+        # Каждая ветка ГОВОРИТ. Раньше при отсутствии docker раздел
+        # молчал совсем: `compose ps` писал в /dev/null, и на чистой
+        # машине «стек» выглядел единственным пунктом без замечаний —
+        # то есть исправным. Молчание не должно быть неотличимо от «всё
+        # хорошо»; в этом проекте такая тишина уже стоила тринадцати
+        # дней без бэкапов.
+        if ! command -v docker >/dev/null; then
+            warn "проверить нечем: docker не установлен"
+            return
+        fi
+        local running
+        running=$($COMPOSE ps --format '{{.Name}}' 2>/dev/null | grep -c . || true)
+        if [ "$running" = "0" ]; then
+            warn "стек не поднят (контейнеров нет)"
+        else
+            ok "контейнеров запущено: $running"
+        fi
         return
     fi
     $COMPOSE --profile apps up -d --build || die "compose up не удался"

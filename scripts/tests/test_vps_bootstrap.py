@@ -17,6 +17,7 @@
 """
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -219,3 +220,120 @@ def test_dev_default_is_preserved_for_the_home_machine():
     for m in re.finditer(r"\$\{MANTA_DB_PASSWORD(:-)?([^}]*)\}", compose):
         assert m.group(1) == ":-", "подстановка без умолчания сломает домашний стек"
         assert m.group(2) == "dota_dev_password"
+
+
+# -- каждый раздел проверки говорит ----------------------------------------------
+
+def run_check_section(tmp_path, func, with_docker: bool, running=0):
+    """Прогнать раздел проверки со стабом docker (или без него)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    # PATH состоит ТОЛЬКО из песочницы: иначе «docker не установлен»
+    # проверялось бы на машине, где docker установлен, и тест смотрел бы
+    # не на ту ветку. Нужные утилиты добавляем ссылками поимённо.
+    for tool in ("grep", "bash"):
+        link = bin_dir / tool
+        if not link.exists():
+            link.symlink_to(shutil.which(tool))
+    if with_docker:
+        names = "\n".join(f"manta-{i}" for i in range(running))
+        (bin_dir / "docker").write_text(
+            "#!/usr/bin/env bash\n"
+            f'if [ "$1" = "compose" ]; then printf "%s" "{names}"; fi\n'
+            "exit 0\n", encoding="utf-8")
+        (bin_dir / "docker").chmod(0o755)
+    harness = f"""
+set -uo pipefail
+export PATH="{bin_dir}"
+CHECK_ONLY=1
+COMPOSE="docker compose"
+say()  {{ printf '\\n>> %s\\n' "$1"; }}
+ok()   {{ printf '   OK   %s\\n' "$1"; }}
+warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
+die()  {{ printf 'ОСТАНОВ: %s\\n' "$1" >&2; exit 1; }}
+{_functions(func)}
+{func}
+"""
+    proc = subprocess.run([shutil.which("bash"), "-c", harness],
+                          capture_output=True, text=True,
+                          env={"PATH": str(bin_dir)})
+    return proc.stdout + proc.stderr
+
+
+def test_stack_check_speaks_when_docker_is_absent(tmp_path):
+    """Раздел «стек» обязан сказать, что проверить нечем.
+
+    Молчащий раздел на чистой машине выглядит единственным пунктом БЕЗ
+    замечаний — то есть исправным, хотя не проверено вообще ничего. В
+    этом проекте неотличимая от успеха тишина уже стоила тринадцати дней
+    без бэкапов.
+    """
+    out = run_check_section(tmp_path, "start_stack", with_docker=False)
+    assert out.strip(), "раздел промолчал"
+    assert "ВНИМАНИЕ" in out and "docker" in out
+
+
+def test_stack_check_reports_absent_containers(tmp_path):
+    """Docker есть, контейнеров нет — это тоже замечание, а не тишина."""
+    out = run_check_section(tmp_path, "start_stack", with_docker=True, running=0)
+    assert "ВНИМАНИЕ" in out
+
+
+def test_stack_check_reports_running_containers(tmp_path):
+    out = run_check_section(tmp_path, "start_stack", with_docker=True, running=7)
+    assert "OK" in out and "7" in out
+
+
+def test_cron_check_speaks_when_already_configured(tmp_path):
+    """Настроенный cron — тоже повод сказать, а не промолчать.
+
+    Ветка «уже настроено» самая частая: её видят на каждом повторном
+    прогоне. Промолчи она — раздел выглядел бы непроверенным.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("grep", "bash"):
+        link = bin_dir / tool
+        if not link.exists():
+            link.symlink_to(shutil.which(tool))
+    (bin_dir / "crontab").write_text(
+        "#!/usr/bin/env bash\necho '# manta-vps'\n", encoding="utf-8")
+    (bin_dir / "crontab").chmod(0o755)
+    harness = f"""
+set -uo pipefail
+export PATH="{bin_dir}"
+CHECK_ONLY=1
+REPO=/tmp/manta
+say()  {{ printf '\\n>> %s\\n' "$1"; }}
+ok()   {{ printf '   OK   %s\\n' "$1"; }}
+warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
+{_functions("setup_cron")}
+setup_cron
+"""
+    proc = subprocess.run([shutil.which("bash"), "-c", harness],
+                          capture_output=True, text=True,
+                          env={"PATH": str(bin_dir)})
+    out = proc.stdout + proc.stderr
+    assert "OK" in out, out
+
+
+def test_no_check_section_is_completely_mute(tmp_path):
+    """Пол, а не потолок: раздел обязан УМЕТЬ говорить.
+
+    Тест намеренно слабый, и важно понимать, чего он НЕ проверяет: что
+    говорит каждая ветка. Раздел с тремя путями, из которых молчит один,
+    он пропустит — такие ветки закрываются по отдельности, прогоном со
+    стабами. Здесь ловится другое: раздел, добавленный без единого
+    сообщения вообще.
+
+    Список разделов берётся из самого скрипта: записанный руками, он
+    разошёлся бы при добавлении нового, и новый раздел оказался бы
+    единственным непроверенным.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    sections = re.findall(r"^(setup_\w+|start_stack)\(\) \{", src, re.M)
+    assert len(sections) >= 5, f"разделов подозрительно мало: {sections}"
+    for name in sections:
+        body = _functions(name)
+        assert re.search(r'\b(ok|warn)\s+"', body), \
+            f"раздел {name} может завершиться, ничего не сказав"
