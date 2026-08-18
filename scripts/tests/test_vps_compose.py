@@ -1,17 +1,34 @@
-"""Тесты наложения для VPS (спринт 138).
+"""Тесты наложения для VPS (спринт 138, переписаны в 143).
 
 Базовый docker-compose.yml писался для домашней машины за NAT, где
-открытые порты безвредны. На VPS с белым адресом тринадцать портов —
+открытые порты безвредны. На VPS с белым адресом одиннадцать сервисов —
 Postgres, ClickHouse, MinIO, Kafka, Grafana и прочие — публикуются на
-0.0.0.0 с паролем `dota_dev_password`, лежащим в git.
+0.0.0.0 с паролем, лежащим в git.
 
-Проверяется одно свойство, и оно единственное, ради которого файл
-существует: НИ ОДИН порт не смотрит наружу. Причём проверяется сверкой
-двух файлов, а не списком в тесте: список пришлось бы обновлять руками,
-и он разошёлся бы с compose ровно тогда, когда это опаснее всего — при
-добавлении нового сервиса.
+ЧТО ЗДЕСЬ БЫЛО НЕ ТАК ДО СПРИНТА 143. Тесты читали ФАЙЛ наложения и
+убеждались, что в нём каждый порт записан как 127.0.0.1:… Это правда, и
+это ничего не значит: docker compose СКЛЕИВАЕТ списки портов, а не
+заменяет их. В слитой конфигурации у каждого сервиса оказывалось ДВЕ
+публикации — исходная на 0.0.0.0 и добавленная на loopback.
+
+То есть файл, написанный ради того, чтобы закрыть порты, их не закрывал,
+а тесты этого не видели, потому что смотрели не туда. В докстроке
+прежнего теста прямым текстом стояло ложное убеждение: «наложение
+ЗАМЕНЯЕТ список у тех сервисов, что в нём описаны».
+
+Вскрылось это не проверкой, а отказом при развёртывании: postgres занял
+0.0.0.0:5432, а следом не смог занять 127.0.0.1:5432 — «address already
+in use», сам с собой. Сбой привязки и не дал стеку подняться настежь.
+
+ЧТО ПРОВЕРЯЕТСЯ ТЕПЕРЬ. Слитая конфигурация — то есть ЭФФЕКТ, а не
+намерение. Плюс статически: механизм замены (`!override`) стоит у
+каждого списка портов. Первое точнее, второе работает и там, где docker
+недоступен.
 """
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,7 +41,32 @@ VPS = DEPLOY / "docker-compose.vps.yml"
 
 
 def _load(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    """Прочитать файл наложения как YAML.
+
+    Тег !override, которым помечены списки портов, для yaml.safe_load —
+    неизвестный тег, поэтому он вырезается перед разбором. Сам факт его
+    наличия проверяется отдельным тестом по тексту файла.
+    """
+    text = path.read_text(encoding="utf-8").replace(" !override", "")
+    return yaml.safe_load(text)
+
+
+def merged_config() -> dict:
+    """Слитая конфигурация — то, что docker получит на самом деле."""
+    if not shutil.which("docker"):
+        pytest.skip("docker недоступен: слитую конфигурацию не получить")
+    proc = subprocess.run(
+        ["docker", "compose", "-f", str(BASE), "-f", str(VPS),
+         "--profile", "apps", "--profile", "monitoring",
+         "config", "--format", "json"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.fail(f"docker compose config не отработал: {proc.stderr[:400]}")
+    return json.loads(proc.stdout)
+
+
+def published(service: dict) -> list[dict]:
+    return service.get("ports") or []
 
 
 def _published(compose: dict) -> dict[str, list[str]]:
@@ -37,28 +79,73 @@ def _published(compose: dict) -> dict[str, list[str]]:
     return out
 
 
-def test_every_published_port_is_bound_to_loopback():
-    """Каждый порт наложения слушает 127.0.0.1 и ничего больше.
+def test_merged_config_publishes_nothing_outside_loopback():
+    """ГЛАВНЫЙ тест файла: в СЛИТОЙ конфигурации ничего не смотрит наружу.
 
-    Формат `"127.0.0.1:5432:5432"`. Без адреса Docker публикует на всех
-    интерфейсах, и это не оговорка, а поведение по умолчанию.
+    Проверяется эффект, а не намерение. Прежняя версия читала файл
+    наложения и видела там одни лишь 127.0.0.1 — при том, что docker
+    получал вдобавок исходные публикации на 0.0.0.0. Одиннадцать портов
+    с паролем из репозитория смотрели в интернет, а тест был зелёным.
     """
-    bad = []
-    for svc, ports in _published(_load(VPS)).items():
-        for p in ports:
-            if not p.startswith("127.0.0.1:"):
-                bad.append(f"{svc}: {p}")
+    cfg = merged_config()
+    bad = [f"{name}: {p.get('host_ip', '0.0.0.0')}:{p.get('published')}"
+           for name, svc in cfg["services"].items()
+           for p in published(svc)
+           if p.get("host_ip") != "127.0.0.1"]
     assert not bad, "порты смотрят наружу:\n" + "\n".join(bad)
+
+
+def test_merged_config_has_no_duplicate_publications():
+    """У сервиса не должно остаться ДВУХ публикаций одного порта.
+
+    Именно так проявлялась склейка: 0.0.0.0:5432 и 127.0.0.1:5432 у
+    одного контейнера. Вторая привязка падала с «address already in use»,
+    и стек не поднимался — то есть склейка ломала не только безопасность,
+    но и сам запуск.
+    """
+    cfg = merged_config()
+    for name, svc in cfg["services"].items():
+        seen = [(p.get("published"), p.get("protocol")) for p in published(svc)]
+        dupes = {x for x in seen if seen.count(x) > 1}
+        assert not dupes, f"{name}: порт опубликован дважды: {dupes}"
+
+
+def test_every_ports_list_in_the_overlay_is_marked_override():
+    """Механизм замены стоит у КАЖДОГО списка портов.
+
+    Статическая проверка нужна отдельно от проверки эффекта: там, где
+    docker недоступен, та пропускается, а эта — нет. Забыть !override у
+    одного сервиса значит вернуть ему публикацию на 0.0.0.0.
+    """
+    text = VPS.read_text(encoding="utf-8")
+    lists = re.findall(r"^\s*ports:(.*)$", text, re.M)
+    assert lists, "в наложении нет ни одного списка портов"
+    plain = [l for l in lists if "!override" not in l]
+    assert not plain, (
+        f"{len(plain)} списков портов без !override — compose СКЛЕИТ их с "
+        f"базовыми, и порты уйдут на 0.0.0.0")
+
+
+def _published(compose: dict) -> dict[str, list[str]]:
+    """{сервис: [строки публикации портов]} — только те, что публикуются."""
+    out = {}
+    for name, svc in (compose.get("services") or {}).items():
+        ports = svc.get("ports") or []
+        if ports:
+            out[name] = [str(p) for p in ports]
+    return out
 
 
 def test_no_service_publishes_a_port_without_a_vps_override():
     """Новый порт в базовом файле обязан появиться и в наложении.
 
-    Это главный тест файла. Наложение не «выключает» порты базового
-    compose — оно ЗАМЕНЯЕТ список у тех сервисов, что в нём описаны.
-    Сервис, забытый в наложении, останется опубликованным на 0.0.0.0 со
-    своим dev-паролем, и заметить это можно будет только сканером
-    снаружи.
+    Наложение заменяет список портов только у сервисов, которые в нём
+    описаны И помечены !override. Сервис, забытый в наложении, останется
+    опубликованным на 0.0.0.0 со своим dev-паролем, и заметить это можно
+    будет только сканером снаружи.
+
+    Проверка статическая и потому переживает отсутствие docker; эффект
+    сверяет test_merged_config_publishes_nothing_outside_loopback.
     """
     base = _published(_load(BASE))
     vps = _published(_load(VPS))

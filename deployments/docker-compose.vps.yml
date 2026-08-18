@@ -29,13 +29,13 @@ name: manta
 
 services:
   postgres:
-    ports:
+    ports: !override
       - "127.0.0.1:5432:5432"
     mem_limit: 1g
     restart: unless-stopped
 
   clickhouse:
-    ports:
+    ports: !override
       - "127.0.0.1:8123:8123"
       - "127.0.0.1:9000:9000"
     # Потолок процесса ставится и снаружи (mem_limit), и внутри
@@ -52,39 +52,39 @@ services:
     restart: unless-stopped
 
   redis:
-    ports:
+    ports: !override
       - "127.0.0.1:6379:6379"
     mem_limit: 256m
     restart: unless-stopped
 
   kafka:
-    ports:
+    ports: !override
       - "127.0.0.1:9092:9092"
     # JVM: самый прожорливый сосед после ClickHouse.
     mem_limit: 1500m
     restart: unless-stopped
 
   minio:
-    ports:
+    ports: !override
       - "127.0.0.1:9500:9000"
       - "127.0.0.1:9501:9001"
     mem_limit: 512m
     restart: unless-stopped
 
   mlflow:
-    ports:
+    ports: !override
       - "127.0.0.1:9600:5000"
     mem_limit: 384m
     restart: unless-stopped
 
   api-gateway:
-    ports:
+    ports: !override
       - "127.0.0.1:8080:8080"
     mem_limit: 256m
     restart: unless-stopped
 
   ml-service:
-    ports:
+    ports: !override
       - "127.0.0.1:50051:50051"
     # Замер: библиотеки (lightgbm+sklearn+numpy+grpc) держат ~200 МиБ,
     # модель — единицы мегабайт. Гигабайт был выдан на глаз.
@@ -92,19 +92,19 @@ services:
     restart: unless-stopped
 
   frontend:
-    ports:
+    ports: !override
       - "127.0.0.1:3000:80"
     mem_limit: 256m
     restart: unless-stopped
 
   prometheus:
-    ports:
+    ports: !override
       - "127.0.0.1:9090:9090"
     mem_limit: 384m
     restart: unless-stopped
 
   grafana:
-    ports:
+    ports: !override
       - "127.0.0.1:3001:3000"
     mem_limit: 256m
     restart: unless-stopped
