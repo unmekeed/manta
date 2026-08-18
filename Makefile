@@ -18,7 +18,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
-.PHONY: backup-drill
+.PHONY: backup-drill heartbeat tg-test
 
 ## Инфраструктура -------------------------------------------------------------
 
@@ -295,6 +295,24 @@ backup:        ## Слепок датасета в MANTA_BACKUP_DIR с рота�
 
 backup-drill:  ## УЧЕНИЯ: восстановить слепок во ВРЕМЕННЫЕ базы и сверить строки
 	./scripts/backup-drill.sh $(ARGS)
+
+heartbeat:     ## Сторож: состояние одним сообщением в Telegram (для cron)
+	./scripts/heartbeat.sh
+
+tg-test:       ## Проверить, что канал Telegram вообще доставляет
+	@set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
+	if [ -z "$$TELEGRAM_BOT_TOKEN" ] || [ -z "$$TELEGRAM_CHAT_ID" ]; then \
+		echo "TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы в $(MANTA_TRAIN_ENV)"; \
+		echo "Без них сторож молчит — и поломку сообщать будет некуда."; \
+		exit 2; \
+	fi; \
+	curl -s --max-time 20 \
+		"https://api.telegram.org/bot$$TELEGRAM_BOT_TOKEN/sendMessage" \
+		-d "chat_id=$$TELEGRAM_CHAT_ID" -d "parse_mode=HTML" \
+		--data-urlencode "text=🧪 <b>Manta</b>: проверка канала с $$(hostname)" \
+		| grep -q '"ok":true' \
+		&& echo "доставлено — проверь чат" \
+		|| { echo "Telegram НЕ принял сообщение: проверь токен и chat_id"; exit 1; }
 
 loadtest:      ## Нагрузочные тесты NFR-PERF/SCAL (D5): make loadtest ARGS="--only rest"
 	python3 scripts/loadtest.py $(ARGS)
