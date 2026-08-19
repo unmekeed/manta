@@ -22,7 +22,7 @@ from prometheus_client import Counter, Histogram
 from .clickhouse import ClickHouse
 from .features import FEATURE_VERSION, Roster, player_features, timeline_features
 from .fights import detect_fights
-from .mapcells import build_cells, core_heroes
+from .mapcells import build_cells_by_minute, core_heroes, phase_cells
 from .timings import build_timings
 from .pseudonym import apply as pseudonymize
 
@@ -204,13 +204,20 @@ class Extractor:
             # коры (позиции 1–3) и по ней же определяется, в какие
             # интервалы герой фактически фармил. Отдельных запросов не
             # заводим — выборка уже прочитана выше.
-            crows = build_cells(positions, raw_events, frows,
-                                roster.hero_team,
-                                core_heroes(economy, roster.teams,
-                                            roster.heroes),
-                                economy=economy, heroes=roster.heroes)
+            mrows = build_cells_by_minute(
+                positions, raw_events, frows, roster.hero_team,
+                core_heroes(economy, roster.teams, roster.heroes),
+                economy=economy, heroes=roster.heroes)
+            # Фазовые строки НЕ считаются заново — они СУММА поминутных.
+            # Две независимые формулы для одной и той же карты разъехались
+            # бы при первом же расхождении в фильтрах, и обе выглядели бы
+            # правдоподобно (спринт 147).
+            crows = phase_cells(mrows)
+            for r in mrows:
+                r["match_id"] = match_id
             for r in crows:
                 r["match_id"] = match_id
+            self._replace_rows("MatchMapCellsMinute", match_id, mrows)
             self._replace_rows("MatchMapCells", match_id, crows)
         except Exception:  # noqa: BLE001
             logger.warning("матч %s: карты не сохранены", match_id,

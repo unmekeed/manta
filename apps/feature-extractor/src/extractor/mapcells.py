@@ -51,11 +51,37 @@ EARLY_END = 600      # лайнинг
 MID_END = 1500       # середина; дальше — поздняя игра
 
 
+SECONDS_PER_MINUTE = 60
+
+
 def phase_of(game_time) -> str:
     t = int(game_time or 0)
     if t < EARLY_END:
         return "early"
     return "mid" if t < MID_END else "late"
+
+
+def minute_of(game_time) -> int:
+    """Игровая минута события: 0, 1, 2… (спринт 147).
+
+    ПОЧЕМУ МИНУТА, А НЕ ФАЗА. Три фазы отвечают на вопрос «где команда
+    была в середине игры», а от карты хотят другого — маршрута. Между
+    десятой и двадцать пятой минутой керри успевает пройти лес, вернуться
+    на линию и уйти в чужой лес; на карте фазы «mid» это один общий
+    развод пятен, из которого порядок обхода не восстановить. Ползунок по
+    минутам восстанавливает именно порядок.
+
+    Дробить мельче незачем: клетка сетки — около 500 игровых единиц, и
+    быстрее чем за минуту герой проходит её только телепортом.
+    Полуминутные корзины удвоили бы объём, не добавив ни одного
+    различимого шага маршрута.
+
+    Отрицательное время (до гудка, стадия закупки) сваливается в нулевую
+    минуту. Это не потеря: фарма там нет по определению — FarmClock не
+    видит роста добиток, — а присутствие до гудка и так всё на фонтане.
+    Прежняя разметка поступала так же, относя это время к 'early'.
+    """
+    return max(0, int(game_time or 0)) // SECONDS_PER_MINUTE
 
 
 def cell(x, y) -> tuple[int, int] | None:
@@ -77,12 +103,12 @@ def cell(x, y) -> tuple[int, int] | None:
     return unit_to_grid(*world_to_unit(fx, fy), GRID)
 
 
-def _add(acc: dict, phase: str, team: int, kind: str, pos) -> None:
+def _add(acc: dict, minute: int, team: int, kind: str, pos) -> None:
     c = cell(*pos) if pos is not None else None
     if c is None or not team:
         return
-    acc[(phase, int(team), kind, c[0], c[1])] = \
-        acc.get((phase, int(team), kind, c[0], c[1]), 0) + 1
+    acc[(int(minute), int(team), kind, c[0], c[1])] = \
+        acc.get((int(minute), int(team), kind, c[0], c[1]), 0) + 1
 
 
 def _norm_team(hero_team: dict[str, int]) -> dict[str, int]:
@@ -259,8 +285,8 @@ def _presence_and_farm(acc: dict, positions: list[dict],
         c = cell(p.get("x"), p.get("y"))
         if c is None:
             continue
-        phase = phase_of(t)
-        key = (phase, team, "presence", c[0], c[1])
+        minute = minute_of(t)
+        key = (minute, team, "presence", c[0], c[1])
         acc[key] = acc.get(key, 0) + 1
 
         # Нет экономики — нет и фарма: пустой FarmClock отвечает «нет» на
@@ -269,24 +295,29 @@ def _presence_and_farm(acc: dict, positions: list[dict],
         # словарь и так не даёт ни одного положительного ответа.
         if not clock.farming(hero, t):
             continue
-        key = (phase, team, "farm", c[0], c[1])
+        key = (minute, team, "farm", c[0], c[1])
         acc[key] = acc.get(key, 0) + 1
         if hero in cores:
-            key = (phase, team, "farm_core", c[0], c[1])
+            key = (minute, team, "farm_core", c[0], c[1])
             acc[key] = acc.get(key, 0) + 1
 
 
-def build_cells(positions: list[dict], map_events: list[dict],
-                fights: list[dict], hero_team: dict[str, int],
-                cores: set[str] | None = None,
-                economy: list[dict] | None = None,
-                heroes: dict[int, str] | None = None,
-                ) -> list[dict]:
-    """Строки MatchMapCells матча (без match_id — его ставит раннер).
+def build_cells_by_minute(positions: list[dict], map_events: list[dict],
+                          fights: list[dict], hero_team: dict[str, int],
+                          cores: set[str] | None = None,
+                          economy: list[dict] | None = None,
+                          heroes: dict[int, str] | None = None,
+                          ) -> list[dict]:
+    """Строки MatchMapCellsMinute (без match_id — его ставит раннер).
 
     map_events: строки ReplayEvents с game_time, event_type, x, y и
     именем героя (attacker/target) — по нему определяется сторона.
     fights: строки MatchFights (уже посчитанные драки с координатами).
+
+    Это ЕДИНСТВЕННОЕ место, где карта считается. Фазовые строки не
+    считаются заново, а выводятся отсюда суммированием (см. phase_cells):
+    две независимые формулы для одного и того же неизбежно разошлись бы —
+    и разошлись бы молча, потому что обе выглядели бы правдоподобно.
     """
     acc: dict[tuple, int] = {}
     hero_team = _norm_team(hero_team or {})
@@ -304,16 +335,58 @@ def build_cells(positions: list[dict], map_events: list[dict],
         # зеркальную по сторонам, и заметить это было бы почти нечем.
         who = e.get("target") if kind == "death" else e.get("attacker")
         team = hero_team.get(_normalize_hero(str(who or "")))
-        _add(acc, phase_of(e.get("game_time")), team, kind,
+        _add(acc, minute_of(e.get("game_time")), team, kind,
              (e.get("x"), e.get("y")))
 
     for f in fights or []:
-        phase = phase_of(f.get("start_time"))
+        minute = minute_of(f.get("start_time"))
         # Драка принадлежит обеим сторонам: карта отвечает на вопрос «где
         # дрались», а не «кто победил» — исход лежит в MatchFights.
         for team in (2, 3):
-            _add(acc, phase, team, "fight", (f.get("x"), f.get("y")))
+            _add(acc, minute, team, "fight", (f.get("x"), f.get("y")))
 
+    return [{"minute": minute, "team": team, "kind": kind,
+             "gx": gx, "gy": gy, "n": n}
+            for (minute, team, kind, gx, gy), n in sorted(acc.items())]
+
+
+def phase_cells(minute_rows: list[dict]) -> list[dict]:
+    """Поминутные строки → фазовые, суммированием.
+
+    ПОЧЕМУ СУММИРОВАНИЕМ, А НЕ ВТОРЫМ ПРОХОДОМ ПО СЫРЬЮ. Обе таблицы
+    описывают одно и то же с разной зернистостью, и посчитанные
+    независимо они разъехались бы при первом же расхождении в фильтрах —
+    молча, потому что каждая по отдельности выглядела бы правдоподобно.
+    Здесь фазовая карта по построению равна сумме своих минут.
+
+    Границы фаз (600 и 1500 секунд) ложатся на ЦЕЛЫЕ минуты, поэтому ни
+    одна минута не делится между фазами. Это не совпадение, на которое
+    можно полагаться молча, — оно проверяется тестом: сдвинь границу на
+    полминуты, и суммирование начнёт приписывать минуту целиком не той
+    фазе, а разница будет в единицы процентов, то есть незаметна.
+    """
+    acc: dict[tuple, int] = {}
+    for row in minute_rows or []:
+        key = (phase_of(int(row["minute"]) * SECONDS_PER_MINUTE),
+               int(row["team"]), str(row["kind"]),
+               int(row["gx"]), int(row["gy"]))
+        acc[key] = acc.get(key, 0) + int(row["n"])
     return [{"phase": phase, "team": team, "kind": kind,
              "gx": gx, "gy": gy, "n": n}
             for (phase, team, kind, gx, gy), n in sorted(acc.items())]
+
+
+def build_cells(positions: list[dict], map_events: list[dict],
+                fights: list[dict], hero_team: dict[str, int],
+                cores: set[str] | None = None,
+                economy: list[dict] | None = None,
+                heroes: dict[int, str] | None = None,
+                ) -> list[dict]:
+    """Строки MatchMapCells матча (по фазам) — как и до спринта 147.
+
+    Подпись и результат не менялись: у функции есть потребители помимо
+    раннера (backfill_farm_core), и менять их заодно значило бы смешать
+    две правки в одну.
+    """
+    return phase_cells(build_cells_by_minute(
+        positions, map_events, fights, hero_team, cores, economy, heroes))
