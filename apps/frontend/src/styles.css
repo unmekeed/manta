@@ -183,6 +183,19 @@ tr.team-dire td:first-child { border-left: 3px solid var(--dire); }
 
 /* -- тепловые карты (спринт 111) ------------------------------------------ */
 .heatmaps h2 { margin-top: 0; }
+/* Ползунок времени (спринт 148). Ширина отдана самому ползунку: он
+   единственный элемент, точность которого зависит от размера — по
+   короткой дорожке сорок минут не разложить пальцем. */
+.heat-time { display: flex; align-items: center; gap: 16px; margin: 8px 0;
+             flex-wrap: wrap; font-size: 13px; }
+.minute-slider { display: flex; align-items: center; gap: 8px; flex: 1;
+                 min-width: 240px; }
+.minute-slider input[type="range"] { flex: 1; }
+.minute-slider input[type="range"]:disabled { opacity: .4; }
+/* Ширина фиксирована: подпись меняется при каждом движении ползунка, и
+   плавающая ширина дёргала бы соседние элементы. */
+.minute-now { color: var(--accent); min-width: 72px; text-align: right; }
+
 .heat-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
 .heat-tabs button {
   background: #1b2430; color: #c8d4e0; border: 1px solid #2c3a4a;

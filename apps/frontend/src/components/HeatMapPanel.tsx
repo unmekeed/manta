@@ -10,6 +10,12 @@ import { useState } from "react";
 
 import HeatMap, { type Cell } from "./HeatMap";
 import { storeFraction, storedFraction } from "../map/coords";
+import {
+  frameCells,
+  frameMax,
+  minuteLabel,
+  WHOLE_GAME,
+} from "../map/minutes";
 import type { HeatmapKind, Heatmaps, HeatmapPhase } from "../lib/api";
 
 const PHASES: { key: HeatmapPhase; label: string }[] = [
@@ -37,6 +43,10 @@ const KINDS: { key: HeatmapKind; label: string; hint: string; blobs?: boolean }[
 
 export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
   const [phase, setPhase] = useState<HeatmapPhase>("early");
+  // Минута ползунка. WHOLE_GAME — «вся игра»: с неё и начинаем, потому
+  // что общая карта отвечает на вопрос «куда вообще ходили», а минутный
+  // кадр — на «в каком порядке», и второй вопрос возникает после первого.
+  const [minute, setMinute] = useState<number>(WHOLE_GAME);
   const [kind, setKind] = useState<HeatmapKind>("presence");
   const [sides, setSides] = useState({ radiant: true, dire: true });
   // Калибровка выключена по умолчанию: она нужна, чтобы ПРОВЕРИТЬ
@@ -60,28 +70,78 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
     );
   }
 
+  // Поминутный слой есть только у матчей, разобранных со спринта 147.
+  // У остальных остаются фазы — не как заглушка, а потому что минутной
+  // разбивки в их агрегате нет и восстановить её неоткуда.
+  const byMinute = maps.by_minute;
+  const minuteBlock = byMinute?.kinds?.[kind];
+  const useMinutes = Boolean(byMinute?.minutes && minuteBlock);
+
   const block = maps.phases[phase]?.[kind];
   const available = new Set<string>();
   for (const p of Object.values(maps.phases)) {
     for (const k of Object.keys(p)) available.add(k);
   }
+  for (const k of Object.keys(byMinute?.kinds ?? {})) available.add(k);
+
+  // Что рисуем. Обе ветки дают один формат, чтобы HeatMap ничего не знал
+  // про минуты: карта рисует клетки, а не времена.
+  const radiant: Cell[] = useMinutes
+    ? frameCells(minuteBlock!.radiant, minute)
+    : ((block?.radiant ?? []) as Cell[]);
+  const dire: Cell[] = useMinutes
+    ? frameCells(minuteBlock!.dire, minute)
+    : ((block?.dire ?? []) as Cell[]);
+  const maxN = useMinutes ? frameMax(minuteBlock!, minute) : (block?.max_n ?? 0);
+  const hasCells = radiant.length > 0 || dire.length > 0;
 
   return (
     <section className="heatmaps">
       <h2>Карты</h2>
 
-      <div className="heat-tabs">
-        {PHASES.map((p) => (
-          <button
-            key={p.key}
-            className={p.key === phase ? "on" : ""}
-            disabled={!maps.phases[p.key]}
-            onClick={() => setPhase(p.key)}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
+      {useMinutes ? (
+        <div className="heat-time">
+          <label className="minute-slider">
+            <input
+              type="range"
+              min={0}
+              max={byMinute!.minutes - 1}
+              step={1}
+              // Ползунок в режиме «вся игра» стоит в нуле, но НЕ считает
+              // себя выбравшим нулевую минуту: значение состояния при
+              // этом WHOLE_GAME. Иначе, сняв галочку, пользователь
+              // получил бы нулевую минуту вместо той, где остановился.
+              value={minute === WHOLE_GAME ? 0 : minute}
+              disabled={minute === WHOLE_GAME}
+              onChange={(e) => setMinute(Number(e.target.value))}
+            />
+            <code className="minute-now">{minuteLabel(minute)}</code>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={minute === WHOLE_GAME}
+              onChange={(e) =>
+                setMinute(e.target.checked ? WHOLE_GAME : 0)
+              }
+            />
+            Вся игра
+          </label>
+        </div>
+      ) : (
+        <div className="heat-tabs">
+          {PHASES.map((p) => (
+            <button
+              key={p.key}
+              className={p.key === phase ? "on" : ""}
+              disabled={!maps.phases[p.key]}
+              onClick={() => setPhase(p.key)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="heat-tabs kinds">
         {KINDS.map((k) => (
@@ -102,9 +162,9 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
 
       <div className="heat-body">
         <HeatMap
-          radiant={(block?.radiant ?? []) as Cell[]}
-          dire={(block?.dire ?? []) as Cell[]}
-          maxN={block?.max_n ?? 0}
+          radiant={radiant}
+          dire={dire}
+          maxN={maxN}
           grid={maps.grid}
           show={sides}
           calibrate={calibrate}
@@ -170,21 +230,28 @@ export default function HeatMapPanel({ maps }: { maps?: Heatmaps }) {
               </p>
             </div>
           )}
-          {block ? (
+          {hasCells ? (
             <p className="muted">
               {KINDS.find((k) => k.key === kind)?.blobs
                 ? "Цвет — плотность: синий редко, красный чаще всего. "
                 : "Насыщенность — доля от максимума. "}
-              Максимум {block.max_n} в клетке. Шкала своя у каждого вида:
+              Максимум {maxN} в клетке. Шкала своя у каждого вида:
               присутствие даёт сотни попаданий, смоки — единицы.
+              {useMinutes && minute !== WHOLE_GAME
+                ? " Шкала кадра — своя: в минуте попаданий единицы, за игру"
+                  + " сотни, и общая шкала оставила бы кадры почти пустыми."
+                : ""}
             </p>
           ) : (
             <p className="muted">
-              {kind === "farm_core"
+              {kind === "farm_core" && !useMinutes
                 ? "Фарм коров считается со спринта 140; этот матч разобран "
                   + "раньше. Он появится после переразбора — а пока рядом "
                   + "есть «Фарм (все)»."
-                : "В этой фазе таких событий не было."}
+                : useMinutes
+                  ? `На ${minuteLabel(minute)} таких событий не было — `
+                    + "это факт матча, а не пробел в данных."
+                  : "В этой фазе таких событий не было."}
             </p>
           )}
         </div>

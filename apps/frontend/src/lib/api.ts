@@ -66,9 +66,32 @@ export interface HeatmapBlock {
   dire: [number, number, number][];
 }
 
+// Поминутный слой (спринт 148). Минута лежит В САМОЙ клетке, а не
+// образует ещё один уровень словаря: вложенность повторила бы служебные
+// ключи сорок раз, ничего не добавив.
+export interface MinuteHeatmapBlock {
+  // Максимум за ВСЮ игру — по суммам клетки, а не по кадрам: герой,
+  // простоявший в клетке десять минут, даёт там сумму втрое большую
+  // любого отдельного кадра.
+  max_n: number;
+  // Максимум ВНУТРИ каждой минуты; длина равна minutes, включая пустые
+  // минуты — клиент индексирует массив номером минуты напрямую.
+  max_by_minute: number[];
+  radiant: [number, number, number, number][]; // [минута, gx, gy, n]
+  dire: [number, number, number, number][];
+}
+
+export interface MinuteHeatmaps {
+  minutes: number;
+  kinds: Partial<Record<HeatmapKind, MinuteHeatmapBlock>>;
+}
+
 export interface Heatmaps {
   grid: number;
   phases: Partial<Record<HeatmapPhase, Partial<Record<HeatmapKind, HeatmapBlock>>>>;
+  // Отсутствует у матчей, разобранных до спринта 147: минутной разбивки
+  // в их агрегате нет и взять её неоткуда.
+  by_minute?: MinuteHeatmaps;
 }
 
 export interface MatchAnalysis {

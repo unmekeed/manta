@@ -15,7 +15,8 @@ from pathlib import Path
 
 from manta_data import load_json
 
-from .heatmaps import build_heatmaps, heatmaps_available
+from .heatmaps import (build_heatmaps, build_minute_heatmaps,
+                       heatmaps_available)
 
 REPORT_VERSION = "0.2.0"  # 0.2.0: hero_id из словаря, errors (ΔWP)
 
@@ -453,13 +454,22 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
                    positions: list[dict] | None = None,
                    risk_fn=None, laning_fn=None,
                    early_combat: dict[str, dict] | None = None,
-                   map_cells: list[dict] | None = None) -> dict:
+                   map_cells: list[dict] | None = None,
+                   map_cells_minute: list[dict] | None = None) -> dict:
     """Схема MatchAnalysis (+ hero/player_name — аддитивные поля).
 
     early_combat: hero (npc_dota_hero_*) → {dealt, taken, kills, deaths}
     за первые 5 минут — фичи Laning-модели (laning_fn); без них/без
     модели laning_score считает эвристика."""
     heatmaps = build_heatmaps(map_cells or [])
+    # Поминутный слой — рядом с фазовым, а не вместо него. У матчей,
+    # разобранных до спринта 147, минутной разбивки нет и взять её
+    # неоткуда: агрегат по фазам её уже не содержит. Пустой ключ
+    # честнее отсутствующего только там, где различие что-то значит;
+    # здесь клиент проверяет minutes > 0.
+    by_minute = build_minute_heatmaps(map_cells_minute or [])
+    if by_minute["minutes"]:
+        heatmaps["by_minute"] = by_minute
     points = timeline["points"]
     final_wp = points[-1]["radiant_wp"] if points else 0.5
     turning = _turning_point(points)

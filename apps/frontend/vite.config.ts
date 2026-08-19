@@ -11,5 +11,8 @@ export default defineConfig({
     // подменять её заглушкой значило бы проверять заглушку.
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
+    // Очистка DOM между тестами: без неё деревья копятся в document.body
+    // и запросы через screen находят чужие узлы (см. src/test-setup.ts).
+    setupFiles: ["src/test-setup.ts"],
   },
 });

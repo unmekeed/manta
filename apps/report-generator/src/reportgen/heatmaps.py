@@ -80,6 +80,89 @@ def build_heatmaps(cells: list[dict]) -> dict:
             "phases": {p: out[p] for p in PHASES if p in out}}
 
 
+def build_minute_heatmaps(cells: list[dict]) -> dict:
+    """Поминутный слой секции `heatmaps` (спринт 148).
+
+    {"minutes": M, "kinds": {вид: {"max_n": N, "max_by_minute": [...],
+    "radiant": [[minute, gx, gy, n], …], "dire": […]}}}
+
+    ФОРМА: минута лежит В САМОЙ КЛЕТКЕ, а не образует ещё один уровень
+    словаря. Вложенность {минута: {вид: {…}}} повторила бы служебные ключи
+    сорок раз вместо одного, ничего не добавив: клиент всё равно
+    фильтрует плоский список.
+
+    ДВЕ НОРМИРОВКИ, И ЭТО НЕ ИЗБЫТОЧНОСТЬ. Ползунок показывает ОДНУ
+    минуту, где попаданий в клетку единицы; переключатель «вся игра» —
+    сумму по всем минутам, где их сотни. Одна общая шкала сделала бы
+    минутные кадры почти пустыми. Считать же максимум кадра на клиенте
+    нельзя по другой причине: тогда две картинки одного матча разойдутся
+    по шкале, как только потребителей станет двое, — та же беда, ради
+    которой max_n вообще считается здесь (см. докстроку модуля).
+
+    `max_n` для всей игры — максимум СУММ по клетке, а не сумма
+    максимумов и не максимум из max_by_minute. Второе завысило бы шкалу,
+    третье занизило: герой, простоявший в клетке десять минут, даёт там
+    сумму втрое большую любого отдельного кадра.
+
+    ПРО ОБЪЁМ. Поминутный слой прибавляет к отчёту десятки килобайт:
+    строк столько же, сколько замеров позиций (около 2400 на матч), и
+    каждая — четыре числа. Отчёт лежит в Postgres одним JSON, так что
+    цена заметна; но альтернатива — отдельный запрос к витрине на каждое
+    движение ползунка, то есть поход в ClickHouse на кадр.
+    """
+    per_minute: dict[str, dict[int, dict[tuple[int, int, int], int]]] = {}
+    minutes_seen: set[int] = set()
+
+    for row in cells or []:
+        kind = str(row.get("kind") or "")
+        if kind not in KINDS:
+            continue
+        try:
+            minute = int(row.get("minute"))
+            team = int(row.get("team") or 0)
+            gx, gy = int(row.get("gx")), int(row.get("gy"))
+            n = int(row.get("n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if team not in TEAMS or n <= 0 or minute < 0:
+            continue
+        # Клетка вне сетки — испорченная строка, а не край карты.
+        if not (0 <= gx < GRID and 0 <= gy < GRID):
+            continue
+        minutes_seen.add(minute)
+        per_minute.setdefault(kind, {}).setdefault(minute, {})[
+            (team, gx, gy)] = n
+
+    if not minutes_seen:
+        return {"minutes": 0, "kinds": {}}
+
+    total = max(minutes_seen) + 1
+    kinds: dict[str, dict] = {}
+    for kind in KINDS:
+        by_minute = per_minute.get(kind)
+        if not by_minute:
+            continue
+        whole: dict[tuple[int, int, int], int] = {}
+        block: dict = {"max_n": 0, "max_by_minute": [0] * total,
+                       "radiant": [], "dire": []}
+        for minute, cellmap in by_minute.items():
+            for (team, gx, gy), n in cellmap.items():
+                side = "radiant" if team == 2 else "dire"
+                block[side].append([minute, gx, gy, n])
+                block["max_by_minute"][minute] = max(
+                    block["max_by_minute"][minute], n)
+                whole[(team, gx, gy)] = whole.get((team, gx, gy), 0) + n
+        block["max_n"] = max(whole.values())
+        # Порядок фиксируем: отчёт пересобирается при переразборе матча, и
+        # плавающий порядок давал бы «изменившийся» отчёт там, где ничего
+        # не менялось.
+        for side in ("radiant", "dire"):
+            block[side].sort(key=lambda c: (c[0], c[1], c[2]))
+        kinds[kind] = block
+
+    return {"minutes": total, "kinds": kinds}
+
+
 def heatmaps_available(section: dict) -> bool:
     """Есть ли в секции хоть одна клетка.
 

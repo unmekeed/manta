@@ -204,6 +204,17 @@ class ReportGenerator:
             "SELECT phase, team, kind, gx, gy, n FROM MatchMapCells FINAL"
             " WHERE match_id = {match_id:UInt64}", match_id)
 
+    def _map_cell_minute_rows(self, match_id: int) -> list[dict]:
+        """Поминутные клетки (спринт 148); пусто у матчей до спринта 147.
+
+        FINAL — по той же причине, что и у фазовых: до слияния кусков
+        переразобранный матч отдаёт клетки дважды, и на карте это выглядит
+        удвоенной интенсивностью — правдоподобно и незаметно.
+        """
+        return self._ch_select(
+            "SELECT minute, team, kind, gx, gy, n FROM MatchMapCellsMinute"
+            " FINAL WHERE match_id = {match_id:UInt64}", match_id)
+
     def _position_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT game_time, hero, x, y, is_alive FROM PositionSnapshots"
@@ -328,7 +339,8 @@ class ReportGenerator:
                                   risk_fn=self._risk_fn(),
                                   laning_fn=self._laning_fn(),
                                   early_combat=self._early_combat(match_id),
-                                  map_cells=self._map_cell_rows(match_id))
+                                  map_cells=self._map_cell_rows(match_id),
+                                  map_cells_minute=self._map_cell_minute_rows(match_id))
 
         self.db.execute(
             """INSERT INTO MatchReports
