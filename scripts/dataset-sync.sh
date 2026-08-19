@@ -40,10 +40,28 @@ PG_DB="${POSTGRES_DB:-manta}"
 # живёт 14 дней, реплеи Valve удаляет сама. Не внести таблицу в слепок
 # значит потерять всю историю карт при переносе на другую машину — и
 # заметить это только тогда, когда карту попросят построить.
+# MatchMapCellsMinute (спринт 147) — третий раз подряд одна и та же
+# история, и на этот раз с ней покончено. Список выше пополнялся ПОСЛЕ
+# того, как пропажу замечали: MatchDraft и MatchEvents в спринте 76,
+# MatchMapCells в 98, эта таблица — в 149. Каждый раз слепок молча терял
+# данные, которые из сырья не восстановить: ReplayEvents живёт 14 дней,
+# реплеи Valve удаляет сама.
+#
+# Теперь список сверяется с миграциями тестом
+# (scripts/tests/test_dataset_sync_covers_schema.py): новая таблица в
+# ClickHouse обязана быть либо здесь, либо в явном списке исключений с
+# причиной. Рукописный перечень, за которым никто не следит, расходится
+# со схемой ровно тогда, когда схема меняется, — то есть всегда.
 REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures
                   MatchDraft MatchEvents MatchFights MatchMapCells
-                  MatchHeroTimings)
+                  MatchMapCellsMinute MatchHeroTimings)
 RAW_TABLES=(EconomyTimeline PositionSnapshots)
+# Не переносится осознанно: ReplayEvents — сырьё с TTL 14 дней и
+# десятками тысяч строк на матч. Всё, что из него нужно, уже посчитано в
+# агрегатах выше, а тащить его в слепок значило бы раздуть архив на
+# порядок ради данных, которые на принимающей машине протухнут через две
+# недели.
+SKIPPED_TABLES=(ReplayEvents)
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }
 pgq() { docker exec -i "$PG" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q "$@"; }
