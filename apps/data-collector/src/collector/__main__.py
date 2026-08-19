@@ -41,6 +41,60 @@ from .sources.stratz import StratzTimelineSource
 # такая проверка не стоит.
 BUDGET_RETRY_S = int(os.getenv("BUDGET_RETRY_S", "3600"))
 
+# Первая пауза после ОБРЫВА — не после отказа по квоте (спринт 146).
+TRANSIENT_SLEEP_S = int(os.getenv("TRANSIENT_SLEEP_S", "300"))
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Сбой на ТОЙ стороне или в сети — не наш отказ и не квота.
+
+    Замер 2026-08-19: api.opendota.com отдавал 522 (Cloudflare не
+    достучался до origin) — проверено с двух разных сетей, то есть лежала
+    не машина. Такие обрывы длятся минуты.
+
+    429 сюда НЕ попадает намеренно: это не обрыв, а исчерпанная квота, и
+    у неё своя, куда более длинная пауза. Перепутать значило бы долбить
+    API при отрицательном остатке.
+    """
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return exc.response.status_code >= 500
+    return False
+
+
+class TransientBackoff:
+    """Пауза после обрывов подряд: 300с, 600с, 1200с… но не дольше цикла.
+
+    ЗАЧЕМ. У opendota-public интервал цикла — час. Двадцатисекундный
+    обрыв у Cloudflare стоил ровно этого часа: цикл падал, и коллектор
+    ложился спать на полный интервал, будто ничего не случилось. При том
+    что через минуту всё работает.
+
+    Почему не «повторить запрос прямо в цикле». Каждая попытка тратит
+    бюджет вызовов (budget.spend() стоит ПЕРЕД запросом), а у
+    opendota-public его 50 в сутки. Повтор внутри цикла жёг бы квоту тем
+    быстрее, чем дольше лежит чужой сервер. Здесь цена обрыва — не лишние
+    вызовы, а более ранний следующий цикл.
+
+    Почему растущая, а не постоянная. При долгом падении внешнего API
+    постоянные 300с дали бы двенадцать бесполезных циклов в час. Удвоение
+    возвращает к обычному интервалу за четыре обрыва: короткий сбой стоит
+    пяти минут, длинный — не дороже прежнего.
+    """
+
+    def __init__(self, base: int = TRANSIENT_SLEEP_S) -> None:
+        self._base = base
+        self.failures = 0
+
+    def reset(self) -> None:
+        """Цикл прошёл — счётчик обнуляется, иначе пауза росла бы вечно."""
+        self.failures = 0
+
+    def next_sleep(self, interval: int) -> int:
+        self.failures += 1
+        return min(interval, self._base * 2 ** (self.failures - 1))
+
 
 def seconds_until_utc_midnight(now: datetime | None = None,
                                buffer_s: int = 120) -> int:
@@ -278,18 +332,21 @@ def main() -> None:
     if metrics_port and not args.once:
         manta_grpc.serve_metrics(metrics_port, "data-collector")
     log = logging.getLogger("collector")
+    backoff = TransientBackoff()
     try:
         while True:
             # Временный сбой внешнего API (5xx OpenDota, сеть) не должен
-            # убивать демона — цикл повторится через interval. 429 —
-            # особый случай: обычный interval означал бы ещё десяток
-            # бесполезных попыток до полуночи UTC, каждая из которых всё
-            # равно немного дожигает и без того отрицательный остаток
-            # квоты (см. docs/runbooks.md) — ждём настоящего сброса.
+            # убивать демона — цикл повторится РАНЬШЕ обычного интервала,
+            # см. TransientBackoff. 429 — особый случай: обычный interval
+            # означал бы ещё десяток бесполезных попыток до полуночи UTC,
+            # каждая из которых всё равно немного дожигает и без того
+            # отрицательный остаток квоты (см. docs/runbooks.md) — ждём
+            # настоящего сброса.
             sleep_s = args.interval
             try:
                 n = collector.collect_once()
                 MATCHES_COLLECTED.inc(n)
+                backoff.reset()
                 log.info("cycle done, processed=%s", n)
             except requests.HTTPError as e:
                 if args.once:
@@ -354,6 +411,13 @@ def main() -> None:
                             "жду сброса ~%.1fч вместо обычных %ss — см. "
                             "docs/runbooks.md и OPENDOTA_API_KEY",
                             remaining, sleep_s / 3600, args.interval)
+                elif is_transient(e):
+                    sleep_s = backoff.next_sleep(args.interval)
+                    log.warning(
+                        "%s от %s — сбой на их стороне, не квота; повтор "
+                        "через %ss вместо обычных %ss (обрывов подряд: %d)",
+                        status, args.source, sleep_s, args.interval,
+                        backoff.failures)
                 else:
                     log.exception("цикл сбора упал; повтор через %ss",
                                   args.interval)
@@ -378,11 +442,23 @@ def main() -> None:
                               seconds_until_utc_midnight())
                 log.warning("%s; повтор через ~%.1fч (потолок растёт по мере"
                             " суток)", e, sleep_s / 3600)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 if args.once:
                     raise
                 CYCLES_FAILED.inc()
-                log.exception("цикл сбора упал; повтор через %ss", args.interval)
+                if is_transient(e):
+                    # Обрыв связи не доходит до HTTPError вовсе: requests
+                    # бросает ConnectionError/Timeout, и раньше такой сбой
+                    # падал сюда, в общую ветку, стоя полного интервала.
+                    sleep_s = backoff.next_sleep(args.interval)
+                    log.warning(
+                        "обрыв связи с %s (%s); повтор через %ss вместо "
+                        "обычных %ss (обрывов подряд: %d)",
+                        args.source, type(e).__name__, sleep_s,
+                        args.interval, backoff.failures)
+                else:
+                    log.exception("цикл сбора упал; повтор через %ss",
+                                  args.interval)
             if args.once:
                 break
             time.sleep(sleep_s)

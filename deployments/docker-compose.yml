@@ -40,6 +40,9 @@ x-collector-env:
       STRATZ_SKIP_FRESHEST: "${STRATZ_SKIP_FRESHEST:-0}"
       TIMELINE_DETAIL_BUDGET: "${TIMELINE_DETAIL_BUDGET:-}"
       TIMELINE_LIMIT: "${TIMELINE_LIMIT:-30}"
+      # Первая пауза после ОБРЫВА у внешнего API (5xx, сеть) — не после
+      # отказа по квоте. Дальше удваивается до обычного интервала.
+      TRANSIENT_SLEEP_S: "${TRANSIENT_SLEEP_S:-300}"
 
 services:
   postgres:
