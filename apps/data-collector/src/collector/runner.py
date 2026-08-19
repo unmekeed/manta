@@ -180,16 +180,42 @@ class Collector:
             return row[0] if row else None
 
     def _is_collected(self, match_id: int) -> bool:
+        """Есть ли у матча РЕПЛЕЙ — не «собран ли он вообще» (спринт 151).
+
+        Разница решающая. CollectedMatches одна на все источники, и матч,
+        взятый JSON-путём, лежит в ней наравне с разобранным из реплея. Но
+        у JSON-матча нет ни позиций, ни событий: ни одной тепловой карты по
+        нему не построить. Считая его дубликатом, реплейный путь отказывался
+        от единственного источника координат — навсегда и молча.
+
+        На VPS это дало 106 матчей в витрине при пустом PositionSnapshots:
+        JSON-источники быстрее и жаднее (14 матчей за 30 минут против 2 за
+        час) и разбирали те же про-матчи первыми.
+
+        Обратное направление остаётся строгим: JSON-путь пропускает всё,
+        что собрано любым путём, — реплей даёт всё то же и сверх того.
+        """
         with self._db.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM CollectedMatches WHERE match_id = %s", (match_id,))
+                "SELECT 1 FROM CollectedMatches"
+                " WHERE match_id = %s AND has_replay", (match_id,))
             return cur.fetchone() is not None
 
     def _mark_collected(self, ref: MatchRef, replay_url: str) -> None:
         with self._db.cursor() as cur:
+            # DO UPDATE, а не DO NOTHING: матч мог прийти раньше
+            # JSON-путём, и строка уже есть. Оставь мы DO NOTHING —
+            # has_replay навсегда остался бы FALSE, реплейный путь считал
+            # бы матч несобранным и качал его каждый цикл. Дедуп,
+            # починенный наполовину, хуже сломанного: он жжёт квоту.
             cur.execute(
-                """INSERT INTO CollectedMatches (match_id, source_name, replay_url)
-                   VALUES (%s, %s, %s) ON CONFLICT (match_id) DO NOTHING""",
+                """INSERT INTO CollectedMatches
+                       (match_id, source_name, replay_url, has_replay)
+                   VALUES (%s, %s, %s, TRUE)
+                   ON CONFLICT (match_id) DO UPDATE
+                       SET source_name = EXCLUDED.source_name,
+                           replay_url  = EXCLUDED.replay_url,
+                           has_replay  = TRUE""",
                 (ref.match_id, self._source.name, replay_url))
             self._write_cursor(cur, ref)
         self._db.commit()
@@ -224,10 +250,13 @@ class Collector:
         cursor = self._get_cursor()
         processed = 0
         for ref in self._source.fetch_new(cursor):
-            # Дубликат — курсор ОБЯЗАН сдвинуться. CollectedMatches общая
-            # для всех источников: про-матч, уже взятый timeline-источником
-            # по JSON, встречается здесь как дубликат, и без сдвига курсора
-            # реплейный источник упирается в него каждый цикл навсегда.
+            # Дубликат — курсор ОБЯЗАН сдвинуться, иначе источник упрётся
+            # в него каждый цикл навсегда (инцидент 2026-07-31).
+            #
+            # Дубликатом здесь считается матч, у которого УЖЕ ЕСТЬ реплей.
+            # Матч, взятый JSON-путём, дубликатом не считается: у него нет
+            # ни позиций, ни событий, то есть ни одной тепловой карты по
+            # нему не построить (спринт 151, см. _is_collected).
             if self._is_collected(ref.match_id):
                 logger.info("skip duplicate match_id=%s", ref.match_id)
                 self._advance_cursor(ref)

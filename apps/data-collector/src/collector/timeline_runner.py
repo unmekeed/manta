@@ -113,9 +113,16 @@ class TimelineCollector:
 
     def _mark_collected(self, match_id: int, cursor_value: str) -> None:
         with self._db.cursor() as cur:
+            # has_replay = FALSE и DO NOTHING: JSON-путь не должен
+            # ПОНИЖАТЬ строку, поставленную реплейным путём. Матч с
+            # реплеем полнее — у него есть позиции и события, — и
+            # перезаписать его отметку значило бы отправить реплейный
+            # источник качать заново то, что уже разобрано.
             cur.execute(
-                """INSERT INTO CollectedMatches (match_id, source_name, replay_url)
-                   VALUES (%s, %s, %s) ON CONFLICT (match_id) DO NOTHING""",
+                """INSERT INTO CollectedMatches
+                       (match_id, source_name, replay_url, has_replay)
+                   VALUES (%s, %s, %s, FALSE)
+                   ON CONFLICT (match_id) DO NOTHING""",
                 (match_id, self._source.name, f"json:{self._source.name}"))
             cur.execute(
                 """INSERT INTO CollectorCursor (source_name, cursor_value, updated_at)
