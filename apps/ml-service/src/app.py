@@ -16,13 +16,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from concurrent import futures
 
 import grpc
 
 import manta_grpc
 import numpy as np
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 from explain.winprob_shap import explain_matrix
 from gen import services_pb2, services_pb2_grpc
@@ -35,6 +36,75 @@ PREDICT_LATENCY = Histogram(
     buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1))
 PREDICTIONS = Counter("ml_predictions_total", "Выполненные предсказания",
                       ["rpc"])
+MODEL_LOADED = Gauge(
+    "ml_model_loaded",
+    "1 — основная модель загружена; 0 — сервис отвечает UNAVAILABLE")
+
+
+class ModelSlot:
+    """Основная модель: может отсутствовать, и это НЕ повод падать.
+
+    ЗАЧЕМ (спринт 145). На чистой машине реестр моделей пуст: обучение
+    пойдёт после того, как сбор наберёт данные, а до тех пор
+    `registry://win_probability/production` не разрешается. Раньше это
+    роняло build_server на старте, а `restart: unless-stopped` превращал
+    падение в бесконечный цикл — то есть НОРМАЛЬНОЕ состояние свежей
+    установки выглядело как поломка сервиса и останавливало развёртывание.
+
+    Показательно, что в том же build_server дополнительные модели
+    (death_risk, laning) отсутствие уже переживали: warning в лог и работа
+    без них. Исключением была ровно основная.
+
+    Отсутствие не заминается: метрика ml_model_loaded держит 0, в логе
+    предупреждение, вызовы получают UNAVAILABLE. Выдуманного числа никто
+    не увидит — в этом и разница между «нет ответа» и «неверный ответ».
+
+    Повторная попытка нужна, чтобы сервис ПОДХВАТИЛ модель, как только
+    ml-autotrain её опубликует. Без неё контейнер пришлось бы
+    перезапускать руками, а знать момент неоткуда.
+    """
+
+    def __init__(self, spec, *, retry_after_s: float = 60.0,
+                 loader=None, clock=None):
+        self._spec = spec
+        self._retry_after = retry_after_s
+        self._load = loader or (lambda s: WinProbability(_resolve_model_path(s)))
+        self._clock = clock or time.monotonic
+        self._model: WinProbability | None = None
+        self._last_try: float | None = None
+        MODEL_LOADED.set(0)
+
+    @classmethod
+    def ready(cls, model: WinProbability) -> "ModelSlot":
+        """Слот с уже загруженной моделью — для тестов и прямых вызовов."""
+        slot = cls.__new__(cls)
+        slot._spec, slot._retry_after, slot._load = None, 0.0, None
+        slot._clock, slot._model, slot._last_try = time.monotonic, model, None
+        MODEL_LOADED.set(1)
+        return slot
+
+    def get(self) -> WinProbability | None:
+        """Модель или None. Повторная попытка — не чаще retry_after_s.
+
+        Ограничение по времени тут не про скорость: без него каждый запрос
+        при пустом реестре ходил бы в MinIO, и сервис БЕЗ модели грузил бы
+        хранилище сильнее, чем сервис с моделью.
+        """
+        if self._model is not None or self._load is None:
+            return self._model
+        now = self._clock()
+        if self._last_try is not None and now - self._last_try < self._retry_after:
+            return None
+        self._last_try = now
+        try:
+            self._model = self._load(self._spec)
+        except Exception as e:  # noqa: BLE001 — любая беда реестра равнозначна
+            logger.warning("основная модель недоступна (%s): %s", self._spec, e)
+            MODEL_LOADED.set(0)
+            return None
+        logger.info("основная модель загружена (%s)", self._spec)
+        MODEL_LOADED.set(1)
+        return self._model
 
 
 def _vector_from_features(fv, features: list[str]) -> np.ndarray:
@@ -53,10 +123,16 @@ def _confidence(wp: float) -> float:
     return abs(wp - 0.5) * 2.0
 
 
+NO_MODEL = ("модель win_probability ещё не обучена: реестр пуст. "
+            "Сервис поднят и подхватит её автоматически")
+
+
 class MLService(services_pb2_grpc.MLServiceServicer):
-    def __init__(self, model: WinProbability,
+    def __init__(self, model: WinProbability | ModelSlot,
                  extra_models: dict[str, WinProbability] | None = None):
-        self.model = model
+        # Принимается и готовая модель, и слот: прямые вызовы (тесты,
+        # разбор одного матча) не должны знать про пустой реестр.
+        self.slot = model if isinstance(model, ModelSlot) else ModelSlot.ready(model)
         # Дополнительные модели по model_name (Гл. 6.3: death_risk и т.п.).
         # Формат артефактов у всех одинаковый, сервятся тем же классом;
         # PredictResponse.win_probability_radiant несёт вероятность модели
@@ -64,12 +140,14 @@ class MLService(services_pb2_grpc.MLServiceServicer):
         self.extra = extra_models or {}
 
     def Predict(self, request, context):
-        model = self.model
+        model = self.slot.get()
         if request.model_name not in ("", "win_probability"):
             model = self.extra.get(request.model_name)
             if model is None:
                 context.abort(grpc.StatusCode.NOT_FOUND,
                               f"model {request.model_name!r} is not served")
+        elif model is None:
+            context.abort(grpc.StatusCode.UNAVAILABLE, NO_MODEL)
         try:
             X = _vector_from_features(request.features, model.features)
         except KeyError as missing:
@@ -84,20 +162,25 @@ class MLService(services_pb2_grpc.MLServiceServicer):
         )
 
     def PredictStream(self, request_iterator, context):
+        # Модель берётся ОДИН раз на поток: подмена в середине кривой
+        # означала бы точки от разных версий в одном ответе.
+        model = self.slot.get()
+        if model is None:
+            context.abort(grpc.StatusCode.UNAVAILABLE, NO_MODEL)
         for frame in request_iterator:
             try:
-                X = _vector_from_features(frame.features, self.model.features)
+                X = _vector_from_features(frame.features, model.features)
             except KeyError as missing:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                               f"frame t={frame.game_time}: missing features: "
                               f"{missing}")
             with PREDICT_LATENCY.time():
-                wp = float(self.model.predict(X)[0])
+                wp = float(model.predict(X)[0])
                 # SHAP кадра (TreeSHAP через pred_contrib — дёшево на
                 # одном снапшоте): потребители прикладывают топ-вклады к
                 # DetectedError в отчёте (Гл. 6.2, интерпретируемость).
-                drivers = explain_matrix(self.model.booster, X,
-                                         self.model.features, k=3)[0]
+                drivers = explain_matrix(model.booster, X,
+                                         model.features, k=3)[0]
             PREDICTIONS.labels("stream").inc()
             yield services_pb2.WinProbability(
                 game_time=frame.game_time,
@@ -131,8 +214,16 @@ def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
 
 
 def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server, int]:
-    """Собрать сервер; port=0 выбирает свободный порт (для тестов)."""
-    model = WinProbability(_resolve_model_path(model_path))
+    """Собрать сервер; port=0 выбирает свободный порт (для тестов).
+
+    Отсутствие основной модели сервер НЕ роняет: на чистой машине реестр
+    пуст по определению, обучение идёт после сбора. Первая попытка
+    делается здесь, чтобы предупреждение попало в лог сразу при старте, а
+    не при первом запросе через сутки.
+    """
+    slot = ModelSlot(model_path,
+                     retry_after_s=float(os.getenv("MODEL_RETRY_S", "60")))
+    slot.get()
     # Дополнительные модели: NAME_MODEL_PATH из окружения (пусто/сбой —
     # сервим без них, Predict вернёт NOT_FOUND по этому имени).
     extra: dict[str, WinProbability] = {}
@@ -155,7 +246,7 @@ def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server,
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                          options=[("grpc.so_reuseport", 0)])
     services_pb2_grpc.add_MLServiceServicer_to_server(
-        MLService(model, extra), server)
+        MLService(slot, extra), server)
     bound = manta_grpc.add_port(server, port, "ml-service")
     return server, bound
 
