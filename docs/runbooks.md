@@ -175,6 +175,46 @@ curl -sS -o /dev/null -w "%{http_code}\n" --max-time 25 \
 Тревожно, если «обрывов подряд» растёт сутками: тогда сбой не чужой, а
 наш — смотреть DNS, исходящий фаервол, прокси.
 
+### 1.2 Реплеи не разбираются: PositionSnapshots пуст
+
+**Симптом.** Матчи в витрине есть, а карт нет ни одной:
+
+```bash
+docker exec manta-clickhouse-1 sh -c 'clickhouse-client \
+  --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -q "
+SELECT (SELECT uniqExact(match_id) FROM manta.MatchTimelineFeatures) AS matches,
+       (SELECT count() FROM manta.PositionSnapshots)                 AS positions,
+       (SELECT count() FROM manta.MatchMapCellsMinute)               AS cells"'
+```
+
+`matches` растёт, `positions` — ноль. Значит работает только JSON-путь, а
+реплейный стоит. Карты строятся ТОЛЬКО из реплеев, поэтому выглядит это
+как «сломались карты».
+
+**Смотреть логи качающего, а не разбирающего:**
+
+```bash
+docker logs --tail 30 manta-pro-replay-collector-1
+```
+
+`ConnectTimeoutError` на `replay*.dota2.com.cn` — реплеи раздаёт
+региональный CDN Valve, и китайский кластер доступен не отовсюду. С
+машины в Европе он обычно недостижим; проверить прямо:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code} %{time_connect}s\n" --max-time 15 \
+     http://replay413.dota2.com.cn/
+```
+
+Чинить тут нечего — маршрута нет. Важно другое: со спринта 150 такое
+соединение отваливается за 10 секунд, а не за 600, и коллектор идёт к
+следующему матчу вместо того, чтобы стоять на недостижимом почти час.
+До спринта 150 очередь не двигалась вовсе.
+
+Если недостижимых матчей много подряд, реплейный путь наполняется
+медленно — это не поломка, а география. Ускорить можно только своим
+источником матчей (Steam GC), где кластер выбирается не за нас.
+
 ## 2. Гейт всё отклоняет
 
 **Симптом.** Подряд ≥5 «⏸ отклонена гейтом» в Telegram; в реестре версии
