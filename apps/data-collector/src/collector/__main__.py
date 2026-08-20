@@ -171,6 +171,32 @@ def blamed_on_stratz(response, source: str) -> bool:
     return source.startswith("stratz")
 
 
+def report_parked() -> None:
+    """Что стоит в парковке и по чьей вине (спринт 153).
+
+    Печатает, а не отдаёт метрику: вопрос задаётся руками и редко —
+    «маршрут вернулся, есть ли к чему возвращаться». Заводить ради него
+    экспортер значило бы копить в Prometheus число, на которое никто не
+    смотрит.
+    """
+    import psycopg
+
+    from .parked import ParkedStore
+
+    dsn = os.getenv(
+        "POSTGRES_DSN",
+        "postgresql://dota:dota_dev_password@localhost:5432/manta")
+    store = ParkedStore(psycopg.connect(dsn, autocommit=True))
+    rows = store.stats()
+    if not rows:
+        print("парковка пуста")
+        return
+    total = sum(n for _, n in rows)
+    print(f"ждут реплея: {total}")
+    for host, n in rows:
+        print(f"  {n:5d}  {host}")
+
+
 def build_source(name: str):
     limit = int(os.getenv("OPENDOTA_LIMIT", "3"))
     api_key = os.getenv("OPENDOTA_API_KEY") or None
@@ -180,6 +206,20 @@ def build_source(name: str):
     if name == "opendota":
         return OpenDotaSource(limit_per_cycle=limit, api_key=api_key,
                               shard=shard)
+    if name == "parked":
+        # Возврат к матчам, чей реплей однажды не взялся (спринт 153).
+        # Запускается вручную: `COLLECTOR_SOURCE=parked ... --once`.
+        from .parked import ParkedStore
+        from .sources.parked import ParkedSource
+        import psycopg
+        dsn = os.getenv(
+            "POSTGRES_DSN",
+            "postgresql://dota:dota_dev_password@localhost:5432/manta")
+        db = psycopg.connect(dsn, autocommit=True)
+        return ParkedSource(
+            ParkedStore(db),
+            limit_per_cycle=int(os.getenv("PARKED_LIMIT", "5")),
+            api_key=api_key, shard=shard)
     if name == "candidates":
         # Своя разбивка: список матчей — от Valve, ранги — из кэша, у
         # OpenDota остаётся только соль. Один запрос на матч вместо
@@ -291,7 +331,13 @@ def main() -> None:
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
     parser.add_argument("--once", action="store_true",
                         help="один проход и выход (для тестов/CI)")
+    parser.add_argument("--parked-report", action="store_true",
+                        help="показать, что стоит в парковке, и выйти")
     args = parser.parse_args()
+
+    if args.parked_report:
+        report_parked()
+        return
 
     source = build_source(args.source)
     if args.source.startswith(("opendota-timeline", "opendota-league",

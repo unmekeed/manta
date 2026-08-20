@@ -296,6 +296,12 @@ sql-test:      ## Все SQL-тесты на живой базе (pytest на х
 dedup-sql-test: ## Дедуп по возможностям — на живом Postgres
 	./scripts/sql-test.sh tests/test_dedup_sql.py
 
+replay-parked: ## Что стоит в парковке (реплеи, которые не удалось взять)
+	./scripts/replay-retry.sh
+
+replay-retry:  ## Попробовать забрать припаркованные реплеи (вручную!)
+	./scripts/replay-retry.sh --run
+
 ranks-report:  ## Кэш рангов: сколько накоплено и какую долю потока он закрывает
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh report
 

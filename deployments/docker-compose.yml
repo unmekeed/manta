@@ -25,6 +25,10 @@ x-collector-env:
       OPENDOTA_LIMIT: "${OPENDOTA_LIMIT:-3}"
       OPENDOTA_MIN_PATCH: "${OPENDOTA_MIN_PATCH:-}"
       OPENDOTA_MIN_RANK: "${OPENDOTA_MIN_RANK:-80}"
+      # Возврат к припаркованным реплеям (спринт 153): сколько брать за
+      # прогон. Источник `parked` запускается вручную, но переменную
+      # читает точка входа, а она общая для всех коллекторов.
+      PARKED_LIMIT: "${PARKED_LIMIT:-5}"
       STRATZ_API_TOKEN: "${STRATZ_API_TOKEN:-}"
       STRATZ_BATCH_SIZE: "${STRATZ_BATCH_SIZE:-1}"
       STRATZ_DETAIL_BUDGET: "${STRATZ_DETAIL_BUDGET:-}"
@@ -43,6 +47,11 @@ x-collector-env:
       # Первая пауза после ОБРЫВА у внешнего API (5xx, сеть) — не после
       # отказа по квоте. Дальше удваивается до обычного интервала.
       TRANSIENT_SLEEP_S: "${TRANSIENT_SLEEP_S:-300}"
+      # Сколько неудач подряд превращают хост в «недостижимый» и на
+      # сколько. Порог не единица: единичный обрыв бывает и у живого
+      # сервера, а заклеймённый хост молчит часами (спринт 153).
+      UNREACHABLE_AFTER: "${UNREACHABLE_AFTER:-2}"
+      UNREACHABLE_TTL_S: "${UNREACHABLE_TTL_S:-21600}"
 
 services:
   postgres:

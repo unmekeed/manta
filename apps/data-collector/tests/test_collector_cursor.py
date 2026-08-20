@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from collector.runner import MAX_TRANSIENT_RETRIES, Collector  # noqa: E402
+from collector.parked import UnreachableHosts  # noqa: E402
 from collector.sources import (MatchRef,  # noqa: E402
                                PermanentDownloadError)
 
@@ -81,6 +82,15 @@ def make_collector(source, collected=()):
     class Cfg:
         s3_bucket = "replays"
     c._cfg = Cfg()
+
+    # Парковка (спринт 153). Настоящая — в Postgres; здесь список, чтобы
+    # проверять ЧТО и КОГДА туда уходит, не поднимая базы. Семантику
+    # самих запросов проверяет tests/test_dedup_sql.py на живой базе:
+    # фейк на её месте проверял бы сам себя.
+    c.parked = []
+    c._park = lambda ref, reason: c.parked.append((ref.match_id, reason))
+    c._unreachable = UnreachableHosts(threshold=2, ttl_s=3600,
+                                      clock=lambda: 0.0)
     return c
 
 

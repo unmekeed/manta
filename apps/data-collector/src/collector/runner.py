@@ -19,6 +19,8 @@ import psycopg
 from confluent_kafka import Producer
 from minio import Minio
 
+from .parked import (ParkedStore, UnreachableHosts,  # noqa: F401
+                     is_unreachable, replay_host)
 from .sources import (IncompleteDownloadError, MatchRef,
                       PermanentDownloadError, Source)
 
@@ -145,6 +147,15 @@ class Collector:
         # и рестарт процесса — сам по себе достаточный повод дать матчу
         # ещё один шанс.
         self._transient_fails: dict[int, int] = {}
+        # Хосты, к которым сейчас бессмысленно обращаться, и список
+        # желаний для матчей с них (спринт 153). Отметка о хосте — в
+        # памяти: маршрут меняется, и рестарт процесса сам по себе
+        # достаточный повод попробовать снова. Сам матч — в базе, иначе
+        # рестарт стёр бы его насовсем, а именно потерю мы и чиним.
+        self._unreachable = UnreachableHosts(
+            threshold=int(os.getenv("UNREACHABLE_AFTER", "2")),
+            ttl_s=float(os.getenv("UNREACHABLE_TTL_S", str(6 * 3600))))
+        self._parked = ParkedStore(lambda: self._db)
         self._s3 = Minio(cfg.s3_endpoint, access_key=cfg.s3_access_key,
                          secret_key=cfg.s3_secret_key, secure=cfg.s3_secure)
         if not self._s3.bucket_exists(cfg.s3_bucket):
@@ -242,6 +253,24 @@ class Collector:
             self._write_cursor(cur, ref)
         self._db.commit()
 
+    def _park(self, ref: MatchRef, reason: str) -> None:
+        """Записать матч в парковку. Сбой парковки не роняет цикл.
+
+        Парковка — улучшение, а не обязательство: до спринта 153 матч
+        просто терялся, и вернуться к прежнему поведению из-за недоступной
+        таблицы честнее, чем остановить сбор целиком.
+        """
+        try:
+            self._parked.park(ref.match_id, ref.replay_url, reason)
+            self._db.commit()
+        except Exception:  # noqa: BLE001
+            logger.warning("match %s: не удалось припарковать", ref.match_id,
+                           exc_info=True)
+            try:
+                self._db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
     # -- pipeline ------------------------------------------------------------
 
     def collect_once(self) -> int:
@@ -262,10 +291,23 @@ class Collector:
                 self._advance_cursor(ref)
                 continue
 
+            # Хост уже признан недостижимым — не набираем его номер
+            # снова. Матч при этом НЕ теряется: он уходит в парковку, и
+            # `--source parked` вернётся к нему, когда маршрут появится
+            # (спринт 153).
+            host = replay_host(ref.replay_url)
+            if self._unreachable.is_unreachable(host):
+                self._park(ref, f"хост {host} недостижим")
+                logger.info("match %s: %s недостижим — паркую без попытки",
+                            ref.match_id, host)
+                self._advance_cursor(ref)
+                continue
+
             # Сбой одного матча (503 реплей-сервера, битый bz2, сеть) не
             # должен ронять весь цикл (Гл. 2.4.2): логируем и идём дальше.
             try:
                 data = self._source.download_replay(ref)
+                self._unreachable.record_success(host)
             except PermanentDownloadError as exc:
                 logger.warning("match %s: %s — пропускаю навсегда",
                                ref.match_id, exc)
@@ -280,6 +322,13 @@ class Collector:
                 n = self._transient_fails.get(ref.match_id, 0) + 1
                 self._transient_fails[ref.match_id] = n
                 if n >= MAX_TRANSIENT_RETRIES:
+                    # Паркуем и здесь. Оборванная передача исчерпала
+                    # попытки — матч уходит вперёд по курсору и терялся бы
+                    # навсегда точно так же, как недостижимый. Ветка
+                    # осталась без парковки в первой версии спринта 153, и
+                    # нашла это мутационная проверка, промахнувшаяся мимо
+                    # соседней ветки (спринт 153).
+                    self._park(ref, str(exc))
                     self._advance_cursor(ref)
                     self._transient_fails.pop(ref.match_id, None)
                 continue
@@ -287,12 +336,23 @@ class Collector:
                 # Временный сбой: повторяем матч, но не бесконечно — иначе
                 # ошибка, которую мы ошибочно сочли временной, встаёт
                 # намертво поперёк очереди.
+                if is_unreachable(exc):
+                    # До хоста не достучались вовсе. Считаем это свойством
+                    # ХОСТА, а не матча: следующий матч оттуда же ждёт та
+                    # же судьба, и платить за неё второй раз незачем.
+                    self._unreachable.record_failure(host)
                 n = self._transient_fails.get(ref.match_id, 0) + 1
                 self._transient_fails[ref.match_id] = n
                 if n >= MAX_TRANSIENT_RETRIES:
+                    # Курсор сдвигается — очередь важнее одного матча
+                    # (инцидент 2026-07-31, 82 часа простоя). Но сам матч
+                    # больше не пропадает: курсор монотонный и назад не
+                    # ходит, а парковка помнит (спринт 153).
+                    self._park(ref, str(exc))
                     logger.warning(
                         "match %s: download failed (%s), попытка %d/%d — "
-                        "сдвигаю курсор, чтобы не блокировать очередь",
+                        "сдвигаю курсор и паркую матч, чтобы вернуться к "
+                        "нему позже",
                         ref.match_id, exc, n, MAX_TRANSIENT_RETRIES)
                     self._advance_cursor(ref)
                     self._transient_fails.pop(ref.match_id, None)
