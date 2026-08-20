@@ -20,8 +20,11 @@ x-collector-env:
       LEAGUE_BATCH: "${LEAGUE_BATCH:-8}"
       LEAGUE_MAX_AGE_DAYS: "${LEAGUE_MAX_AGE_DAYS:-30}"
       LEAGUE_TIERS: "${LEAGUE_TIERS:-premium,professional}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
       OPENDOTA_BURST_SLEEP_S: "${OPENDOTA_BURST_SLEEP_S:-90}"
+      OPENDOTA_DELAY_S: "${OPENDOTA_DELAY_S:-1.1}"
+      OPENDOTA_GLOBAL_LIMIT: "${OPENDOTA_GLOBAL_LIMIT:-1900}"
       OPENDOTA_LIMIT: "${OPENDOTA_LIMIT:-3}"
       OPENDOTA_MIN_PATCH: "${OPENDOTA_MIN_PATCH:-}"
       OPENDOTA_MIN_RANK: "${OPENDOTA_MIN_RANK:-80}"
@@ -29,6 +32,20 @@ x-collector-env:
       # прогон. Источник `parked` запускается вручную, но переменную
       # читает точка входа, а она общая для всех коллекторов.
       PARKED_LIMIT: "${PARKED_LIMIT:-5}"
+      # На сколько патчей назад принимаем матчи. Runbook 4a велит
+      # поднимать её после выхода патча — до спринта 154 это указание
+      # ничего не делало на VPS: переменная в контейнер не доезжала.
+      PATCH_LAG: "${PATCH_LAG:-1}"
+      PATCH_MAP_RETRY_S: "${PATCH_MAP_RETRY_S:-600}"
+      RANKS_FILL_BUDGET: "${RANKS_FILL_BUDGET:-200}"
+      RANKS_SEED_MATCHES: "${RANKS_SEED_MATCHES:-1000}"
+      REPLAY_RETENTION_DAYS: "${REPLAY_RETENTION_DAYS:-3}"
+      # Ключ Steam Web API: без него SteamMatchStream падает, очередь
+      # своей разбивки не наполняется, и candidates-collector работает
+      # вхолостую. Ровно это и происходило на VPS: ключ в env-файле был,
+      # в контейнере — нет.
+      STEAM_API_KEY: "${STEAM_API_KEY:-}"
+      STEAM_DELAY_S: "${STEAM_DELAY_S:-1.0}"
       STRATZ_API_TOKEN: "${STRATZ_API_TOKEN:-}"
       STRATZ_BATCH_SIZE: "${STRATZ_BATCH_SIZE:-1}"
       STRATZ_DETAIL_BUDGET: "${STRATZ_DETAIL_BUDGET:-}"
@@ -40,7 +57,10 @@ x-collector-env:
       STRATZ_MIN_PATCH: "${STRATZ_MIN_PATCH:-}"
       STRATZ_MIN_RANK: "${STRATZ_MIN_RANK:-${OPENDOTA_MIN_RANK:-80}}"
       STRATZ_QUOTA_FLOOR: "${STRATZ_QUOTA_FLOOR:-500}"
+      STRATZ_RANK_FIELD: "${STRATZ_RANK_FIELD:-seasonRank}"
+      STRATZ_RATE_SLEEP_S: "${STRATZ_RATE_SLEEP_S:-3600}"
       STRATZ_RETRY_ATTEMPTS: "${STRATZ_RETRY_ATTEMPTS:-3}"
+      STRATZ_RUN_BUDGET: "${STRATZ_RUN_BUDGET:-1000}"
       STRATZ_SKIP_FRESHEST: "${STRATZ_SKIP_FRESHEST:-0}"
       TIMELINE_DETAIL_BUDGET: "${TIMELINE_DETAIL_BUDGET:-}"
       TIMELINE_LIMIT: "${TIMELINE_LIMIT:-30}"

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Iterable
 
 import requests
@@ -127,6 +128,38 @@ class CandidateSource:
         self.last_cycle = stats
         logger.info("цикл кандидатов: %s",
                     ", ".join(f"{k} {v}" for k, v in stats.items()))
+        if not stats["взято"]:
+            self._explain_idleness()
+
+    def _explain_idleness(self) -> None:
+        """Сказать, ПОЧЕМУ брать нечего (спринт 154).
+
+        Пустая очередь и полностью собранная очередь дают одну и ту же
+        строку «взято 0», и отличить их по логу было нельзя. На VPS это
+        стоило дорого: коллектор поднят, ключ Steam вписан в env-файл,
+        цикл каждые пять минут рапортует нулями — и всё выглядит рабочим.
+        А очередь пуста с первого дня, потому что наполняет её `ranks
+        scan`, которого нет ни в одном расписании.
+
+        Молчание, неотличимое от успеха, в этом проекте уже стоило
+        тринадцати дней без бэкапов. Здесь оно стоило бы всего датасета
+        своей разбивки.
+        """
+        try:
+            total = sum(self._queue.stats().values())
+        except Exception:  # noqa: BLE001 — подсказка не должна ронять цикл
+            return
+        if total:
+            return                      # очередь есть, просто вся выдана
+        if not os.getenv("STEAM_API_KEY"):
+            logger.warning(
+                "очередь кандидатов пуста и наполнить её нечем: не задан "
+                "STEAM_API_KEY. Своя разбивка не работает")
+            return
+        logger.warning(
+            "очередь кандидатов пуста — её наполняет `python -m "
+            "collector.ranks scan`, и он ни в одном расписании не стоит. "
+            "Своя разбивка простаивает")
 
     def _observe(self, match_id: int, detail: dict | None,
                  stats: dict[str, int]) -> None:

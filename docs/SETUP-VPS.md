@@ -180,6 +180,28 @@ docker exec manta-data-collector-1 printenv | grep -E 'SHARD|API_KEY'
 Telegram здесь важнее, чем дома: браузера на VPS нет, и сторож —
 единственная телеметрия, которая доходит сама.
 
+### Своя разбивка: одного ключа мало
+
+`CANDIDATES_ENABLED=1` поднимает коллектор, но матчи он берёт из очереди
+`ReplayCandidates`, а её наполняет отдельный проход по потоку Valve.
+На чистой машине эту цепочку надо пройти руками — один раз:
+
+```bash
+docker exec manta-candidates-collector-1 python -m collector.ranks seed
+docker exec manta-candidates-collector-1 python -m collector.ranks fill
+docker exec manta-candidates-collector-1 python -m collector.ranks scan
+```
+
+`seed` проходит по потоку и запоминает встреченные аккаунты, `fill`
+разрешает их ранги, `scan` отбирает матчи и кладёт их в очередь. В
+расписание это не поставлено намеренно: `fill` тратит квоту OpenDota
+(или токен STRATZ), и сколько её отдавать рангам — решение, которое
+принимают осознанно.
+
+Пока очередь пуста, коллектор говорит об этом сам — со спринта 154 он не
+рапортует нулями молча, а называет причину: нет ключа или не запускался
+`ranks scan`.
+
 ---
 
 ## 4. rclone

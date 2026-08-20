@@ -333,3 +333,66 @@ def test_expired_are_counted_in_cycle_stats():
     src = _source(q, {})
     list(src.fetch_new())
     assert src.last_cycle["просрочено"] == 4
+
+
+# -- почему брать нечего (спринт 154) -----------------------------------------
+
+def _idle_source(queue_total, monkeypatch, key="ключ"):
+    """Источник, у которого цикл заведомо ничего не взял."""
+    from collector.sources.candidates import CandidateSource
+
+    monkeypatch.setenv("STEAM_API_KEY", key) if key else \
+        monkeypatch.delenv("STEAM_API_KEY", raising=False)
+
+    class FakeQueue:
+        def expire(self): return 0
+        def requeue_stale_taken(self): return 0
+        def take(self, n): return []
+        def stats(self): return {"new": queue_total}
+
+    src = CandidateSource.__new__(CandidateSource)
+    src._queue = FakeQueue()
+    src._limit = 5
+    src._shard = None
+    src._od = None
+    src._cache = None
+    return src
+
+
+def test_empty_queue_says_why(monkeypatch, caplog):
+    """Пустая очередь и выбранная дают одну строку «взято 0».
+
+    На VPS это стоило дорого: коллектор поднят, ключ вписан, цикл каждые
+    пять минут рапортует нулями — и всё выглядит рабочим. А очередь пуста
+    с первого дня, потому что наполняет её `ranks scan`, которого нет ни
+    в одном расписании.
+    """
+    src = _idle_source(0, monkeypatch)
+    with caplog.at_level("WARNING"):
+        list(src.fetch_new(None))
+    assert "ranks" in caplog.text and "расписании" in caplog.text
+
+
+def test_missing_steam_key_is_named_separately(monkeypatch, caplog):
+    """Нет ключа — это ДРУГАЯ причина, и совет по ней другой.
+
+    Сказать «запусти ranks scan» тому, у кого нет ключа, значит отправить
+    его выполнять команду, которая упадёт.
+    """
+    src = _idle_source(0, monkeypatch, key=None)
+    with caplog.at_level("WARNING"):
+        list(src.fetch_new(None))
+    assert "STEAM_API_KEY" in caplog.text
+    assert "ranks" not in caplog.text
+
+
+def test_full_queue_stays_silent(monkeypatch, caplog):
+    """Очередь есть, просто вся выдана — молчим.
+
+    Подсказка при каждом цикле полной очереди превратилась бы в шум, а
+    шум учит не читать предупреждения.
+    """
+    src = _idle_source(42, monkeypatch)
+    with caplog.at_level("WARNING"):
+        list(src.fetch_new(None))
+    assert caplog.text == ""
