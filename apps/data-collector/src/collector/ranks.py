@@ -310,6 +310,24 @@ class StratzRankError(RuntimeError):
     """Ошибка запроса ранга у STRATZ."""
 
 
+class StratzAuthRefused(StratzRankError):
+    """Токен не принят: 401 или 403 (спринт 155).
+
+    Отдельный класс, потому что это отказ ДРУГОГО рода. Квота лечится
+    временем, сеть — повтором, а недействительный токен не лечится ничем
+    в пределах прогона: каждый следующий запрос получит тот же ответ.
+
+    Замер на VPS 2026-08-20: `ranks fill` спросил 200 аккаунтов сорока
+    пакетами и сорок раз подряд получил HTTP 403 — токен протух ещё
+    5 августа. Ушло на это две минуты, в лог легло сорок одинаковых
+    предупреждений, а очередь кандидатов осталась пустой.
+
+    Рассуждение для квоты в этом же файле написано верно: «остальные
+    куски получат ровно тот же отказ, каждый ценой очередных
+    отступлений». К отказу в доступе его просто не применили.
+    """
+
+
 class StratzQuotaExhausted(StratzRankError):
     """Кончилась ЧАСОВАЯ или суточная квота — отступать бессмысленно.
 
@@ -444,6 +462,11 @@ class StratzRankResolver:
             logger.info("STRATZ 429 — ждём %.0f с (попытка %d/%d)",
                         wait, attempt + 1, self._retries)
             time.sleep(wait)
+        # Отказ в доступе проверяем ДО разбора тела: 401/403 приходят и
+        # без JSON, и с ним, а значат одно и то же в обоих случаях.
+        if resp.status_code in (401, 403):
+            raise StratzAuthRefused(
+                f"HTTP {resp.status_code}: STRATZ не принимает токен")
         body = resp.json() if resp.content else {}
         errors = body.get("errors") if isinstance(body, dict) else None
         if errors:
@@ -524,6 +547,13 @@ class StratzRankResolver:
                 self.failures["предел пачки не уменьшился"] += len(chunk)
                 start += len(chunk)
                 continue
+            except StratzAuthRefused as exc:
+                # Как и квота, не лечится продолжением — но по другой
+                # причине: дело не в лимите, а в самом токене. Отдаём
+                # уже полученное и уходим, не тратя ещё сорок запросов
+                # на тот же ответ.
+                self.failures["токен не принят"] += len(account_ids) - start
+                raise StratzAuthRefused(str(exc)) from None
             except StratzQuotaExhausted:
                 # Квота не лечится продолжением: остальные куски получат
                 # ровно тот же отказ, каждый ценой очередных отступлений.
@@ -1243,7 +1273,19 @@ def _run_once(cache: RankCache, dsn: str, args) -> int:
     elif args.command == "fill":
         resolver = build_resolver(args.resolver)
         logger.info("резолвер: %s", resolver.name)
-        stats = fill(cache, resolver, args.budget, ttl_days=args.ttl_days)
+        try:
+            stats = fill(cache, resolver, args.budget, ttl_days=args.ttl_days)
+        except StratzAuthRefused as exc:
+            # Внятный отказ вместо сорока одинаковых предупреждений.
+            # Автоматически переключиться на OpenDota было бы соблазнительно
+            # и неверно: у него квота делится с коллекторами, и молча
+            # потратить её за владельца — не наше решение.
+            print(f"fill: {exc}.\n"
+                  "  Токен STRATZ недействителен или отозван. Проверить:\n"
+                  "    python -m collector.ranks probe\n"
+                  "  Взять ранги у OpenDota (тратит его суточную квоту):\n"
+                  "    python -m collector.ranks fill --resolver opendota")
+            return 1
         print("fill:", ", ".join(f"{k} {v}" for k, v in stats.items()))
     print(report(cache))
     return 0

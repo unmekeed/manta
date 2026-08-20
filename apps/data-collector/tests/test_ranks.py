@@ -1106,3 +1106,93 @@ def test_seed_keeps_repeat_encounters_for_priority():
     })
     seed(cache, stream, matches=100)
     assert cache.seen.count(42) == 2
+
+
+# -- отказ в доступе не лечится продолжением (спринт 155) ---------------------
+
+def _refusing_session(code, calls):
+    class Session:
+        def post(self, url, **kwargs):
+            calls.append(kwargs)
+            return _StratzResp(code, {})
+    return Session()
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_auth_refusal_stops_the_run(code):
+    """ГЛАВНОЕ утверждение спринта: 401/403 обрывает прогон СРАЗУ.
+
+    Замер на VPS 2026-08-20: `ranks fill` спросил 200 аккаунтов сорока
+    пакетами и сорок раз подряд получил HTTP 403 — токен протух ещё
+    5 августа. Две минуты, сорок одинаковых предупреждений в логе, ноль
+    рангов и пустая очередь кандидатов.
+
+    Рассуждение для квоты в том же файле написано верно: «остальные куски
+    получат ровно тот же отказ». К отказу в доступе его не применили.
+    """
+    from collector.ranks import StratzAuthRefused
+
+    calls = []
+    r = StratzRankResolver("протухший", api_delay_s=0.0, backoff_base_s=0.0)
+    r._session = _refusing_session(code, calls)
+    with pytest.raises(StratzAuthRefused):
+        r.resolve(list(range(1, 51)))
+    assert len(calls) == 1, (
+        f"после отказа сделано {len(calls)} запросов вместо одного")
+
+
+def test_auth_refusal_is_not_confused_with_quota():
+    """Отказ в доступе и исчерпанная квота — разные ошибки.
+
+    Обе прекращают прогон, но лечатся по-разному: квота временем, токен
+    заменой. Слив их в один класс, мы советовали бы подождать тому, кому
+    надо перевыпустить ключ.
+    """
+    from collector.ranks import StratzAuthRefused, StratzQuotaExhausted
+
+    assert not issubclass(StratzAuthRefused, StratzQuotaExhausted)
+    assert not issubclass(StratzQuotaExhausted, StratzAuthRefused)
+
+
+def test_ranks_already_resolved_survive_the_refusal():
+    """Отказ на середине не выбрасывает уже полученные ранги.
+
+    Прогон может упереться в протухший токен после нескольких удачных
+    пачек. Потерять их значило бы платить за те же запросы дважды.
+    """
+    from collector.ranks import StratzAuthRefused
+
+    seq = [_StratzResp(200, {"data": {"players": [_account(1, 85)]}}),
+           _StratzResp(403, {})]
+
+    class Session:
+        def post(self, url, **kwargs):
+            return seq.pop(0)
+
+    r = StratzRankResolver("протухший", api_delay_s=0.0, backoff_base_s=0.0,
+                           batch_size=1)
+    r._session = Session()
+    with pytest.raises(StratzAuthRefused):
+        r.resolve([1, 2])
+    assert r.failures["токен не принят"] == 1, (
+        "не посчитано, сколько аккаунтов осталось неспрошенными")
+
+
+def test_a_plain_error_still_skips_only_its_chunk():
+    """Обычный сбой пачки по-прежнему пропускает ТОЛЬКО её.
+
+    Сеть моргнула на одном куске — остальные надо попробовать. Расширь мы
+    «прекратить прогон» на все ошибки, один сетевой сбой стоил бы всего
+    прогона.
+    """
+    seq = [_StratzResp(500, {}),
+           _StratzResp(200, {"data": {"players": [_account(2, 80)]}})]
+
+    class Session:
+        def post(self, url, **kwargs):
+            return seq.pop(0)
+
+    r = StratzRankResolver("токен", api_delay_s=0.0, backoff_base_s=0.0,
+                           batch_size=1)
+    r._session = Session()
+    assert r.resolve([1, 2]) == {2: 80}
