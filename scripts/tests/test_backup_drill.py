@@ -239,10 +239,28 @@ def test_manifest_fields_are_actually_compared_not_just_mentioned():
     Проверять надо употребление, а не присутствие.
     """
     assert "meta.json" in SRC, "манифест архива не читается вовсе"
-    for field in ("matches_in_mart", "collected", "reports"):
-        pattern = rf'check\s+"[^"]+"\s+"\$\(want {field}\)"'
-        assert re.search(pattern, SRC), (
-            f"поле манифеста {field} не передаётся в check()")
+    assert re.search(r'check\s+"[^"]+"\s+"\$\(want matches_in_mart\)"', SRC), (
+        "поле манифеста matches_in_mart не передаётся в check()")
+    # Таблицы Postgres со спринта 156 сверяются циклом по общему списку:
+    # перечислять их здесь заново значило бы завести четвёртую копию того
+    # же перечня — ровно ту беду, ради которой список и вынесли.
+    assert re.search(r'check\s+"\$t"\s+"\$\(want_pg\s+"\$t"\)"', SRC), (
+        "таблицы Postgres не передаются в check()")
+
+
+def test_old_manifests_are_still_compared():
+    """Архивы до спринта 156 несут счётчики под прежними именами.
+
+    Учения гоняют на СТАРОМ слепке чаще, чем на свежем: смысл упражнения
+    в том, чтобы восстановиться из того, что лежит. Перестань want_pg
+    знать прежние имена — вернулось бы «?», а «?» проверка пропускает
+    молча: сверок стало бы на две меньше, и никто бы не заметил.
+    """
+    m = re.search(r"want_pg\(\)\s*\{.*?\n\}", SRC, re.S)
+    assert m, "нет функции want_pg"
+    body = m.group(0)
+    assert "want collected" in body and "want reports" in body, (
+        "want_pg не умеет читать манифесты старого формата")
 
 
 def test_missing_manifest_is_a_failure_not_a_skip():

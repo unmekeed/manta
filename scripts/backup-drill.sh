@@ -23,6 +23,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Списки таблиц — общие с dataset-sync.sh (спринт 156). Своя копия здесь
+# и лежала, и уже разъехалась: учения сверяли девять таблиц ClickHouse из
+# десяти переносимых (MatchMapCellsMinute внесли в перенос в спринте 149,
+# сюда — нет). Сверка, не знающая о таблице, объявляет её восстановленной
+# молча — то есть учения проходят на потерянных данных.
+# shellcheck source=lib/dataset-tables.sh
+. ./scripts/lib/dataset-tables.sh
+
 BACKUP_DIR="${MANTA_BACKUP_DIR:-$HOME/manta-backups}"
 CH_IMAGE="clickhouse/clickhouse-server:24.8"
 PG_IMAGE="postgres:16"
@@ -172,6 +180,19 @@ want() {            # значение поля из meta.json архива
     python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],'?'))" \
         "$meta" "$1" 2>/dev/null || echo "?"
 }
+want_pg() {         # счётчик строк таблицы Postgres из манифеста
+    local v; v=$(want "pg_$1")
+    # Архивы до спринта 156 несут два счётчика под прежними именами. Не
+    # знать о них — значит перестать сверять то, что сверялось: у старого
+    # архива вернулось бы «?», а «?» проверка пропускает молча.
+    if [ "$v" = "?" ]; then
+        case "$1" in
+            collectedmatches) v=$(want collected);;
+            matchreports)     v=$(want reports);;
+        esac
+    fi
+    printf '%s' "$v"
+}
 
 echo
 echo "== сверка с манифестом архива (эталон на момент выгрузки)"
@@ -180,10 +201,9 @@ if [ -z "$meta" ]; then
 else
     check "матчей в витрине" "$(want matches_in_mart)" \
           "$(dst_ch 'SELECT count(DISTINCT match_id) FROM MatchTimelineFeatures FINAL')"
-    check "collectedmatches" "$(want collected)" \
-          "$(dst_pg 'SELECT count(*) FROM collectedmatches')"
-    check "matchreports" "$(want reports)" \
-          "$(dst_pg 'SELECT count(*) FROM matchreports')"
+    for t in "${PG_TABLES[@]}"; do
+        check "$t" "$(want_pg "$t")" "$(dst_pg "SELECT count(*) FROM $t")"
+    done
 fi
 rm -rf "$meta_dir"
 
@@ -213,12 +233,10 @@ src_probe=$(src_ch "SELECT count() FROM MatchTimelineFeatures")
 if [ "$src_probe" = "?" ]; then
     echo "    --   боевая база недоступна: пропущено (на вердикт не влияет)"
 else
-    for t in MatchTimelineFeatures PlayerMatchFeatures MatchDraft MatchEvents \
-             MatchFights MatchMapCells MatchHeroTimings \
-             EconomyTimeline PositionSnapshots; do
+    for t in "${REPLACING_TABLES[@]}" "${RAW_TABLES[@]}"; do
         grew "$t" "$(dst_ch "SELECT count() FROM $t")" "$(src_ch "SELECT count() FROM $t")"
     done
-    for t in collectedmatches matchreports; do
+    for t in "${PG_TABLES[@]}"; do
         grew "$t" "$(dst_pg "SELECT count(*) FROM $t")" "$(src_pg "SELECT count(*) FROM $t")"
     done
     if [ "$LOST" -gt 0 ]; then

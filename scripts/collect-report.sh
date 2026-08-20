@@ -22,6 +22,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Список таблиц — общий с обменом и учениями (спринт 156). Свой перечень
+# здесь и лежал, и уже разъехался: MatchMapCellsMinute появилась в
+# спринте 147, а в отчёт не попала — то есть таблица, которую нечем
+# восстановить, три спринта не показывалась там, где её и смотрят.
+# shellcheck source=lib/dataset-tables.sh
+. ./scripts/lib/dataset-tables.sh
+
 # Тот же env-файл, что читают dev-recover.sh и doctor.sh: без него не
 # видны ни STRATZ_API_TOKEN (а значит, и настроенность второго
 # источника), ни шард машины — а именно шард объясняет, почему матчей
@@ -312,7 +319,7 @@ ch "SELECT uniqExact(match_id) AS with_signals
      FORMAT TabSeparated" | sed 's/^/   /'
 
 hdr "СОПУТСТВУЮЩИЕ ТАБЛИЦЫ"
-for t in MatchDraft MatchEvents MatchFights MatchMapCells MatchHeroTimings ReplayEvents PositionSnapshots EconomyTimeline; do
+for t in $(companion_tables); do
     n=$(ch "SELECT uniqExact(match_id) FROM $t FORMAT TabSeparated" 2>/dev/null)
     mt=$(ch "SELECT ifNull(toString(max(modification_time)), '-') FROM system.parts
               WHERE database = '$CH_DB' AND table = '$t' AND active

@@ -4,21 +4,14 @@
 #   ./scripts/dataset-sync.sh export [файл.tar]   # снять слепок датасета
 #   ./scripts/dataset-sync.sh import файл.tar     # идемпотентно влить слепок
 #
-# Что переносится:
-#   ClickHouse: MatchTimelineFeatures, PlayerMatchFeatures (витрины,
-#     ReplacingMergeTree — повторная вставка дедуплицируется движком),
-#     EconomyTimeline, PositionSnapshots (сырьё для laning/SI/отчётов,
-#     MergeTree — при импорте вливаются только новые match_id через
-#     staging-таблицу). SKIP_RAW=1 — пропустить сырьё (архив меньше).
-#   PostgreSQL: collectedmatches (дедуп коллекторов — БЕЗ него вторая
-#     машина заново скачивала бы те же матчи), matchreports (готовые
-#     отчёты; при конфликте побеждает более свежий generated_at).
-#
-# ReplayEvents не переносится: 10^7+ строк, TTL 14 дней, регенерируется
-# парсером из реплеев. Курсоры коллекторов машинно-специфичны.
+# ЧТО переносится и ПОЧЕМУ — в scripts/lib/dataset-tables.sh, одним
+# списком на весь проект (спринт 156). Здесь только механика.
 #
 # Импорт можно повторять сколько угодно: счётчики не растут.
 set -euo pipefail
+
+# shellcheck source=lib/dataset-tables.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/dataset-tables.sh"
 
 CH="${CH_CONTAINER:-manta-clickhouse-1}"
 PG="${PG_CONTAINER:-manta-postgres-1}"
@@ -27,44 +20,26 @@ CH_PASS="${CLICKHOUSE_PASSWORD:-dota_dev_password}"
 PG_USER="${POSTGRES_USER:-dota}"
 PG_DB="${POSTGRES_DB:-manta}"
 
-# MatchDraft и MatchEvents добавлены в спринте 76: они появились с треком F
-# (миграция 011), но в список переноса их тогда не внесли — слепок молча
-# терял драфты, OOF-прайоры и события матчей. Обе — ReplacingMergeTree, то
-# есть повторная вставка дедуплицируется движком, как у витрин.
-# MatchFights (спринт 84) переносится ОБЯЗАТЕЛЬНО: драки восстанавливаются
-# из ReplayEvents, а он живёт 14 дней — потерять их в слепке значит
-# потерять безвозвратно, в отличие от витрин, которые пересчитываются из
-# сырья.
-# MatchMapCells (спринт 98) — ровно та же логика, что у MatchFights:
-# тепловые карты собираются из ReplayEvents и PositionSnapshots, первое
-# живёт 14 дней, реплеи Valve удаляет сама. Не внести таблицу в слепок
-# значит потерять всю историю карт при переносе на другую машину — и
-# заметить это только тогда, когда карту попросят построить.
-# MatchMapCellsMinute (спринт 147) — третий раз подряд одна и та же
-# история, и на этот раз с ней покончено. Список выше пополнялся ПОСЛЕ
-# того, как пропажу замечали: MatchDraft и MatchEvents в спринте 76,
-# MatchMapCells в 98, эта таблица — в 149. Каждый раз слепок молча терял
-# данные, которые из сырья не восстановить: ReplayEvents живёт 14 дней,
-# реплеи Valve удаляет сама.
-#
-# Теперь список сверяется с миграциями тестом
-# (scripts/tests/test_dataset_sync_covers_schema.py): новая таблица в
-# ClickHouse обязана быть либо здесь, либо в явном списке исключений с
-# причиной. Рукописный перечень, за которым никто не следит, расходится
-# со схемой ровно тогда, когда схема меняется, — то есть всегда.
-REPLACING_TABLES=(MatchTimelineFeatures PlayerMatchFeatures
-                  MatchDraft MatchEvents MatchFights MatchMapCells
-                  MatchMapCellsMinute MatchHeroTimings)
-RAW_TABLES=(EconomyTimeline PositionSnapshots)
-# Не переносится осознанно: ReplayEvents — сырьё с TTL 14 дней и
-# десятками тысяч строк на матч. Всё, что из него нужно, уже посчитано в
-# агрегатах выше, а тащить его в слепок значило бы раздуть архив на
-# порядок ради данных, которые на принимающей машине протухнут через две
-# недели.
-SKIPPED_TABLES=(ReplayEvents)
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }
 pgq() { docker exec -i "$PG" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q "$@"; }
+
+# Колонки таблицы в порядке объявления. Кладутся В АРХИВ рядом с CSV, и
+# при импорте берутся оттуда, а не из живой схемы.
+#
+# Иначе обмен ломается ровно тогда, когда он нужнее всего: две машины
+# почти никогда не стоят на одном коммите, и первая же миграция,
+# добавившая колонку, разводит их схемы. Дамп с четырьмя колонками,
+# влитый в таблицу с пятью, даёт «missing data for column» — то есть
+# перенос перестаёт работать при каждом изменении схемы и чинится только
+# одновременным обновлением обеих машин. Миграция 012 (has_replay) такую
+# пару и развела.
+pg_columns() {
+    pgq -t -A -c "SELECT string_agg(quote_ident(column_name), ','
+                                    ORDER BY ordinal_position)
+                  FROM information_schema.columns
+                  WHERE table_schema = 'public' AND table_name = '$1'"
+}
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,15p'; exit 1; }
 
@@ -103,16 +78,23 @@ export_dataset() {
         chq "SELECT * FROM manta.$t FORMAT Native" | gzip >"$dir/$t.native.gz"
     done
 
-    echo ">> PG collectedmatches"
-    pgq -c "\\copy collectedmatches TO STDOUT CSV" | gzip >"$dir/collectedmatches.csv.gz"
-    echo ">> PG matchreports"
-    pgq -c "\\copy matchreports TO STDOUT CSV" | gzip >"$dir/matchreports.csv.gz"
+    for t in "${PG_TABLES[@]}"; do
+        echo ">> PG $t"
+        pg_columns "$t" >"$dir/$t.cols"
+        pgq -c "\\copy $t TO STDOUT CSV" | gzip >"$dir/$t.csv.gz"
+    done
 
     {
         echo "{\"exported_at\": \"$(date -u +%FT%TZ)\","
         echo " \"matches_in_mart\": $(chq 'SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL'),"
+        # collected/reports — прежние имена полей: их читают учения по
+        # восстановлению из архивов, снятых до спринта 156.
         echo " \"collected\": $(pgq -t -A -c 'SELECT count(*) FROM collectedmatches'),"
-        echo " \"reports\": $(pgq -t -A -c 'SELECT count(*) FROM matchreports')}"
+        echo " \"reports\": $(pgq -t -A -c 'SELECT count(*) FROM matchreports'),"
+        for t in "${PG_TABLES[@]}"; do
+            echo " \"pg_$t\": $(pgq -t -A -c "SELECT count(*) FROM $t"),"
+        done
+        echo " \"schema\": 156}"
     } >"$dir/meta.json"
 
     tar -cf "$out" -C "$dir" .
@@ -168,37 +150,67 @@ import_dataset() {
 
     # COPY FROM STDIN: SQL и CSV-данные идут одним потоком (как pg_dump),
     # конец данных — строка «\.».
-    echo ">> PG collectedmatches (ON CONFLICT DO NOTHING)"
-    {
-        echo "CREATE TEMP TABLE cm_import (LIKE collectedmatches INCLUDING ALL);"
-        echo "COPY cm_import FROM STDIN CSV;"
-        gunzip -c "$dir/collectedmatches.csv.gz"
-        echo "\\."
-        echo "INSERT INTO collectedmatches SELECT * FROM cm_import
-                  ON CONFLICT (match_id) DO NOTHING;"
-    } | pgq
+    for t in "${PG_TABLES[@]}"; do
+        # Таблицы может не быть в архиве — он мог быть снят до того, как
+        # её внесли в перенос. Это норма, а не ошибка.
+        [ -f "$dir/$t.csv.gz" ] || { echo ">> PG $t — в архиве нет, пропуск"; continue; }
+        if is_empty_dump "$dir/$t.csv.gz"; then
+            echo ">> PG $t — в архиве пусто, пропуск"
+            continue
+        fi
 
-    echo ">> PG matchreports (при конфликте побеждает свежий generated_at)"
-    {
-        echo "CREATE TEMP TABLE mr_import (LIKE matchreports INCLUDING ALL);"
-        echo "COPY mr_import FROM STDIN CSV;"
-        gunzip -c "$dir/matchreports.csv.gz"
-        echo "\\."
-        echo "INSERT INTO matchreports SELECT * FROM mr_import
-                  ON CONFLICT (match_id) DO UPDATE SET
-                      analysis = EXCLUDED.analysis,
-                      timeline = EXCLUDED.timeline,
-                      model_version = EXCLUDED.model_version,
-                      feature_version = EXCLUDED.feature_version,
-                      generated_at = EXCLUDED.generated_at
-                  WHERE EXCLUDED.generated_at > matchreports.generated_at;"
-    } | pgq
+        local cols copy_cols merge schema_cols fields pre=""
+        cols=$(cat "$dir/$t.cols" 2>/dev/null || true)
+        if [ -z "$cols" ]; then
+            # Архив снят до спринта 156 и списка колонок не несёт —
+            # считаем поля в самом CSV. Именно ради этого случая обмен и
+            # чинится: слепки домашней машины лежат в старом формате, и
+            # «обновите обе машины и снимите заново» — не ответ, когда
+            # переносить нужно как раз потому, что одна из машин чистая.
+            schema_cols=$(pg_columns "$t")
+            fields=$(csv_field_count "$dir/$t.csv.gz")
+            if [ -n "$fields" ] && cols=$(archive_columns "$schema_cols" "$fields")
+            then
+                echo ">> PG $t — архив без списка колонок, в CSV их $fields"
+            else
+                # Полей больше, чем в схеме, или CSV не разобрался. Это не
+                # то, что можно домыслить: скажем прямо и попробуем как
+                # есть — падение будет громким и с понятной причиной.
+                echo ">> PG $t — архив без списка колонок, и число полей"
+                echo "   не сошлось со схемой; пробую как есть"
+                cols="$schema_cols"
+            fi
+        fi
+
+        # Колонки АРХИВА (для COPY) и колонки ВСТАВКИ — разные списки:
+        # чего в архиве не было, то восстанавливается уже в базе.
+        copy_cols="$cols"
+        pre=$(pg_backfill_sql "$t" "$cols" "${t}_import")
+        cols=$(pg_insert_cols "$t" "$cols")
+
+        # Отдельным присваиванием, а не подстановкой внутри echo: там
+        # ошибка «нет правила слияния» ушла бы в stderr, а в поток SQL
+        # попала бы пустая строка — то есть INSERT без ON CONFLICT,
+        # падающий на первом же дубликате уже посреди импорта.
+        merge=$(pg_merge_sql "$t" "$cols")
+
+        echo ">> PG $t"
+        {
+            echo "CREATE TEMP TABLE ${t}_import (LIKE $t INCLUDING ALL);"
+            echo "COPY ${t}_import ($copy_cols) FROM STDIN CSV;"
+            gunzip -c "$dir/$t.csv.gz"
+            echo "\\."
+            [ -z "$pre" ] || echo "$pre"
+            echo "INSERT INTO $t ($cols) SELECT $cols FROM ${t}_import $merge;"
+        } | pgq
+    done
 
     echo
     echo ">> итог"
     echo "   матчей в витрине: $(chq 'SELECT count(DISTINCT match_id) FROM manta.MatchTimelineFeatures FINAL')"
-    echo "   collectedmatches: $(pgq -t -A -c 'SELECT count(*) FROM collectedmatches')"
-    echo "   matchreports:     $(pgq -t -A -c 'SELECT count(*) FROM matchreports')"
+    for t in "${PG_TABLES[@]}"; do
+        printf '   %-18s %s\n' "$t:" "$(pgq -t -A -c "SELECT count(*) FROM $t")"
+    done
 }
 
 case "${1:-}" in
