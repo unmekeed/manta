@@ -766,3 +766,234 @@ def test_verification_actually_runs_at_the_end_of_the_stack_step():
     assert "verify_running" in src, "проверка живости не вызывается"
     assert src.index("migrate") < src.index("verify_running"), \
         "проверка живости идёт до миграций"
+
+
+# =============================================================================
+# Инструменты хоста (спринт 157)
+#
+# ЧТО СЛУЧИЛОСЬ. Установка закончилась словами «залить датасет: make
+# peer-sync», пользователь их скопировал и получил «Command 'make' not
+# found». Ubuntu-сервер make не несёт, а bootstrap его не ставил.
+#
+# Дыра глубже опечатки. Тот же bootstrap ЗАВОДИТ РАСПИСАНИЕ: обмен в
+# 04:00 и выгрузка бэкапа в облако в 03:30 — оба через rclone, которого
+# на машине тоже нет. Оба скрипта наличие проверяют и говорят внятно, но
+# говорят они в cron, то есть в никуда: каждую ночь тихий отказ, и
+# заметить его можно только по тому, что данных не прибавляется.
+#
+# Форма знакомая: правильное решение применено к части своих случаев.
+# Расписание написано ПРАВИЛЬНО — оно зовёт ./scripts/x.sh напрямую, без
+# make. Человеку же адресовали команду, которой на машине нет.
+# =============================================================================
+
+MAKEFILE = SCRIPT.parent.parent / "Makefile"
+SETUP_VPS = SCRIPT.parent.parent / "docs" / "SETUP-VPS.md"
+
+
+def _assignment(name: str) -> str:
+    src = SCRIPT.read_text(encoding="utf-8")
+    m = re.search(rf"^{name}=\(([^)]*)\)", src, re.M)
+    assert m, f"массив {name} не найден в vps-bootstrap.sh"
+    return m.group(0)
+
+
+def host_tools() -> set[str]:
+    """Инструменты, которые установка ставит на хост.
+
+    Массивом, а не строкой, и это не вкусовщина: строка
+    `HOST_TOOLS="make rclone"` попадала в проверку предписанных команд
+    как «make rclone» — то есть объявление списка читалось как приказ
+    выполнить несуществующую цель. Ложная тревога на верной настройке.
+    """
+    return set(_assignment("HOST_TOOLS").split("(", 1)[1].rstrip(")").split())
+
+
+def run_host_tools(tmp_path, installed=(), check_only="0"):
+    """Прогнать setup_host_tools в песочнице с заданным набором «уже есть».
+
+    PATH подменяется целиком: command -v — встроенная команда bash и
+    стабу не поддаётся, зато честно ищет по PATH. Значит «инструмент
+    установлен» проверяется ровно так же, как на живой машине.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "apt.log"
+    (bindir / "apt-get").write_text(
+        f'#!/bin/sh\necho "$@" >>{log}\n', encoding="utf-8")
+    (bindir / "apt-get").chmod(0o755)
+    for tool in installed:
+        (bindir / tool).write_text("#!/bin/sh\n", encoding="utf-8")
+        (bindir / tool).chmod(0o755)
+
+    harness = f"""
+set -uo pipefail
+PATH="{bindir}"
+say()  {{ printf '>> %s\\n' "$1"; }}
+ok()   {{ printf 'OK %s\\n' "$1"; }}
+warn() {{ printf 'WARN %s\\n' "$1"; }}
+die()  {{ printf 'DIE %s\\n' "$1"; exit 1; }}
+need_root() {{ :; }}
+SUDO=""
+CHECK_ONLY={check_only}
+{_assignment("HOST_TOOLS")}
+{_functions("setup_host_tools")}
+setup_host_tools
+"""
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    apt = log.read_text(encoding="utf-8") if log.exists() else ""
+    return r.returncode, r.stdout + r.stderr, apt
+
+
+def test_missing_tools_are_installed(tmp_path):
+    rc, out, apt = run_host_tools(tmp_path)
+    assert rc == 0, out
+    assert "make" in apt and "rclone" in apt, f"apt не звали: {apt!r}"
+
+
+def test_only_the_missing_ones_are_installed(tmp_path):
+    """Ставится недостающее, а не весь список заново.
+
+    Не косметика: apt-get install на уже стоящем пакете безобиден, но
+    прогон установки — операция, которую гоняют после каждого git pull, и
+    лишние минуты на apt делают её той, которую пропускают.
+    """
+    rc, out, apt = run_host_tools(tmp_path, installed=("make",))
+    assert rc == 0, out
+    assert "rclone" in apt
+    assert "make" not in apt
+
+
+def test_nothing_is_installed_when_everything_is_there(tmp_path):
+    rc, out, apt = run_host_tools(tmp_path, installed=("make", "rclone"))
+    assert rc == 0, out
+    assert apt == "", f"apt звали впустую: {apt!r}"
+    assert "OK" in out
+
+
+def test_check_mode_installs_nothing(tmp_path):
+    """--check обязан только смотреть.
+
+    Прогон с --check делают ИМЕННО чтобы ничего не менять — на живой
+    машине, чтобы свериться. Установка пакетов оттуда была бы худшим
+    видом сюрприза: тихим и от лица проверки.
+    """
+    rc, out, apt = run_host_tools(tmp_path, check_only="1")
+    assert rc == 0, out
+    assert apt == "", f"проверка что-то поставила: {apt!r}"
+    assert "WARN" in out and "make" in out and "rclone" in out
+
+
+def test_check_mode_is_not_mute_about_what_is_missing(tmp_path):
+    """И называет ровно то, чего нет.
+
+    «Что-то не так» без имени — это приглашение перечитать скрипт.
+    """
+    rc, out, apt = run_host_tools(tmp_path, installed=("make",), check_only="1")
+    assert "rclone" in out
+    assert re.search(r"WARN[^\n]*rclone", out), out
+
+
+# -- правила, из-за которых спринт и случился ---------------------------------
+
+def scheduled_scripts() -> list[Path]:
+    """Скрипты, которые bootstrap ставит в cron."""
+    src = _functions("setup_cron")
+    found = re.findall(r"\./scripts/([a-z0-9-]+\.sh)", src)
+    assert found, "в расписании не нашлось ни одного скрипта"
+    return [SCRIPT.parent / name for name in sorted(set(found))]
+
+
+def test_the_schedule_and_the_scripts_are_actually_found():
+    """Страховка от проверки пустоты: разборы ниже что-то находят."""
+    names = {p.name for p in scheduled_scripts()}
+    assert {"backup.sh", "peer-sync.sh", "heartbeat.sh"} <= names, names
+    assert all(p.exists() for p in scheduled_scripts())
+    assert host_tools() == {"make", "rclone"}
+
+
+@pytest.mark.parametrize("script", [p.name for p in scheduled_scripts()])
+def test_every_tool_the_schedule_needs_is_installed(script):
+    """Расписание не заводится для инструмента, которого нет.
+
+    Скрипты объявляют свои зависимости сами — строкой
+    `command -v X || die`. Значит и сверять надо с ней, а не со списком,
+    переписанным руками: перепишешь один раз верно, а разъедется он
+    при первой же новой зависимости.
+
+    Цена ошибки — тихий ночной отказ: cron гоняет скрипт, скрипт внятно
+    объясняет, чего не хватает, и говорит это в /dev/null.
+    """
+    path = SCRIPT.parent / script
+    needs = set(re.findall(r"command -v (\w+) >/dev/null \|\| ",
+                           path.read_text(encoding="utf-8")))
+    missing = needs - host_tools() - BASE_TOOLS
+    assert not missing, (
+        f"{script} стоит в расписании, но требует {sorted(missing)} — "
+        f"а установка их не ставит")
+
+
+# Есть на чистой Ubuntu Server 24.04 без единого apt install.
+BASE_TOOLS = {"tar", "gzip", "curl", "python3", "sed", "awk", "grep",
+              "find", "crontab", "openssl", "docker"}
+
+
+def make_targets() -> set[str]:
+    return set(re.findall(r"^([a-z][a-z0-9-]*):",
+                          MAKEFILE.read_text(encoding="utf-8"), re.M))
+
+
+# Предписание — это КОМАНДА, а не всякое упоминание слова «make». Отсюда
+# позиция в строке: начало строки (блок кода), обратная кавычка (текст) или
+# двоеточие с пробелом (напутствие установщика «залить датасет: make
+# peer-sync»). Без этого объявление HOST_TOOLS=(make rclone) читалось бы
+# как приказ выполнить несуществующую цель «rclone» — ложная тревога на
+# верной настройке, а такая тревога учит игнорировать проверку.
+PRESCRIBED_RE = re.compile(r"(?:^[ \t]*|`|: )make ([a-z][a-z0-9-]*)", re.M)
+
+
+def prescribed_make_targets() -> set[str]:
+    """Цели make, которые предписаны установщиком и руководством по VPS."""
+    text = (SCRIPT.read_text(encoding="utf-8")
+            + SETUP_VPS.read_text(encoding="utf-8"))
+    return set(PRESCRIBED_RE.findall(text))
+
+
+def test_a_mention_is_not_a_prescription():
+    """Разбор отличает команду от слова в списке."""
+    assert PRESCRIBED_RE.findall("HOST_TOOLS=(make rclone)\n") == []
+    assert PRESCRIBED_RE.findall("make peer-sync ARGS=--dry-run\n") == ["peer-sync"]
+    assert PRESCRIBED_RE.findall("текст `make doctor` текст") == ["doctor"]
+    assert PRESCRIBED_RE.findall('echo "  • залить: make peer-sync"') == ["peer-sync"]
+
+
+def test_prescribed_commands_are_actually_runnable():
+    """Команда, напечатанная установщиком, работает сразу после установки.
+
+    Ровно этого и не было: последняя строка напутствия — «залить датасет:
+    make peer-sync», а make на Ubuntu-сервере нет. Проверка держит две
+    половины вместе: раз мы говорим «make», значит make ставим, и цель
+    существует.
+    """
+    prescribed = prescribed_make_targets()
+    assert prescribed, "разбор не нашёл ни одной команды make — проверка пуста"
+    assert "peer-sync" in prescribed, "потеряна та самая команда"
+
+    assert "make" in host_tools(), (
+        "инструкции написаны через make, а установка его не ставит — "
+        f"не сработает ни одна из {sorted(prescribed)}")
+
+    unknown = sorted(prescribed - make_targets())
+    assert not unknown, f"предписаны несуществующие цели make: {unknown}"
+
+
+def test_tools_are_installed_before_the_schedule_is_written():
+    """Порядок шагов: сначала инструменты, потом расписание и напутствие.
+
+    Обратный порядок не падает — он просто оставляет окно, в котором
+    cron уже заведён, а rclone ещё нет. На идемпотентном скрипте это
+    мелочь, но именно из таких окон и складывается «вроде всё прошло».
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    tail = src[src.index("# -- поехали"):]
+    assert tail.index("setup_host_tools") < tail.index("setup_cron")
+    assert tail.index("setup_host_tools") < tail.index("Готово. Дальше")
