@@ -14,7 +14,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
-.PHONY: candidates-queue candidates-sql-test dedup-sql-test wp-rates-sql-test pytest-check
+.PHONY: candidates-queue candidates-sql-test dedup-sql-test sql-test wp-rates-sql-test pytest-check
 .PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
@@ -285,15 +285,16 @@ ranks-scan:    ## Замер отбора: воронка причин + раз�
 candidates-queue: ## Очередь своей разбивки: состояния + выборка для проверки точности
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh queue
 
-candidates-sql-test: pytest-check ## Проверить SQL метрики точности на живом Postgres
-	cd apps/data-collector && \
-	MANTA_TEST_DSN="$${POSTGRES_DSN:-postgresql://dota:dota_dev_password@localhost:5432/manta}" \
-	PYTHONPATH=src:$(PWD)/libs python3 -m pytest tests/test_candidates_sql.py -v
+candidates-sql-test: ## SQL метрики точности отбора — на живом Postgres
+	./scripts/sql-test.sh tests/test_candidates_sql.py
 
-dedup-sql-test: pytest-check ## Проверить дедуп по возможностям на живом Postgres
-	cd apps/data-collector && \
-	MANTA_TEST_DSN="$${POSTGRES_DSN:-postgresql://dota:dota_dev_password@localhost:5432/manta}" \
-	PYTHONPATH=src:$(PWD)/libs python3 -m pytest tests/test_dedup_sql.py -v
+# Запуск через scripts/sql-test.sh, а не напрямую: pytest на хосте нет и
+# быть не должно — всё живёт в контейнерах (спринт 152).
+sql-test:      ## Все SQL-тесты на живой базе (pytest на хосте не нужен)
+	./scripts/sql-test.sh $(ARGS)
+
+dedup-sql-test: ## Дедуп по возможностям — на живом Postgres
+	./scripts/sql-test.sh tests/test_dedup_sql.py
 
 ranks-report:  ## Кэш рангов: сколько накоплено и какую долю потока он закрывает
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh report
