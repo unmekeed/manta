@@ -6,7 +6,7 @@
 # Создаёт:
 #   jwt-private.pem / jwt-public.pem — пара RS256 для подписи токенов;
 #   tls-cert.pem / tls-key.pem       — самоподписанный сертификат TLS 1.3
-#                                      на localhost (SAN: localhost, 127.0.0.1).
+#                                      на localhost и compose gateway.
 #
 # ВАЖНО: это ключи РАЗРАБОТКИ. Самоподписанный сертификат браузер и curl
 # принимают только с явным доверием (curl --cacert / -k). Для прода —
@@ -36,11 +36,11 @@ fi
 if [ -f "$DIR/tls-cert.pem" ]; then
     echo ">> $DIR/tls-cert.pem уже существует — пропуск"
 else
-    echo ">> самоподписанный сертификат TLS (localhost, 365 дней)"
+    echo ">> самоподписанный сертификат TLS (localhost/api-gateway, 365 дней)"
     openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
         -keyout "$DIR/tls-key.pem" -out "$DIR/tls-cert.pem" \
         -subj "/CN=localhost/O=Manta dev" \
-        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null
+        -addext "subjectAltName=DNS:localhost,DNS:api-gateway,IP:127.0.0.1" 2>/dev/null
     chmod 600 "$DIR/tls-key.pem"
     chmod 644 "$DIR/tls-cert.pem"
 fi

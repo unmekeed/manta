@@ -145,6 +145,16 @@ EOF
     done
     [ "$CHECK_ONLY" = "1" ] || ok "пароли ClickHouse и Redis на месте"
 
+    # Compose должен знать host-side каталог bind mounts. Это не секрет,
+    # но фиксируем один раз: смена пути без переноса файлов остановит gateway.
+    if ! grep -q '^MANTA_KEYS_DIR=' "$ENV_COMPOSE" 2>/dev/null; then
+        if [ "$CHECK_ONLY" = "1" ]; then
+            warn "MANTA_KEYS_DIR ещё не задан"
+        else
+            printf 'MANTA_KEYS_DIR=%s\n' "${MANTA_KEYS_DIR:-$HOME/manta-keys}" >>"$ENV_COMPOSE"
+        fi
+    fi
+
     # Тот же пароль — скриптам на хосте. Они ходят в контейнеры напрямую
     # (docker exec clickhouse-client --password ...), и берут его из
     # ~/manta-train.env. Два файла, один пароль.
@@ -221,6 +231,79 @@ setup_host_tools() {
     # shellcheck disable=SC2086  — список слов, кавычки сделали бы из него один пакет
     $SUDO apt-get install -y -qq $missing || die "не удалось поставить:$missing"
     ok "установлены:$missing"
+}
+
+gateway_keys_dir() {
+    local value=""
+    value=$(grep '^MANTA_KEYS_DIR=' "$ENV_COMPOSE" 2>/dev/null | tail -1 | cut -d= -f2-)
+    printf '%s' "${value:-${MANTA_KEYS_DIR:-$HOME/manta-keys}}"
+}
+
+setup_gateway_keys() {
+    say "JWT и TLS gateway"
+    local dir missing="" file
+    dir=$(gateway_keys_dir)
+
+    if [ "$CHECK_ONLY" != "1" ]; then
+        ./scripts/gen-dev-keys.sh "$dir" >/dev/null || die "ключи gateway не созданы"
+    fi
+    for file in jwt-private.pem jwt-public.pem tls-cert.pem tls-key.pem; do
+        [ -f "$dir/$file" ] || missing="$missing $file"
+    done
+    if [ -n "$missing" ]; then
+        [ "$CHECK_ONLY" = "1" ] && { warn "нет файлов gateway:$missing"; return; }
+        die "неполный комплект gateway:$missing"
+    fi
+
+    # Сертификат используется и host curl (localhost), и frontend/Prometheus
+    # внутри Compose (api-gateway). Старый dev-сертификат без второго SAN
+    # нельзя принять: клиенты правильно отвергнут его по имени.
+    openssl x509 -in "$dir/tls-cert.pem" -noout -checkhost localhost >/dev/null 2>&1 &&
+    openssl x509 -in "$dir/tls-cert.pem" -noout -checkhost api-gateway >/dev/null 2>&1 || {
+        [ "$CHECK_ONLY" = "1" ] && { warn "TLS certificate не содержит SAN localhost и api-gateway"; return; }
+        die "TLS certificate не содержит SAN localhost и api-gateway; перевыпустите комплект осознанно"
+    }
+    cmp <(openssl pkey -in "$dir/tls-key.pem" -pubout 2>/dev/null) \
+        <(openssl x509 -in "$dir/tls-cert.pem" -pubkey -noout 2>/dev/null) >/dev/null ||
+        die "TLS certificate и private key не образуют пару"
+    cmp <(openssl pkey -in "$dir/jwt-private.pem" -pubout 2>/dev/null) \
+        "$dir/jwt-public.pem" >/dev/null || die "JWT private/public keys не образуют пару"
+
+    if [ "$CHECK_ONLY" != "1" ]; then
+        # Distroless nonroot = uid/gid 65532. Ключ не world-readable, но
+        # gateway получает read через группу bind-mounted файла.
+        $SUDO chown root:65532 "$dir/tls-key.pem"
+        $SUDO chmod 640 "$dir/tls-key.pem"
+        chmod 600 "$dir/jwt-private.pem"
+        chmod 644 "$dir/jwt-public.pem" "$dir/tls-cert.pem"
+
+        touch "$ENV_HOST"; chmod 600 "$ENV_HOST"
+        local name value
+        for name in JWT_PRIVATE_KEY_FILE JWT_PUBLIC_KEY_FILE TLS_CERT_FILE TLS_KEY_FILE; do
+            case "$name" in
+                JWT_PRIVATE_KEY_FILE) value="$dir/jwt-private.pem";;
+                JWT_PUBLIC_KEY_FILE)  value="$dir/jwt-public.pem";;
+                TLS_CERT_FILE)        value="$dir/tls-cert.pem";;
+                TLS_KEY_FILE)         value="$dir/tls-key.pem";;
+            esac
+            if grep -q "^$name=" "$ENV_HOST"; then
+                grep -q "^$name=$value$" "$ENV_HOST" || warn "$name в $ENV_HOST указывает не на VPS-комплект"
+            else
+                printf '%s=%s\n' "$name" "$value" >>"$ENV_HOST"
+            fi
+        done
+    fi
+    local tls_acl jwt_acl
+    tls_acl=$(stat -c '%a:%g' "$dir/tls-key.pem" 2>/dev/null)
+    jwt_acl=$(stat -c '%a' "$dir/jwt-private.pem" 2>/dev/null)
+    if [ "$tls_acl" != "640:65532" ] || [ "$jwt_acl" != "600" ]; then
+        if [ "$CHECK_ONLY" = "1" ]; then
+            warn "неверные права ключей: tls=$tls_acl (нужно 640:65532), jwt=$jwt_acl (нужно 600)"
+            return
+        fi
+        die "не удалось выставить безопасные права ключей"
+    fi
+    ok "JWT verify key и TLS pair готовы ($dir)"
 }
 
 # -- 4. фаервол ----------------------------------------------------------------
@@ -395,6 +478,44 @@ verify_running() {
     ok "все контейнеры работают"
 }
 
+verify_gateway_security() {
+    say "fail-closed gateway"
+    local container="manta-api-gateway-1" dir env mounts published failed=""
+    dir=$(gateway_keys_dir)
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        [ "$CHECK_ONLY" = "1" ] && { warn "$container не запущен — runtime-режим не проверен"; return; }
+        die "$container не найден"
+    fi
+
+    env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null)
+    for expected in 'MANTA_PROD=1' \
+                    'JWT_PUBLIC_KEY_FILE=/run/manta-secrets/jwt-public.pem' \
+                    'TLS_CERT_FILE=/run/manta-secrets/tls-cert.pem' \
+                    'TLS_KEY_FILE=/run/manta-secrets/tls-key.pem'; do
+        printf '%s\n' "$env" | grep -qxF "$expected" || failed="$failed env:$expected"
+    done
+    mounts=$(docker inspect -f '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$container" 2>/dev/null)
+    for target in jwt-public.pem tls-cert.pem tls-key.pem; do
+        printf '%s\n' "$mounts" | grep -qxF "/run/manta-secrets/$target false" || \
+            failed="$failed mount:$target"
+    done
+    published=$(docker port "$container" 8080/tcp 2>/dev/null)
+    [ "$published" = "127.0.0.1:8080" ] || \
+        failed="$failed publish:${published:-missing}"
+    if [ -n "$failed" ]; then
+        [ "$CHECK_ONLY" = "1" ] && { warn "gateway не fail-closed:$failed"; return; }
+        die "gateway не fail-closed:$failed"
+    fi
+
+    if curl -fsS --cacert "$dir/tls-cert.pem" https://localhost:8080/healthz >/dev/null 2>&1; then
+        ok "gateway отвечает по проверенному TLS; JWT verify key и mounts активны"
+    elif [ "$CHECK_ONLY" = "1" ]; then
+        warn "gateway не отвечает по проверенному HTTPS на localhost:8080"
+    else
+        die "gateway не отвечает по проверенному HTTPS на localhost:8080"
+    fi
+}
+
 build_images() {
     say "сборка образов (по одному)"
 
@@ -500,6 +621,7 @@ start_stack() {
         else
             ok "контейнеров запущено: $running"
         fi
+        verify_gateway_security
         return
     fi
     load_host_settings
@@ -570,6 +692,7 @@ start_stack() {
     ok "приложения подняты"
 
     verify_running
+    verify_gateway_security
 }
 
 # -- 6. расписание -------------------------------------------------------------
@@ -603,6 +726,7 @@ echo "=================================================================="
 setup_secrets
 setup_docker
 setup_host_tools
+setup_gateway_keys
 setup_firewall
 start_stack
 setup_cron
