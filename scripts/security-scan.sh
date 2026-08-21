@@ -81,15 +81,17 @@ fi
 
 if command -v govulncheck >/dev/null; then
     # С спринта 68 базовая линия — НОЛЬ достижимых уязвимостей в обоих
-    # модулях (тулчейн поднят до 1.25.12; было 26 и 22 из stdlib).
+    # модулях (тулчейн поднят до актуального security patch release).
     # Поэтому находка теперь CRIT, а не WARN: это регресс, а не известный
     # долг. govulncheck даёт ненулевой код только когда уязвимость
     # ДОСТИЖИМА из нашего кода — транзитивные, которые мы не вызываем,
     # сборку не валят.
     for svc in apps/api-gateway apps/replay-parser/svc; do
-        if (cd "$svc" && govulncheck ./... >/dev/null 2>&1); then
+        output=""
+        if output=$(cd "$svc" && govulncheck ./... 2>&1); then
             ok "govulncheck $svc"
         else
+            printf '%s\n' "$output" >&2
             bad "govulncheck $svc — достижимые уязвимости (базовая линия 0): govulncheck ./... в $svc"
         fi
     done

@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.13"
           cache-dependency-path: apps/${{ matrix.service }}/go.sum
       - name: Vet
         run: go vet ./...
@@ -77,7 +77,7 @@ jobs:
   libs-test:
     # Общие библиотеки (libs/manta_grpc — mTLS-обвязка внутренних gRPC).
     # Отдельной джобой, а не в матрице сервисов: у них свои requirements,
-    # а тесты handshake поднимают настоящий сервер и требуют только grpcio.
+    # а тесты handshake поднимают настоящий сервер и metrics endpoint.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +86,7 @@ jobs:
           python-version: "3.11"
       - name: Test
         run: |
-          pip install pytest grpcio
+          pip install pytest grpcio prometheus-client
           pytest libs/tests -q
 
   frontend-test:
@@ -152,7 +152,7 @@ jobs:
           fetch-depth: 0        # security-scan.sh обходит историю коммитов
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.13"
           cache: false
       - name: Install scanners
         run: |

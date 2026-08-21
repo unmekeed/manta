@@ -81,19 +81,19 @@ sleep 5 && docker info >/dev/null && echo "docker работает"
 
 ---
 
-## 4. Go 1.25.12
+## 4. Go 1.25.13
 
 Версия зафиксирована в `apps/api-gateway/go.mod`; более старая не
 соберёт проект, а `apt` даёт устаревшую.
 
 ```bash
 cd /tmp
-wget https://go.dev/dl/go1.25.12.linux-amd64.tar.gz
+wget https://go.dev/dl/go1.25.13.linux-amd64.tar.gz
 sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf go1.25.12.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.25.13.linux-amd64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
 source ~/.bashrc
-go version          # go1.25.12
+go version          # go1.25.13
 ```
 
 ---
