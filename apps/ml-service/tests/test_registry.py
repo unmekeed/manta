@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from registry.store import ModelRegistry
+from registry.store import ArtifactIntegrityError, ModelRegistry
 
 
 class FakeBackend:
@@ -39,6 +39,29 @@ def test_push_and_resolve_by_version():
     assert data == b"artifact-1"
     assert meta["registry_version"] == v
     assert meta["metrics"]["brier_calibrated"] == 0.10
+    assert len(meta["artifact_sha256"]) == 64
+
+
+def test_tampered_s3_artifact_is_rejected():
+    backend = FakeBackend()
+    reg = ModelRegistry(backend)
+    version = reg.push("wp", b"trusted", META, run_id="r1")
+    backend.objects[f"wp/versions/{version}/model.pkl"] = b"tampered"
+    with pytest.raises(ArtifactIntegrityError, match="sha256 mismatch"):
+        reg.resolve("wp", version)
+
+
+def test_missing_digest_is_rejected_instead_of_loading_legacy_bytes():
+    backend = FakeBackend()
+    reg = ModelRegistry(backend)
+    version = reg.push("wp", b"trusted", META, run_id="r1")
+    key = f"wp/versions/{version}/metadata.json"
+    import json
+    metadata = json.loads(backend.objects[key])
+    metadata.pop("artifact_sha256")
+    backend.objects[key] = json.dumps(metadata).encode()
+    with pytest.raises(ArtifactIntegrityError, match="no artifact_sha256"):
+        reg.resolve("wp", version)
 
 
 def test_promote_and_resolve_stage():
@@ -128,6 +151,15 @@ def test_mlflow_push_resolve_roundtrip(tmp_path):
     assert art == b"artifact-1"
     assert meta["registry_version"].startswith("0.4.0-")
     assert meta["metrics"]["brier_calibrated"] == 0.15
+
+
+def test_mlflow_tampered_artifact_is_rejected(tmp_path):
+    reg = _mlflow_reg(tmp_path)
+    version = reg.push("wp", b"trusted", {"model_version": "0.4.0"})
+    model_path = next((tmp_path / "mlruns").rglob("model.pkl"))
+    model_path.write_bytes(b"tampered")
+    with pytest.raises(ArtifactIntegrityError, match="sha256 mismatch"):
+        reg.resolve("wp", version)
 
 
 def test_mlflow_promote_switches_and_rollback(tmp_path):

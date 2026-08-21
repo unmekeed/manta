@@ -114,6 +114,22 @@ EOF
     done
     [ "$CHECK_ONLY" = "1" ] || ok "сервисные пароли PostgreSQL на месте"
 
+    # MinIO credentials разделяют входные данные и registry. Каждый
+    # секрет добавляется независимо: обновление старой VPS не ротирует
+    # уже выданные ключи и не требует останавливать весь конвейер.
+    for var in MANTA_S3_PASS_INGEST MANTA_S3_PASS_PARSER \
+               MANTA_S3_PASS_MODEL_READER MANTA_S3_PASS_MODEL_WRITER; do
+        if grep -q "^$var=" "$ENV_COMPOSE" 2>/dev/null; then
+            continue
+        fi
+        if [ "$CHECK_ONLY" = "1" ]; then
+            warn "$var ещё не создан"
+        else
+            printf '%s=%s\n' "$var" "$(gen_password)" >>"$ENV_COMPOSE"
+        fi
+    done
+    [ "$CHECK_ONLY" = "1" ] || ok "сервисные пароли MinIO на месте"
+
     # Тот же пароль — скриптам на хосте. Они ходят в контейнеры напрямую
     # (docker exec clickhouse-client --password ...), и берут его из
     # ~/manta-train.env. Два файла, один пароль.
@@ -513,7 +529,20 @@ start_stack() {
         ./scripts/create-db-users.sh || die "сервисные пользователи PostgreSQL не созданы"
     ok "сервисные пользователи и роли применены"
 
-    # Теперь login-роли существуют, можно запускать их клиентов.
+    say "пользователи MinIO"
+    for _ in $(seq 1 60); do
+        if docker exec manta-minio-1 mc ready local >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+    done
+    MINIO_CONTAINER=manta-minio-1 \
+    MINIO_ROOT_PASSWORD="$MANTA_DB_PASSWORD" \
+        ./scripts/create-minio-users.sh || die "сервисные пользователи MinIO не созданы"
+    ok "бакеты, пользователи и политики MinIO применены"
+
+    # Теперь login-роли и object-storage policies существуют, можно
+    # запускать их клиентов.
     # shellcheck disable=SC2086
     $COMPOSE --profile apps $profiles up -d || die "приложения compose не поднялись"
     ok "приложения подняты"

@@ -28,6 +28,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .store import artifact_sha256, verified_artifact
+
 
 class MlflowRegistry:
     EXPERIMENT = "manta-models"
@@ -60,7 +62,9 @@ class MlflowRegistry:
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "model.pkl").write_bytes(artifact)
             (Path(tmp) / "metadata.json").write_text(
-                json.dumps({**metadata, "registry_version": manta_version},
+                json.dumps({**metadata,
+                            "artifact_sha256": artifact_sha256(artifact),
+                            "registry_version": manta_version},
                            ensure_ascii=False))
             self._client.log_artifacts(rid, tmp)
         self._client.set_terminated(rid)
@@ -96,7 +100,7 @@ class MlflowRegistry:
             root = self._client.download_artifacts(mv.run_id, "", tmp)
             artifact = (Path(root) / "model.pkl").read_bytes()
             metadata = json.loads((Path(root) / "metadata.json").read_text())
-        return artifact, metadata
+        return verified_artifact(artifact, metadata), metadata
 
     def stage_metadata(self, name: str, stage: str = "production") -> dict | None:
         try:

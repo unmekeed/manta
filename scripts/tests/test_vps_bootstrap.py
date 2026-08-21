@@ -811,6 +811,26 @@ def test_postgres_users_exist_before_application_containers_start():
             src.rindex("$COMPOSE --profile apps"))
 
 
+def test_minio_secrets_are_distinct_and_idempotent(tmp_path):
+    names = ("MANTA_S3_PASS_INGEST", "MANTA_S3_PASS_PARSER",
+             "MANTA_S3_PASS_MODEL_READER", "MANTA_S3_PASS_MODEL_WRITER")
+    rc, out, first, _ = run_secrets(tmp_path)
+    assert rc == 0, out
+    values = [password_of(first, name) for name in names]
+    assert all(len(value) >= 16 for value in values)
+    assert len(set(values)) == len(values)
+    rc, out, second, _ = run_secrets(tmp_path)
+    assert rc == 0, out
+    assert [password_of(second, name) for name in names] == values
+
+
+def test_minio_users_exist_before_application_containers_start():
+    src = _functions("start_stack")
+    assert (src.index('$COMPOSE up -d') <
+            src.rindex("create-minio-users.sh") <
+            src.rindex("$COMPOSE --profile apps"))
+
+
 # =============================================================================
 # Инструменты хоста (спринт 157)
 #

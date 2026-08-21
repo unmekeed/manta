@@ -61,6 +61,10 @@ def merged_config() -> dict:
         "MANTA_DB_PASS_REPORTS": "reports-test-password",
         "MANTA_DB_PASS_GATEWAY": "gateway-test-password",
         "MANTA_DB_PASS_RO": "ro-test-password",
+        "MANTA_S3_PASS_INGEST": "ingest-test-password",
+        "MANTA_S3_PASS_PARSER": "parser-test-password",
+        "MANTA_S3_PASS_MODEL_READER": "reader-test-password",
+        "MANTA_S3_PASS_MODEL_WRITER": "writer-test-password",
     }
     proc = subprocess.run(
         ["docker", "compose", "-f", str(BASE), "-f", str(VPS),
@@ -263,5 +267,34 @@ def test_vps_overlay_has_no_dev_fallback_for_service_passwords():
     text = VPS.read_text(encoding="utf-8")
     for var in ("MANTA_DB_PASS_COLLECTOR", "MANTA_DB_PASS_REPORTS",
                 "MANTA_DB_PASS_GATEWAY"):
+        assert f"${{{var}:?" in text
+        assert f"${{{var}:-" not in text
+
+
+def test_vps_apps_use_function_specific_minio_users():
+    services = merged_config()["services"]
+    ingest = ("api-gateway", "data-collector", "timeline-collector",
+              "pro-timeline-collector", "league-collector",
+              "pro-replay-collector", "stratz-collector",
+              "candidates-collector")
+    for service in ingest:
+        assert services[service]["environment"]["S3_ACCESS_KEY"] == "manta_ingest"
+    assert services["parser-svc"]["environment"]["S3_ACCESS_KEY"] == "manta_parser"
+    assert services["ml-service"]["environment"]["S3_ACCESS_KEY"] == "manta_model_reader"
+    assert services["ml-autotrain"]["environment"]["S3_ACCESS_KEY"] == "manta_model_writer"
+
+
+def test_non_s3_apps_do_not_inherit_root_credentials_on_vps():
+    services = merged_config()["services"]
+    for service in ("feature-extractor", "report-generator"):
+        env = services[service]["environment"]
+        assert env["S3_ACCESS_KEY"] == ""
+        assert env["S3_SECRET_KEY"] == ""
+
+
+def test_vps_overlay_requires_every_minio_service_password():
+    text = VPS.read_text(encoding="utf-8")
+    for var in ("MANTA_S3_PASS_INGEST", "MANTA_S3_PASS_PARSER",
+                "MANTA_S3_PASS_MODEL_READER", "MANTA_S3_PASS_MODEL_WRITER"):
         assert f"${{{var}:?" in text
         assert f"${{{var}:-" not in text

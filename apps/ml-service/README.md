@@ -145,6 +145,10 @@ train + 58 pro benchmark, синтетики нет):
 
 `src/registry` — версионированные артефакты в MinIO (bucket `models`):
 
+При `push` реестр сохраняет `artifact_sha256` в `metadata.json`. Любой
+`resolve` (S3 и MLflow backend) сверяет digest и завершает загрузку
+ошибкой до десериализации, если байты или metadata были подменены.
+
 ```
 {name}/versions/{semver}-{run_id}/model.pkl + metadata.json
 {name}/stages/production.json          # указатель на версию
