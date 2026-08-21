@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -30,6 +32,25 @@ class Backend(Protocol):
     def get_bytes(self, key: str) -> bytes: ...          # KeyError если нет
     def list_keys(self, prefix: str) -> list[str]: ...
     def delete_bytes(self, key: str) -> None: ...        # идемпотентно
+
+
+class ArtifactIntegrityError(ValueError):
+    """Артефакт не совпадает с digest, зафиксированным при публикации."""
+
+
+def artifact_sha256(artifact: bytes) -> str:
+    return hashlib.sha256(artifact).hexdigest()
+
+
+def verified_artifact(artifact: bytes, metadata: dict) -> bytes:
+    expected = metadata.get("artifact_sha256")
+    actual = artifact_sha256(artifact)
+    if not expected:
+        raise ArtifactIntegrityError("metadata has no artifact_sha256")
+    if not isinstance(expected, str) or not hmac.compare_digest(expected, actual):
+        raise ArtifactIntegrityError(
+            f"artifact sha256 mismatch: expected {expected!r}, got {actual}")
+    return artifact
 
 
 class MinioBackend:
@@ -84,7 +105,9 @@ class ModelRegistry:
         prefix = f"{name}/versions/{version}"
         self._b.put_bytes(f"{prefix}/model.pkl", artifact)
         self._b.put_bytes(f"{prefix}/metadata.json",
-                          json.dumps({**metadata, "registry_version": version},
+                          json.dumps({**metadata,
+                                      "artifact_sha256": artifact_sha256(artifact),
+                                      "registry_version": version},
                                      ensure_ascii=False).encode())
         return version
 
@@ -117,7 +140,7 @@ class ModelRegistry:
         prefix = f"{name}/versions/{version}"
         artifact = self._b.get_bytes(f"{prefix}/model.pkl")
         metadata = json.loads(self._b.get_bytes(f"{prefix}/metadata.json"))
-        return artifact, metadata
+        return verified_artifact(artifact, metadata), metadata
 
     def stage_metadata(self, name: str, stage: str = "production") -> dict | None:
         """Метаданные текущей версии стейджа; None, если стейдж пуст."""

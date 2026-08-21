@@ -125,6 +125,28 @@ ClickHouse созданы с этим паролем. Сгенерируй но�
 границу least privilege. Повторный bootstrap дописывает только
 отсутствующие ключи и существующие значения не ротирует.
 
+Тем же способом создаются четыре MinIO-секрета: ingest, parser,
+model-reader и model-writer. После старта инфраструктуры bootstrap
+создаёт бакеты, service users и политики из `infra/minio/policies`, и
+только затем поднимает приложения. Root-ключ MinIO прикладным
+контейнерам VPS не передаётся. Проверить назначения без вывода паролей:
+
+```bash
+docker compose -f deployments/docker-compose.yml \
+  -f deployments/docker-compose.vps.yml config | grep 'S3_ACCESS_KEY:'
+```
+
+Старые registry-артефакты без `artifact_sha256` новый runtime намеренно
+не загрузит. Production-модель надо опубликовать заново через
+`ml-autotrain`, а не копировать старый `model.pkl` вручную.
+
+Живую проверку `Allow`/`AccessDenied` можно прогнать на машине с Docker:
+
+```bash
+MANTA_RUN_MINIO_INTEGRATION=1 python3 -m pytest \
+  scripts/tests/test_minio_permissions_integration.py -q
+```
+
 ---
 
 ## 3. Что дописать руками

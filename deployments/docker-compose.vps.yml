@@ -69,6 +69,8 @@ services:
       - "127.0.0.1:9500:9000"
       - "127.0.0.1:9501:9001"
     mem_limit: 512m
+    volumes:
+      - ../infra/minio/policies:/policies:ro
     restart: unless-stopped
 
   mlflow:
@@ -84,53 +86,90 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DSN: "postgresql://manta_gateway_user:${MANTA_DB_PASS_GATEWAY:?MANTA_DB_PASS_GATEWAY is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
 
   data-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   timeline-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   pro-timeline-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   league-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   pro-replay-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   stratz-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   candidates-collector:
     environment:
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
   report-generator:
     environment:
       POSTGRES_DSN: "postgresql://manta_reports_user:${MANTA_DB_PASS_REPORTS:?MANTA_DB_PASS_REPORTS is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: ""
+      S3_SECRET_KEY: ""
+    restart: unless-stopped
+
+  parser-svc:
+    environment:
+      S3_ACCESS_KEY: manta_parser
+      S3_SECRET_KEY: "${MANTA_S3_PASS_PARSER:?MANTA_S3_PASS_PARSER is required}"
+    restart: unless-stopped
+
+  feature-extractor:
+    environment:
+      S3_ACCESS_KEY: ""
+      S3_SECRET_KEY: ""
     restart: unless-stopped
 
   ml-service:
+    environment:
+      S3_ACCESS_KEY: manta_model_reader
+      S3_SECRET_KEY: "${MANTA_S3_PASS_MODEL_READER:?MANTA_S3_PASS_MODEL_READER is required}"
     ports: !override
       - "127.0.0.1:50051:50051"
-    # Замер: библиотеки (lightgbm+sklearn+numpy+grpc) держат ~200 МиБ,
-    # модель — единицы мегабайт. Гигабайт был выдан на глаз.
     mem_limit: 768m
+    restart: unless-stopped
+
+  ml-autotrain:
+    environment:
+      S3_ACCESS_KEY: manta_model_writer
+      S3_SECRET_KEY: "${MANTA_S3_PASS_MODEL_WRITER:?MANTA_S3_PASS_MODEL_WRITER is required}"
     restart: unless-stopped
 
   frontend:

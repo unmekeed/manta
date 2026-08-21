@@ -6,7 +6,7 @@ list_versions — вызывающий код от выбора не завис�
 """
 import os
 
-from .store import MinioBackend, ModelRegistry
+from .store import ArtifactIntegrityError, MinioBackend, ModelRegistry
 from .store import registry_from_env as _s3_registry_from_env
 
 
@@ -17,4 +17,5 @@ def registry_from_env():
     return _s3_registry_from_env()
 
 
-__all__ = ["ModelRegistry", "MinioBackend", "registry_from_env"]
+__all__ = ["ArtifactIntegrityError", "ModelRegistry", "MinioBackend",
+           "registry_from_env"]
