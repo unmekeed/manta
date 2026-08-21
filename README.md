@@ -195,6 +195,13 @@ make collect-report ARGS=features   # только покрытие фич
 # прописать выведенные пути в ~/manta-train.env, затем make recover
 ```
 
+На VPS этот fallback запрещён: overlay задаёт `MANTA_PROD=1`, монтирует
+JWT public key и TLS pair read-only, а gateway проверяет их до первого
+подключения к инфраструктуре. Приватный JWT-ключ остаётся на хосте для
+`issue-token.sh`. Frontend и Prometheus обращаются к gateway по HTTPS с
+проверкой смонтированного сертификата; наружу порт по-прежнему доступен
+только на `127.0.0.1`.
+
 После этого API работает по HTTPS (TLS 1.3, версии ниже отвергаются), а
 закрытые эндпоинты требуют Bearer-токен. Роли Гл. 9.3: `anonymous` —
 матчи/разборы/герои/драфт, `free` — загрузка реплеев, `premium` —

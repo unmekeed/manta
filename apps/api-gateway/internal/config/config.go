@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -9,6 +10,7 @@ import (
 // Config задаёт параметры процесса API Gateway. Все значения берутся из
 // переменных окружения, что соответствует запуску в Kubernetes (Гл. 12.8).
 type Config struct {
+	Production      bool
 	ListenAddr      string
 	PostgresDSN     string
 	ShutdownTimeout time.Duration
@@ -27,8 +29,10 @@ type Config struct {
 	HeroesPath    string // libs/data/heroes.json; пусто — путь по умолчанию
 
 	// TLS (NFR-SEC-01). Пусто — слушаем HTTP (локальный стенд).
-	TLSCertFile string
-	TLSKeyFile  string
+	TLSCertFile       string
+	TLSKeyFile        string
+	JWTPrivateKeyFile string
+	JWTPublicKeyFile  string
 	// Redis для denylist отозванных токенов (Гл. 9.2.2).
 	RedisAddr     string
 	RedisPassword string
@@ -36,6 +40,7 @@ type Config struct {
 
 func Load() Config {
 	return Config{
+		Production:      os.Getenv("MANTA_PROD") != "" && os.Getenv("MANTA_PROD") != "0",
 		ListenAddr:      getEnv("GATEWAY_LISTEN_ADDR", ":8080"),
 		PostgresDSN:     getEnv("POSTGRES_DSN", "postgres://dota:dota_dev_password@localhost:5432/manta"),
 		ShutdownTimeout: getDuration("GATEWAY_SHUTDOWN_TIMEOUT", 10*time.Second),
@@ -53,11 +58,32 @@ func Load() Config {
 		DraftGRPCAddr: getEnv("DRAFT_GRPC_ADDR", "localhost:50053"),
 		HeroesPath:    getEnv("HEROES_PATH", ""),
 
-		TLSCertFile:   getEnv("TLS_CERT_FILE", ""),
-		TLSKeyFile:    getEnv("TLS_KEY_FILE", ""),
-		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
-		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+		TLSCertFile:       getEnv("TLS_CERT_FILE", ""),
+		TLSKeyFile:        getEnv("TLS_KEY_FILE", ""),
+		JWTPrivateKeyFile: getEnv("JWT_PRIVATE_KEY_FILE", ""),
+		JWTPublicKeyFile:  getEnv("JWT_PUBLIC_KEY_FILE", ""),
+		RedisAddr:         getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
 	}
+}
+
+// Validate запрещает production-процессу даже начинать подключение к
+// инфраструктуре без verify-ключа JWT и полной TLS-пары. Dev-режим
+// намеренно сохраняет прежний fail-open контракт локального стенда.
+func (c Config) Validate() error {
+	if !c.Production {
+		return nil
+	}
+	if c.JWTPublicKeyFile == "" {
+		return fmt.Errorf("MANTA_PROD=1: JWT_PUBLIC_KEY_FILE is required")
+	}
+	if c.TLSCertFile == "" {
+		return fmt.Errorf("MANTA_PROD=1: TLS_CERT_FILE is required")
+	}
+	if c.TLSKeyFile == "" {
+		return fmt.Errorf("MANTA_PROD=1: TLS_KEY_FILE is required")
+	}
+	return nil
 }
 
 func getEnv(key, def string) string {
