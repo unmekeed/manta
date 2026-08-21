@@ -2,6 +2,7 @@
 # Синхронизация датасета между машинами (E2 роадмапа: облако ↔ локалка).
 #
 #   ./scripts/dataset-sync.sh export [файл.tar]   # снять слепок датасета
+#   ./scripts/dataset-sync.sh verify файл.tar     # проверить без импорта
 #   ./scripts/dataset-sync.sh import файл.tar     # идемпотентно влить слепок
 #
 # ЧТО переносится и ПОЧЕМУ — в scripts/lib/dataset-tables.sh, одним
@@ -19,6 +20,7 @@ CH_USER="${CLICKHOUSE_USER:-dota}"
 CH_PASS="${CLICKHOUSE_PASSWORD:-dota_dev_password}"
 PG_USER="${POSTGRES_USER:-dota}"
 PG_DB="${POSTGRES_DB:-manta}"
+MANIFEST="MANIFEST.sha256"
 
 
 chq() { docker exec -i "$CH" clickhouse-client --user "$CH_USER" --password "$CH_PASS" -q "$1"; }
@@ -42,6 +44,93 @@ pg_columns() {
 }
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,15p'; exit 1; }
+
+# Единственные имена, которые имеют право находиться в слепке. Архивы
+# приходят с другой машины через общий remote, поэтому проверка расширения
+# недостаточна: лишний файл не должен даже попасть во временный каталог.
+snapshot_names() {
+    local t
+    printf '%s\n' meta.json "$MANIFEST"
+    for t in "${REPLACING_TABLES[@]}" "${RAW_TABLES[@]}"; do
+        printf '%s.native.gz\n' "$t"
+    done
+    for t in "${PG_TABLES[@]}"; do
+        printf '%s.csv.gz\n%s.cols\n' "$t" "$t"
+    done
+}
+
+# Проверяет структуру и SHA-256 ДО распаковки. Python здесь уже является
+# зависимостью dataset-sync.sh (csv_field_count) и позволяет проверять типы
+# tar-members без хрупкого разбора человекочитаемого `tar -tvf`.
+verify_snapshot() {
+    local archive="$1" allowed
+    command -v python3 >/dev/null 2>&1 || {
+        echo "ОШИБКА: для проверки слепка нужен python3" >&2; return 1; }
+    allowed=$(snapshot_names)
+    SNAPSHOT_ALLOWED="$allowed" python3 - "$archive" "$MANIFEST" <<'PY'
+import hashlib, os, pathlib, re, sys, tarfile
+
+archive, manifest_name = sys.argv[1:]
+allowed = set(os.environ["SNAPSHOT_ALLOWED"].splitlines())
+
+def clean(name: str) -> str:
+    while name.startswith("./"):
+        name = name[2:]
+    return name.rstrip("/")
+
+try:
+    with tarfile.open(archive, "r:*") as tf:
+        files = {}
+        for member in tf.getmembers():
+            name = clean(member.name)
+            if not name and member.isdir():
+                continue
+            path = pathlib.PurePosixPath(name)
+            if (not name or path.is_absolute() or ".." in path.parts or
+                    len(path.parts) != 1):
+                raise ValueError(f"опасный путь в архиве: {member.name!r}")
+            if not member.isfile():
+                raise ValueError(f"разрешены только обычные файлы: {member.name!r}")
+            if name not in allowed:
+                raise ValueError(f"лишний файл в архиве: {name}")
+            if name in files:
+                raise ValueError(f"дублирующийся файл в архиве: {name}")
+            files[name] = member
+
+        if manifest_name not in files:
+            raise ValueError(f"нет обязательного {manifest_name}")
+        if "meta.json" not in files:
+            raise ValueError("нет обязательного meta.json")
+
+        raw = tf.extractfile(files[manifest_name]).read().decode("utf-8")
+        declared = {}
+        for line in raw.splitlines():
+            match = re.fullmatch(r"([0-9a-fA-F]{64})\s+[ *]?(?:\./)?([^/]+)", line)
+            if not match:
+                raise ValueError(f"неверная строка manifest: {line!r}")
+            digest, name = match.groups()
+            if name == manifest_name or name in declared:
+                raise ValueError(f"неверное или повторное имя в manifest: {name}")
+            declared[name] = digest.lower()
+
+        actual = set(files) - {manifest_name}
+        if set(declared) != actual:
+            missing = sorted(actual - set(declared))
+            extra = sorted(set(declared) - actual)
+            raise ValueError(f"manifest не совпадает с архивом: не описаны={missing}, отсутствуют={extra}")
+
+        for name, expected in declared.items():
+            digest = hashlib.sha256()
+            source = tf.extractfile(files[name])
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != expected:
+                raise ValueError(f"SHA-256 не совпал: {name}")
+except (OSError, tarfile.TarError, UnicodeError, ValueError) as exc:
+    print(f"ОШИБКА: недоверенный слепок: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
 
 export_dataset() {
     local out="${1:-manta-dataset-$(date -u +%Y%m%dT%H%M).tar}"
@@ -97,6 +186,17 @@ export_dataset() {
         echo " \"schema\": 156}"
     } >"$dir/meta.json"
 
+    # Manifest создаётся последним и описывает каждый payload-файл. Сам
+    # себя он не включает: иначе контрольная сумма зависела бы от себя.
+    (
+        cd "$dir"
+        for f in ./*; do
+            [ -f "$f" ] || continue
+            [ "$f" = "./$MANIFEST" ] && continue
+            sha256sum "$f"
+        done
+    ) >"$dir/$MANIFEST"
+
     tar -cf "$out" -C "$dir" .
     echo
     echo "готово: $out ($(du -h "$out" | cut -f1))"
@@ -114,9 +214,13 @@ is_empty_dump() {
 
 import_dataset() {
     local in="${1:?путь к архиву}"
+    [ -f "$in" ] || { echo "ОШИБКА: слепок '$in' не найден" >&2; return 1; }
+    verify_snapshot "$in" || return 1
     local dir; dir=$(mktemp -d)
     trap "rm -rf '$dir'" EXIT
-    tar -xf "$in" -C "$dir"
+    # Структура и тип каждого member уже проверены выше. Флаги не дают
+    # архиву навязать владельца или опасно широкие права принимающей машине.
+    tar --no-same-owner --no-same-permissions -xf "$in" -C "$dir"
     echo ">> архив: $(cat "$dir/meta.json" 2>/dev/null || echo 'без meta.json')"
 
     for t in "${REPLACING_TABLES[@]}"; do
@@ -215,6 +319,7 @@ import_dataset() {
 
 case "${1:-}" in
     export) shift; export_dataset "$@";;
+    verify) shift; verify_snapshot "${1:?путь к архиву}" && echo "слепок проверен: $1";;
     import) shift; import_dataset "$@";;
     *) usage;;
 esac

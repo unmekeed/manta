@@ -39,6 +39,7 @@ BACKUP_DIR="${MANTA_BACKUP_DIR:-$HOME/manta-backups}"
 CLOUD_REMOTE="${MANTA_CLOUD_REMOTE:-}"
 HOST_LABEL=$(printf '%s' "${MANTA_HOST_LABEL:-$(hostname)}" |
     tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)
+PEER_HOSTS="${MANTA_PEER_HOSTS:-}"
 # Чужие слепки кладутся в ОТДЕЛЬНЫЙ подкаталог, а не рядом со своими, и
 # это не про аккуратность. heartbeat.sh считает свежесть бэкапа по самому
 # новому файлу в каталоге, backup-drill.sh восстанавливает самый новый, а
@@ -61,6 +62,7 @@ tg() {
 die() { echo "ОБМЕН НЕ УДАЛСЯ: $1" >&2; tg "🔴 <b>Manta</b>: обмен датасетом — $1"; exit 1; }
 
 [ -n "$CLOUD_REMOTE" ] || die "MANTA_CLOUD_REMOTE не задан — обмену негде идти"
+[ -n "$PEER_HOSTS" ] || die "MANTA_PEER_HOSTS не задан — список доверенных машин обязателен"
 command -v rclone >/dev/null || die "rclone не установлен"
 mkdir -p "$PEER_DIR"
 touch "$STATE"
@@ -80,6 +82,25 @@ remote=$(rclone lsf --include 'manta-dataset-*.tar' "$CLOUD_REMOTE" 2>/dev/null)
 peers=$(printf '%s\n' "$remote" |
     sed -n 's/^manta-dataset-\(.*\)-[0-9]\{8\}T[0-9]\{4\}\.tar$/\1/p' |
     sort -u | grep -vx "$HOST_LABEL" || true)
+
+# Remote с rclone.conf даёт право ЧИТАТЬ данные, но не должен автоматически
+# давать право прислать исполняемый/импортируемый payload. Принимаем только
+# явно названные метки; появление неизвестной — отказ всего прогона, а не
+# тихий пропуск, иначе опечатка в метке выглядела бы как остановившийся peer.
+allowed_peer() {
+    local wanted="$1" peer
+    local IFS=', '
+    for peer in $PEER_HOSTS; do
+        [ -n "$peer" ] || continue
+        case "$peer" in *[!A-Za-z0-9_-]*) die "небезопасная метка в MANTA_PEER_HOSTS: $peer";; esac
+        [ "$peer" = "$wanted" ] && return 0
+    done
+    return 1
+}
+
+for peer in $peers; do
+    allowed_peer "$peer" || die "неизвестная метка отправителя: $peer (разрешены: $PEER_HOSTS)"
+done
 
 if [ -z "$peers" ]; then
     echo "Чужих слепков нет: в облаке только мои. Сосед ещё не публиковался?"
