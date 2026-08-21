@@ -21,6 +21,20 @@ PGHOST="${POSTGRES_HOST:-localhost}"
 PGUSER="${POSTGRES_USER:-dota}"
 PGDB="${POSTGRES_DB:-manta}"
 export PGPASSWORD="${PGPASSWORD:-dota_dev_password}"
+PG_CONTAINER="${POSTGRES_CONTAINER:-manta-postgres-1}"
+
+# На чистой VPS psql на хост не ставится: клиент уже есть в образе
+# postgres. Дома и в ручном запуске сохраняем прежний fallback на host
+# psql, если контейнера нет.
+admin_psql() {
+    if command -v docker >/dev/null 2>&1 &&
+       docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+        docker exec -i -e PGPASSWORD="$PGPASSWORD" "$PG_CONTAINER" \
+            psql -U "$PGUSER" -d "$PGDB" "$@"
+    else
+        psql -h "$PGHOST" -U "$PGUSER" -d "$PGDB" "$@"
+    fi
+}
 
 created=0
 make_user() {
@@ -39,7 +53,7 @@ make_user() {
     #
     # ON_ERROR_STOP=1 обязателен: без него psql возвращает 0 даже после
     # ошибки, и скрипт рапортует об успехе, ничего не создав.
-    psql -h "$PGHOST" -U "$PGUSER" -d "$PGDB" -qtA -v ON_ERROR_STOP=1 \
+    admin_psql -qtA -v ON_ERROR_STOP=1 \
         -v user="$user" -v pass="$pass" -v role="$role" <<'SQL' >/dev/null
 SELECT format('%s ROLE %I LOGIN PASSWORD %L',
               CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'user')

@@ -26,6 +26,7 @@ in use», сам с собой. Сбой привязки и не дал сте�
 недоступен.
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,11 +56,17 @@ def merged_config() -> dict:
     """Слитая конфигурация — то, что docker получит на самом деле."""
     if not shutil.which("docker"):
         pytest.skip("docker недоступен: слитую конфигурацию не получить")
+    secrets = {
+        "MANTA_DB_PASS_COLLECTOR": "collector-test-password",
+        "MANTA_DB_PASS_REPORTS": "reports-test-password",
+        "MANTA_DB_PASS_GATEWAY": "gateway-test-password",
+        "MANTA_DB_PASS_RO": "ro-test-password",
+    }
     proc = subprocess.run(
         ["docker", "compose", "-f", str(BASE), "-f", str(VPS),
          "--profile", "apps", "--profile", "monitoring",
          "config", "--format", "json"],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env={**os.environ, **secrets})
     if proc.returncode != 0:
         pytest.fail(f"docker compose config не отработал: {proc.stderr[:400]}")
     return json.loads(proc.stdout)
@@ -230,3 +237,31 @@ def test_services_restart_by_themselves():
     without = [name for name, svc in _load(VPS)["services"].items()
                if svc.get("restart") != "unless-stopped"]
     assert not without, f"без политики перезапуска: {without}"
+
+
+def test_vps_apps_use_function_specific_postgres_users():
+    cfg = merged_config()
+    services = cfg["services"]
+    expected = {
+        "api-gateway": "manta_gateway_user",
+        "report-generator": "manta_reports_user",
+        "data-collector": "manta_collector_user",
+        "timeline-collector": "manta_collector_user",
+        "pro-timeline-collector": "manta_collector_user",
+        "league-collector": "manta_collector_user",
+        "pro-replay-collector": "manta_collector_user",
+        "stratz-collector": "manta_collector_user",
+        "candidates-collector": "manta_collector_user",
+    }
+    for service, user in expected.items():
+        dsn = services[service]["environment"]["POSTGRES_DSN"]
+        assert f"postgresql://{user}:" in dsn, (service, dsn)
+        assert "postgresql://dota:" not in dsn
+
+
+def test_vps_overlay_has_no_dev_fallback_for_service_passwords():
+    text = VPS.read_text(encoding="utf-8")
+    for var in ("MANTA_DB_PASS_COLLECTOR", "MANTA_DB_PASS_REPORTS",
+                "MANTA_DB_PASS_GATEWAY"):
+        assert f"${{{var}:?" in text
+        assert f"${{{var}:-" not in text

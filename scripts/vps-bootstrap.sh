@@ -95,6 +95,25 @@ EOF
         ok "сгенерирован $ENV_COMPOSE (0600)"
     fi
 
+    # Пароль владельца БД и пароли прикладных сервисов — разные границы.
+    # Первого достаточно, чтобы поднять Postgres и применить миграции;
+    # остальные получают только групповые роли миграции 005. Добавляем
+    # недостающие по одному: обновление старой VPS не меняет уже выданные
+    # credentials и не обрывает живые соединения.
+    local var
+    for var in MANTA_DB_PASS_COLLECTOR MANTA_DB_PASS_REPORTS \
+               MANTA_DB_PASS_GATEWAY MANTA_DB_PASS_RO; do
+        if grep -q "^$var=" "$ENV_COMPOSE" 2>/dev/null; then
+            continue
+        fi
+        if [ "$CHECK_ONLY" = "1" ]; then
+            warn "$var ещё не создан"
+        else
+            printf '%s=%s\n' "$var" "$(gen_password)" >>"$ENV_COMPOSE"
+        fi
+    done
+    [ "$CHECK_ONLY" = "1" ] || ok "сервисные пароли PostgreSQL на месте"
+
     # Тот же пароль — скриптам на хосте. Они ходят в контейнеры напрямую
     # (docker exec clickhouse-client --password ...), и берут его из
     # ~/manta-train.env. Два файла, один пароль.
@@ -462,9 +481,12 @@ start_stack() {
     else
         warn "stratz и candidates выключены (нет токена / не включены)"
     fi
-    # shellcheck disable=SC2086
-    $COMPOSE --profile apps $profiles up -d || die "compose up не удался"
-    ok "контейнеры подняты"
+    # Сначала только инфраструктура. Прикладные контейнеры уже настроены
+    # на manta_*_user, но login-роли появляются лишь после миграции 005 и
+    # create-db-users.sh. Поднять всё одним вызовом — получить restart-loop
+    # каждого клиента Postgres в середине штатной установки.
+    $COMPOSE up -d || die "инфраструктура compose не поднялась"
+    ok "инфраструктура поднята"
 
     say "ожидание готовности баз"
     for _ in $(seq 1 60); do
@@ -480,6 +502,21 @@ start_stack() {
     say "миграции"
     ./scripts/pg-migrate.sh && ./scripts/ch-migrate.sh || die "миграции не прошли"
     ok "миграции применены"
+
+    say "пользователи PostgreSQL"
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_COMPOSE"
+    set +a
+    POSTGRES_CONTAINER=manta-postgres-1 \
+    PGPASSWORD="$MANTA_DB_PASSWORD" \
+        ./scripts/create-db-users.sh || die "сервисные пользователи PostgreSQL не созданы"
+    ok "сервисные пользователи и роли применены"
+
+    # Теперь login-роли существуют, можно запускать их клиентов.
+    # shellcheck disable=SC2086
+    $COMPOSE --profile apps $profiles up -d || die "приложения compose не поднялись"
+    ok "приложения подняты"
 
     verify_running
 }

@@ -122,6 +122,39 @@ def test_both_files_get_the_same_password(tmp_path):
     assert password_of(host, "POSTGRES_PASSWORD") == pw
 
 
+SERVICE_PASSWORDS = (
+    "MANTA_DB_PASS_COLLECTOR", "MANTA_DB_PASS_REPORTS",
+    "MANTA_DB_PASS_GATEWAY", "MANTA_DB_PASS_RO",
+)
+
+
+def test_service_passwords_are_generated_and_distinct(tmp_path):
+    rc, out, compose, _ = run_secrets(tmp_path)
+    assert rc == 0, out
+    values = [password_of(compose, name) for name in SERVICE_PASSWORDS]
+    assert all(len(value) >= 16 for value in values)
+    assert len(set(values)) == len(values)
+    assert password_of(compose) not in values
+
+
+def test_service_passwords_survive_rerun(tmp_path):
+    rc, _, first, _ = run_secrets(tmp_path)
+    assert rc == 0
+    rc, out, second, _ = run_secrets(tmp_path, env_compose_body=first)
+    assert rc == 0, out
+    for name in SERVICE_PASSWORDS:
+        assert password_of(first, name) == password_of(second, name)
+
+
+def test_old_vps_gets_only_missing_service_passwords(tmp_path):
+    body = "MANTA_DB_PASSWORD=старый-root\nMANTA_DB_PASS_COLLECTOR=старый-collector\n"
+    rc, out, compose, _ = run_secrets(tmp_path, env_compose_body=body)
+    assert rc == 0, out
+    assert password_of(compose) == "старый-root"
+    assert password_of(compose, "MANTA_DB_PASS_COLLECTOR") == "старый-collector"
+    assert all(password_of(compose, name) for name in SERVICE_PASSWORDS)
+
+
 def test_mismatch_in_host_file_is_reported_not_silently_fixed(tmp_path):
     """Уже заданный чужой пароль не переписывается молча.
 
@@ -159,6 +192,8 @@ def test_password_never_appears_in_output(tmp_path):
     rc, out, compose, _ = run_secrets(tmp_path)
     pw = password_of(compose)
     assert pw and pw not in out
+    for name in SERVICE_PASSWORDS:
+        assert password_of(compose, name) not in out
 
 
 def test_check_mode_writes_nothing(tmp_path):
@@ -766,6 +801,14 @@ def test_verification_actually_runs_at_the_end_of_the_stack_step():
     assert "verify_running" in src, "проверка живости не вызывается"
     assert src.index("migrate") < src.index("verify_running"), \
         "проверка живости идёт до миграций"
+
+
+def test_postgres_users_exist_before_application_containers_start():
+    """Login-роли появляются между infra-up и apps-up."""
+    src = _functions("start_stack")
+    assert (src.index('$COMPOSE up -d') < src.rindex("pg-migrate.sh") <
+            src.rindex("create-db-users.sh") <
+            src.rindex("$COMPOSE --profile apps"))
 
 
 # =============================================================================
