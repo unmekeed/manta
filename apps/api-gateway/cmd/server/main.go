@@ -68,7 +68,7 @@ func main() {
 	// работает открыто — это режим локального стенда, и он громко
 	// логируется, чтобы не уехать в прод незамеченным.
 	var deny auth.Denylist
-	if d := auth.NewRedisDenylist(cfg.RedisAddr); d != nil {
+	if d := auth.NewRedisDenylist(cfg.RedisAddr, cfg.RedisPassword); d != nil {
 		defer d.Close()
 		deny = d
 	}

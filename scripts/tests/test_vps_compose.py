@@ -65,6 +65,10 @@ def merged_config() -> dict:
         "MANTA_S3_PASS_PARSER": "parser-test-password",
         "MANTA_S3_PASS_MODEL_READER": "reader-test-password",
         "MANTA_S3_PASS_MODEL_WRITER": "writer-test-password",
+        "MANTA_CH_PASS_READER": "ch-reader-test-password",
+        "MANTA_CH_PASS_WRITER": "ch-writer-test-password",
+        "MANTA_CH_PASS_TRAINER": "ch-trainer-test-password",
+        "MANTA_REDIS_PASSWORD": "redis-test-password",
     }
     proc = subprocess.run(
         ["docker", "compose", "-f", str(BASE), "-f", str(VPS),
@@ -296,5 +300,50 @@ def test_vps_overlay_requires_every_minio_service_password():
     text = VPS.read_text(encoding="utf-8")
     for var in ("MANTA_S3_PASS_INGEST", "MANTA_S3_PASS_PARSER",
                 "MANTA_S3_PASS_MODEL_READER", "MANTA_S3_PASS_MODEL_WRITER"):
+        assert f"${{{var}:?" in text
+        assert f"${{{var}:-" not in text
+
+
+def test_vps_apps_use_function_specific_clickhouse_users():
+    services = merged_config()["services"]
+    writers = ("api-gateway", "data-collector", "timeline-collector",
+               "pro-timeline-collector", "league-collector",
+               "pro-replay-collector", "stratz-collector",
+               "candidates-collector", "parser-svc", "feature-extractor")
+    for service in writers:
+        assert services[service]["environment"]["CLICKHOUSE_USER"] == "manta_ch_writer"
+    for service in ("report-generator", "ml-service"):
+        assert services[service]["environment"]["CLICKHOUSE_USER"] == "manta_ch_reader"
+    assert services["ml-autotrain"]["environment"]["CLICKHOUSE_USER"] == "manta_ch_trainer"
+    for service in writers + ("report-generator", "ml-service", "ml-autotrain"):
+        assert services[service]["environment"]["CLICKHOUSE_USER"] != "dota"
+
+
+def test_redis_requires_auth_and_clients_receive_password():
+    services = merged_config()["services"]
+    redis = services["redis"]
+    assert "--requirepass" in redis["command"]
+    assert redis["environment"]["MANTA_REDIS_PASSWORD"] == "redis-test-password"
+    gateway = services["api-gateway"]["environment"]
+    assert gateway["REDIS_ADDR"] == "redis:6379"
+    assert gateway["REDIS_PASSWORD"] == "redis-test-password"
+
+
+def test_mlflow_is_on_an_internal_network_only_with_ml_clients():
+    cfg = merged_config()
+    assert cfg["networks"]["mlflow-internal"]["internal"] is True
+    services = cfg["services"]
+    assert set(services["mlflow"]["networks"]) == {"mlflow-internal"}
+    for service in ("postgres", "ml-service", "ml-autotrain"):
+        assert "mlflow-internal" in services[service]["networks"]
+    for service, body in services.items():
+        if service not in {"postgres", "mlflow", "ml-service", "ml-autotrain"}:
+            assert "mlflow-internal" not in (body.get("networks") or {}), service
+
+
+def test_vps_overlay_requires_storage_passwords_without_dev_fallbacks():
+    text = VPS.read_text(encoding="utf-8")
+    for var in ("MANTA_CH_PASS_READER", "MANTA_CH_PASS_WRITER",
+                "MANTA_CH_PASS_TRAINER", "MANTA_REDIS_PASSWORD"):
         assert f"${{{var}:?" in text
         assert f"${{{var}:-" not in text

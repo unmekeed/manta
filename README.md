@@ -283,6 +283,13 @@ MinIO на VPS также разделён по функции: `manta_ingest` �
 фиксируется SHA-256 артефакта; `resolve()` сверяет digest до `joblib.load`
 и отказывается загружать повреждённую или подменённую модель.
 
+Остальные stateful-сервисы VPS также закрыты от lateral movement:
+ClickHouse выдаёт отдельные `manta_ch_reader`, `manta_ch_writer` и
+`manta_ch_trainer` с минимальными грантами; Redis требует AUTH; MLflow
+находится в отдельной internal-сети, к которой подключены только Postgres,
+`ml-service` и `ml-autotrain`. Локальный dev-compose сохраняет прежние
+необязательные credentials.
+
 ## Синхронизация датасета между машинами
 
 Датасет собирается независимо на каждой машине (облако, локалка) и

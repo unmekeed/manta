@@ -249,6 +249,12 @@ OpenDota отдаёт открыто; e-mail, паролей, платёжных
    разработчика. Прод: шифрование томов + KMS.
 4. **Секреты в plaintext-файле** `~/manta-train.env` (вне git, права
    рекомендованы 600). Прод: Vault/Secrets Manager.
+4а. ~~**Lateral movement через общий ClickHouse/Redis/MLflow**~~ ✅ спринт
+   161: приложения VPS используют отдельные ClickHouse reader/writer/trainer
+   identities, Redis отвергает команды без AUTH, а MLflow вынесен в
+   `internal` compose-сеть, доступную только Postgres и ML-клиентам.
+   Bootstrap добавляет секреты без ротации существующих значений; живой
+   integration-тест проверяет как разрешённые, так и запрещённые операции.
 5. **Go security patch cadence:** CI держит baseline `govulncheck = 0`;
    версия 1.25.13 закрывает GO-2026-6089 в `net/http`, а gRPC 1.82.1 —
    GO-2026-6061 в HTTP/2 transport.
@@ -274,8 +280,11 @@ OpenDota отдаёт открыто; e-mail, паролей, платёжных
    VPS создаёт отдельные ingest/parser/model-reader/model-writer users с
    bucket policies. Коллектор не видит `models`, runtime ML не может
    публиковать, а SHA-256 проверяется до десериализации артефакта.
-5. Держать `make security-scan` в CI зелёным: новые зависимости
+5. ~~Общие ClickHouse credentials, Redis без AUTH и доступный всем MLflow~~
+   ✅ спринт 161: reader/writer/trainer разделены, Redis требует пароль,
+   MLflow доступен только в отдельной internal-сети ML-контура.
+6. Держать `make security-scan` в CI зелёным: новые зависимости
    проверяются автоматически, а не раз в фазу.
-6. **Включить ключи на локальных стендах**: `scripts/gen-dev-keys.sh` и
+7. **Включить ключи на локальных стендах**: `scripts/gen-dev-keys.sh` и
    прописать пути в env-файл — иначе gateway работает открыто (это
    логируется как WARN `auth_disabled`/`tls_disabled`).

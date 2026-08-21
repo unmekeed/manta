@@ -65,7 +65,8 @@ cd ~/manta
 Что он делает по порядку: генерирует независимые пароли → ставит Docker → ставит
 `make` и `rclone` → включает фаервол (наружу только SSH) → проверяет
 занятость портов → собирает образы по одному → поднимает инфраструктуру →
-применяет миграции → создаёт сервисных пользователей PostgreSQL →
+применяет миграции → создаёт сервисных пользователей PostgreSQL и ClickHouse →
+включает Redis AUTH →
 поднимает приложения → проверяет, что контейнеры живы → заводит расписание.
 
 Про `make` и `rclone` стоит сказать отдельно, потому что до спринта 157
@@ -145,6 +146,21 @@ docker compose -f deployments/docker-compose.yml \
 ```bash
 MANTA_RUN_MINIO_INTEGRATION=1 python3 -m pytest \
   scripts/tests/test_minio_permissions_integration.py -q
+```
+
+ClickHouse получает ещё три независимых секрета: reader, writer и trainer.
+Reader может только читать витрины; writer — читать, вставлять и выполнять
+нужные GDPR-мутации; trainer имеет отдельную read-only identity. Redis на
+VPS запускается с `requirepass`, пароль получают gateway и ручной
+`feature-store` через `REDIS_PASSWORD`/`REDIS_URL`. MLflow находится в
+отдельной internal-сети вместе только с Postgres и двумя ML-клиентами;
+прочие контейнеры не могут разрешить его имя или открыть порт 5000.
+
+Проверка разрешённых и запрещённых операций:
+
+```bash
+MANTA_RUN_STORAGE_INTEGRATION=1 python3 -m pytest \
+  scripts/tests/test_storage_permissions_integration.py -q
 ```
 
 ---

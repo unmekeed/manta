@@ -14,12 +14,12 @@ type RedisDenylist struct {
 	prefix string
 }
 
-func NewRedisDenylist(addr string) *RedisDenylist {
+func NewRedisDenylist(addr, password string) *RedisDenylist {
 	if addr == "" {
 		return nil
 	}
 	return &RedisDenylist{
-		rdb:    redis.NewClient(&redis.Options{Addr: addr}),
+		rdb:    redis.NewClient(&redis.Options{Addr: addr, Password: password}),
 		prefix: "jwt:revoked:",
 	}
 }
