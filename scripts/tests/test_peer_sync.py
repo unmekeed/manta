@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def run(tmp_path, remote_files, label="pc1", args=(), imported=(),
-        import_fails=False):
+        import_fails=False, peer_hosts="pc2,pc3,vps-de"):
     """Прогнать peer-sync.sh со стабами. Возвращает (rc, stdout, вызовы)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -69,6 +69,7 @@ def run(tmp_path, remote_files, label="pc1", args=(), imported=(),
         "MANTA_BACKUP_DIR": str(backup_dir),
         "MANTA_CLOUD_REMOTE": "crypt:manta",
         "MANTA_HOST_LABEL": label,
+        "MANTA_PEER_HOSTS": peer_hosts,
         "TELEGRAM_BOT_TOKEN": "",
     }
     proc = subprocess.run(
@@ -211,6 +212,7 @@ def test_missing_remote_is_loud(tmp_path):
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
            "MANTA_TRAIN_ENV": str(tmp_path / "нет.env"),
            "MANTA_BACKUP_DIR": str(tmp_path), "MANTA_CLOUD_REMOTE": "",
+           "MANTA_PEER_HOSTS": "pc2",
            "TELEGRAM_BOT_TOKEN": ""}
     proc = subprocess.run(["bash", str(SCRIPT)], capture_output=True,
                           text=True, env=env, cwd=ROOT)
@@ -222,6 +224,33 @@ def test_empty_cloud_is_not_a_failure(tmp_path):
     """Пустое облако — норма первого дня, а не сбой."""
     rc, out, log = run(tmp_path, [], label="pc1")
     assert rc == 0
+
+
+def test_peer_allowlist_is_required(tmp_path):
+    """Пустой allowlist не означает «доверять всем»."""
+    rc, out, log = run(tmp_path, TWO, label="pc1", peer_hosts="")
+    assert rc != 0
+    assert "MANTA_PEER_HOSTS" in out
+    assert "copy" not in log and "import" not in log
+
+
+def test_unknown_peer_aborts_before_download(tmp_path):
+    """Любая новая метка требует явного решения владельца."""
+    files = ["manta-dataset-pc2-20260818T0300.tar",
+             "manta-dataset-attacker-20260818T0300.tar"]
+    rc, out, log = run(tmp_path, files, label="pc1", peer_hosts="pc2")
+    assert rc != 0
+    assert "неизвестная метка отправителя: attacker" in out
+    assert "copy" not in log and "import" not in log
+
+
+def test_allowlist_matches_whole_labels(tmp_path):
+    """pc2 не должен разрешать pc20 по совпавшему префиксу."""
+    files = ["manta-dataset-pc20-20260818T0300.tar"]
+    rc, out, log = run(tmp_path, files, label="pc1", peer_hosts="pc2")
+    assert rc != 0
+    assert "pc20" in out
+    assert "copy" not in log
 
 
 def test_peer_snapshots_never_land_next_to_our_own(tmp_path):
