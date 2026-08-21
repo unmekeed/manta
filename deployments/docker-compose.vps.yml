@@ -82,6 +82,48 @@ services:
       - "127.0.0.1:8080:8080"
     mem_limit: 256m
     restart: unless-stopped
+    environment:
+      POSTGRES_DSN: "postgresql://manta_gateway_user:${MANTA_DB_PASS_GATEWAY:?MANTA_DB_PASS_GATEWAY is required}@postgres:5432/manta"
+
+  data-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  timeline-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  pro-timeline-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  league-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  pro-replay-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  stratz-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  candidates-collector:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+    restart: unless-stopped
+
+  report-generator:
+    environment:
+      POSTGRES_DSN: "postgresql://manta_reports_user:${MANTA_DB_PASS_REPORTS:?MANTA_DB_PASS_REPORTS is required}@postgres:5432/manta"
+    restart: unless-stopped
 
   ml-service:
     ports: !override
