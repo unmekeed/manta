@@ -130,6 +130,21 @@ EOF
     done
     [ "$CHECK_ONLY" = "1" ] || ok "сервисные пароли MinIO на месте"
 
+    # Отдельные ClickHouse identities и Redis AUTH. Добавление по одному
+    # сохраняет уже выданные credentials при повторном bootstrap.
+    for var in MANTA_CH_PASS_READER MANTA_CH_PASS_WRITER \
+               MANTA_CH_PASS_TRAINER MANTA_REDIS_PASSWORD; do
+        if grep -q "^$var=" "$ENV_COMPOSE" 2>/dev/null; then
+            continue
+        fi
+        if [ "$CHECK_ONLY" = "1" ]; then
+            warn "$var ещё не создан"
+        else
+            printf '%s=%s\n' "$var" "$(gen_password)" >>"$ENV_COMPOSE"
+        fi
+    done
+    [ "$CHECK_ONLY" = "1" ] || ok "пароли ClickHouse и Redis на месте"
+
     # Тот же пароль — скриптам на хосте. Они ходят в контейнеры напрямую
     # (docker exec clickhouse-client --password ...), и берут его из
     # ~/manta-train.env. Два файла, один пароль.
@@ -528,6 +543,13 @@ start_stack() {
     PGPASSWORD="$MANTA_DB_PASSWORD" \
         ./scripts/create-db-users.sh || die "сервисные пользователи PostgreSQL не созданы"
     ok "сервисные пользователи и роли применены"
+
+    say "пользователи ClickHouse"
+    CLICKHOUSE_CONTAINER=manta-clickhouse-1 \
+    CLICKHOUSE_ADMIN_PASSWORD="$MANTA_DB_PASSWORD" \
+        ./scripts/create-clickhouse-users.sh || \
+        die "сервисные пользователи ClickHouse не созданы"
+    ok "функциональные пользователи и роли ClickHouse применены"
 
     say "пользователи MinIO"
     for _ in $(seq 1 60); do

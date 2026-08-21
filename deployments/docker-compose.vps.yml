@@ -27,12 +27,25 @@
 # если появился порт без loopback-привязки.
 name: manta
 
+x-clickhouse-reader-env: &clickhouse-reader-env
+  CLICKHOUSE_USER: manta_ch_reader
+  CLICKHOUSE_PASSWORD: "${MANTA_CH_PASS_READER:?MANTA_CH_PASS_READER is required}"
+x-clickhouse-writer-env: &clickhouse-writer-env
+  CLICKHOUSE_USER: manta_ch_writer
+  CLICKHOUSE_PASSWORD: "${MANTA_CH_PASS_WRITER:?MANTA_CH_PASS_WRITER is required}"
+x-clickhouse-trainer-env: &clickhouse-trainer-env
+  CLICKHOUSE_USER: manta_ch_trainer
+  CLICKHOUSE_PASSWORD: "${MANTA_CH_PASS_TRAINER:?MANTA_CH_PASS_TRAINER is required}"
+
 services:
   postgres:
     ports: !override
       - "127.0.0.1:5432:5432"
     mem_limit: 1g
     restart: unless-stopped
+    networks:
+      - default
+      - mlflow-internal
 
   clickhouse:
     ports: !override
@@ -55,6 +68,11 @@ services:
     ports: !override
       - "127.0.0.1:6379:6379"
     mem_limit: 256m
+    command: ["redis-server", "--requirepass", "${MANTA_REDIS_PASSWORD:?MANTA_REDIS_PASSWORD is required}"]
+    environment:
+      MANTA_REDIS_PASSWORD: "${MANTA_REDIS_PASSWORD:?MANTA_REDIS_PASSWORD is required}"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$MANTA_REDIS_PASSWORD redis-cli ping | grep -q PONG"]
     restart: unless-stopped
 
   kafka:
@@ -78,6 +96,8 @@ services:
       - "127.0.0.1:9600:5000"
     mem_limit: 384m
     restart: unless-stopped
+    networks:
+      - mlflow-internal
 
   api-gateway:
     ports: !override
@@ -88,9 +108,13 @@ services:
       POSTGRES_DSN: "postgresql://manta_gateway_user:${MANTA_DB_PASS_GATEWAY:?MANTA_DB_PASS_GATEWAY is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
+      <<: *clickhouse-writer-env
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: "${MANTA_REDIS_PASSWORD:?MANTA_REDIS_PASSWORD is required}"
 
   data-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -98,6 +122,7 @@ services:
 
   timeline-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -105,6 +130,7 @@ services:
 
   pro-timeline-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -112,6 +138,7 @@ services:
 
   league-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -119,6 +146,7 @@ services:
 
   pro-replay-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -126,6 +154,7 @@ services:
 
   stratz-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -133,6 +162,7 @@ services:
 
   candidates-collector:
     environment:
+      <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
       S3_ACCESS_KEY: manta_ingest
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
@@ -140,6 +170,7 @@ services:
 
   report-generator:
     environment:
+      <<: *clickhouse-reader-env
       POSTGRES_DSN: "postgresql://manta_reports_user:${MANTA_DB_PASS_REPORTS:?MANTA_DB_PASS_REPORTS is required}@postgres:5432/manta"
       S3_ACCESS_KEY: ""
       S3_SECRET_KEY: ""
@@ -147,30 +178,40 @@ services:
 
   parser-svc:
     environment:
+      <<: *clickhouse-writer-env
       S3_ACCESS_KEY: manta_parser
       S3_SECRET_KEY: "${MANTA_S3_PASS_PARSER:?MANTA_S3_PASS_PARSER is required}"
     restart: unless-stopped
 
   feature-extractor:
     environment:
+      <<: *clickhouse-writer-env
       S3_ACCESS_KEY: ""
       S3_SECRET_KEY: ""
     restart: unless-stopped
 
   ml-service:
     environment:
+      <<: *clickhouse-reader-env
       S3_ACCESS_KEY: manta_model_reader
       S3_SECRET_KEY: "${MANTA_S3_PASS_MODEL_READER:?MANTA_S3_PASS_MODEL_READER is required}"
     ports: !override
       - "127.0.0.1:50051:50051"
     mem_limit: 768m
     restart: unless-stopped
+    networks:
+      - default
+      - mlflow-internal
 
   ml-autotrain:
     environment:
+      <<: *clickhouse-trainer-env
       S3_ACCESS_KEY: manta_model_writer
       S3_SECRET_KEY: "${MANTA_S3_PASS_MODEL_WRITER:?MANTA_S3_PASS_MODEL_WRITER is required}"
     restart: unless-stopped
+    networks:
+      - default
+      - mlflow-internal
 
   frontend:
     ports: !override
@@ -189,3 +230,7 @@ services:
       - "127.0.0.1:3001:3000"
     mem_limit: 256m
     restart: unless-stopped
+
+networks:
+  mlflow-internal:
+    internal: true

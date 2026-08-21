@@ -125,6 +125,8 @@ def test_both_files_get_the_same_password(tmp_path):
 SERVICE_PASSWORDS = (
     "MANTA_DB_PASS_COLLECTOR", "MANTA_DB_PASS_REPORTS",
     "MANTA_DB_PASS_GATEWAY", "MANTA_DB_PASS_RO",
+    "MANTA_CH_PASS_READER", "MANTA_CH_PASS_WRITER",
+    "MANTA_CH_PASS_TRAINER", "MANTA_REDIS_PASSWORD",
 )
 
 
@@ -808,6 +810,13 @@ def test_postgres_users_exist_before_application_containers_start():
     src = _functions("start_stack")
     assert (src.index('$COMPOSE up -d') < src.rindex("pg-migrate.sh") <
             src.rindex("create-db-users.sh") <
+            src.rindex("$COMPOSE --profile apps"))
+
+
+def test_clickhouse_users_exist_before_application_containers_start():
+    src = _functions("start_stack")
+    assert (src.index('$COMPOSE up -d') < src.rindex("ch-migrate.sh") <
+            src.rindex("create-clickhouse-users.sh") <
             src.rindex("$COMPOSE --profile apps"))
 
 
