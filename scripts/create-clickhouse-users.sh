@@ -25,9 +25,9 @@ CREATE ROLE IF NOT EXISTS manta_reader;
 CREATE ROLE IF NOT EXISTS manta_writer;
 CREATE ROLE IF NOT EXISTS manta_trainer;
 
-REVOKE IF EXISTS ALL ON *.* FROM manta_reader;
-REVOKE IF EXISTS ALL ON *.* FROM manta_writer;
-REVOKE IF EXISTS ALL ON *.* FROM manta_trainer;
+REVOKE ALL ON *.* FROM manta_reader;
+REVOKE ALL ON *.* FROM manta_writer;
+REVOKE ALL ON *.* FROM manta_trainer;
 GRANT SELECT ON manta.* TO manta_reader;
 GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON manta.* TO manta_writer;
 GRANT SELECT ON manta.* TO manta_trainer;
