@@ -35,9 +35,10 @@ def test_writer_has_runtime_mutations_but_no_schema_admin():
 def test_rerun_resets_role_grants_and_passwords():
     text = script()
     for role in ("reader", "writer", "trainer"):
-        assert f"REVOKE IF EXISTS ALL ON *.* FROM manta_{role};" in text
+        assert f"REVOKE ALL ON *.* FROM manta_{role};" in text
         assert f"ALTER USER manta_ch_{role} IDENTIFIED WITH sha256_hash" in text
         assert f"ALTER USER manta_ch_{role} DEFAULT ROLE manta_{role};" in text
+    assert "REVOKE IF EXISTS" not in text
 
 
 def test_plaintext_passwords_are_not_embedded_in_clickhouse_sql():
