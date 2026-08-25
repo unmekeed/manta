@@ -36,7 +36,7 @@ import requests
 import manta_grpc
 from prometheus_client import Counter, Gauge
 
-from registry import registry_from_env
+from registry import ArtifactIntegrityError, registry_from_env
 
 from .dataset import FEATURES, load_from_clickhouse
 from .drift import PSI_SIGNIFICANT, max_psi, psi_report
@@ -218,7 +218,15 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
         return "not-enough-data"
 
     reg = registry_from_env()
-    prod = reg.stage_metadata(MODEL_NAME)
+    try:
+        prod = reg.stage_metadata(MODEL_NAME)
+    except ArtifactIntegrityError as exc:
+        # Легаси-production без digest не является доверенным baseline:
+        # не читаем его метрики/дрейф, но и не блокируем создание новой,
+        # уже подписанной digest-ом версии из текущей витрины.
+        logger.warning("production-модель недоверенная, обучаем замену: %s",
+                       exc)
+        prod = None
     PROD_MATCHES.set((prod or {}).get("dataset", {}).get("matches", 0))
     # Публикуем метрики production КАЖДЫЙ цикл, а не только после
     # переобучения. Иначе после перезапуска процесса (а его перезапускает

@@ -458,7 +458,7 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
     (should_promote). Непродвинутая версия сохраняется в реестре.
     Возвращает (version, promoted, reason).
     """
-    from registry import registry_from_env
+    from registry import ArtifactIntegrityError, registry_from_env
 
     reg = registry_from_env()
     version = reg.push(MODEL_NAME, out_path.read_bytes(), {
@@ -474,7 +474,11 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
     })
     try:
         prod_bytes, _ = reg.resolve(MODEL_NAME, "production")
-    except KeyError:
+    except (KeyError, ArtifactIntegrityError) as exc:
+        if isinstance(exc, ArtifactIntegrityError):
+            logger_.warning(
+                "production-модель недоверенная; кандидат станет новой "
+                "первой доверенной версией: %s", exc)
         prod_bytes = None
 
     if prod_bytes is None:

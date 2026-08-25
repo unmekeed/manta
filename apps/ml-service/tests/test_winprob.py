@@ -198,6 +198,72 @@ def test_autotrain_thresholds(monkeypatch, tmp_path):
     assert len(pushed) == 3
 
 
+def test_autotrain_replaces_legacy_production_without_digest(monkeypatch,
+                                                              tmp_path):
+    """Недоверенный легаси-артефакт не загружается, но не должен навсегда
+    блокировать обучение его доверенной замены."""
+    from registry import ArtifactIntegrityError
+    from training import auto
+
+    monkeypatch.setattr(auto, "_last_trained_n", None)
+
+    class LegacyReg:
+        def stage_metadata(self, name):
+            raise ArtifactIntegrityError("metadata has no artifact_sha256")
+
+    pushed = []
+    monkeypatch.setattr(auto, "load_from_clickhouse",
+                        lambda *a, **k: synth_matches(60))
+    monkeypatch.setattr(auto, "registry_from_env", lambda: LegacyReg())
+    monkeypatch.setattr(auto, "train",
+                        lambda d: {"metrics": {"brier_calibrated": 0.1}})
+    monkeypatch.setattr(auto, "push_with_gate",
+                        lambda art, path, log, ds=None:
+                        (pushed.append(art) or ("v", True, "первая версия")))
+
+    assert auto.check_and_train(20, 50, tmp_path / "model.pkl") == "trained"
+    assert len(pushed) == 1
+
+
+def test_gate_promotes_trusted_replacement_for_legacy_production(monkeypatch,
+                                                                 tmp_path):
+    """После push гейт тоже встречает старый production. Он не должен
+    загружать его для сравнения, но должен продвинуть новый digest-артефакт."""
+    import logging
+    import registry
+    from registry import ArtifactIntegrityError
+    from training.train_winprob import push_with_gate
+
+    promoted = []
+
+    class LegacyReg:
+        def push(self, name, artifact, metadata):
+            return "trusted-v2"
+
+        def resolve(self, name, ref):
+            raise ArtifactIntegrityError("metadata has no artifact_sha256")
+
+        def promote(self, name, version):
+            promoted.append((name, version))
+
+    monkeypatch.setattr(registry, "registry_from_env", lambda: LegacyReg())
+    model = tmp_path / "model.pkl"
+    model.write_bytes(b"new trusted artifact")
+    artifact = {
+        "model_version": "1.0.0",
+        "algo": "test",
+        "features": [],
+        "metrics": {},
+        "dataset": {},
+        "trained_at": "now",
+    }
+
+    version, ok, reason = push_with_gate(
+        artifact, model, logging.getLogger("test"), ds=object())
+    assert (version, ok, reason) == ("trusted-v2", True, "первая версия")
+    assert promoted == [("win_probability", "trusted-v2")]
+
+
 def test_psi_zero_on_same_distribution():
     from training.dataset import FEATURES
     from training.drift import compute_reference, max_psi, psi_report

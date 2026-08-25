@@ -42,6 +42,7 @@ VPS = DEPLOY / "docker-compose.vps.yml"
 NGINX_VPS = DEPLOY / "nginx.vps.conf"
 PROM_BASE = DEPLOY / "monitoring" / "prometheus.yml"
 PROM_VPS = DEPLOY / "monitoring" / "prometheus.vps.yml"
+MLFLOW_DOCKERFILE = DEPLOY / "mlflow.Dockerfile"
 
 
 def _load(path: Path) -> dict:
@@ -343,6 +344,16 @@ def test_mlflow_is_on_an_internal_network_only_with_ml_clients():
     for service, body in services.items():
         if service not in {"postgres", "mlflow", "ml-service", "ml-autotrain"}:
             assert "mlflow-internal" not in (body.get("networks") or {}), service
+
+
+def test_mlflow_postgres_driver_is_baked_into_image():
+    """Internal-сеть не имеет DNS/интернета: runtime pip install зациклит
+    контейнер ещё до запуска MLflow."""
+    mlflow = merged_config()["services"]["mlflow"]
+    assert "pip install" not in mlflow["command"]
+    assert mlflow.get("build"), "MLflow обязан собираться с DB-драйвером"
+    dockerfile = MLFLOW_DOCKERFILE.read_text(encoding="utf-8")
+    assert "psycopg2-binary==" in dockerfile
 
 
 def test_vps_overlay_requires_storage_passwords_without_dev_fallbacks():

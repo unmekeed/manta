@@ -161,20 +161,22 @@ services:
   # проксируются через сервер (--serve-artifacts) — клиентам не нужны
   # S3-креды. Прод-режим (D1): метаданные в postgres (БД mlflow из
   # миграции 004 — прогнать make migrate-pg до первого старта).
-  # Официальный образ без драйвера postgres — ставится на старте.
+  # Официальный образ без драйвера postgres — добавляем его при сборке.
   # Клиенты включают бэкенд переменной REGISTRY_BACKEND=mlflow
   # (по умолчанию — собственный S3-реестр).
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.16.2
-    # Фолбэк на /mlflow/wheels — для сред без прямого выхода в PyPI
-    # (колесо кладётся на volume заранее: pip download psycopg2-binary).
+    image: manta-mlflow:2.16.2-postgres
+    build:
+      context: ..
+      dockerfile: deployments/mlflow.Dockerfile
+    # Драйвер PostgreSQL входит в образ: на VPS MLflow работает во
+    # внутренней Docker-сети без выхода в интернет и не может ставить
+    # зависимости при каждом старте.
     command: >
-      bash -c "(pip install --quiet psycopg2-binary ||
-      pip install --quiet --no-index --find-links /mlflow/wheels psycopg2-binary) && exec
       mlflow server --host 0.0.0.0 --port 5000
       --backend-store-uri postgresql://dota:${MANTA_DB_PASSWORD:-dota_dev_password}@postgres:5432/mlflow
       --artifacts-destination /mlflow/artifacts
-      --serve-artifacts"
+      --serve-artifacts
     ports:
       - "9600:5000"
     volumes:
