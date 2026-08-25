@@ -157,6 +157,17 @@ def test_old_vps_gets_only_missing_service_passwords(tmp_path):
     assert all(password_of(compose, name) for name in SERVICE_PASSWORDS)
 
 
+def test_gateway_keys_dir_is_added_once_and_preserved(tmp_path):
+    rc, out, first, _ = run_secrets(tmp_path)
+    assert rc == 0, out
+    path = password_of(first, "MANTA_KEYS_DIR")
+    assert path.endswith("/manta-keys")
+    rc, out, second, _ = run_secrets(tmp_path, env_compose_body=first)
+    assert rc == 0, out
+    assert password_of(second, "MANTA_KEYS_DIR") == path
+    assert second.count("MANTA_KEYS_DIR=") == 1
+
+
 def test_mismatch_in_host_file_is_reported_not_silently_fixed(tmp_path):
     """Уже заданный чужой пароль не переписывается молча.
 

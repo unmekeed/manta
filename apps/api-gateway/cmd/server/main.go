@@ -26,6 +26,35 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "api-gateway")
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		logger.Error("production_security_invalid", "error", err)
+		os.Exit(1)
+	}
+
+	// Security-конфигурация проверяется ДО любых внешних подключений. Иначе
+	// процесс мог бы успеть открыть зависимости/фоновые циклы, а отсутствие
+	// JWT или TLS обнаружилось бы лишь у самого ListenAndServe.
+	var deny auth.Denylist
+	if d := auth.NewRedisDenylist(cfg.RedisAddr, cfg.RedisPassword); d != nil {
+		defer d.Close()
+		deny = d
+	}
+	authn, err := auth.New(deny)
+	if err != nil {
+		logger.Error("auth_init_failed", "error", err)
+		os.Exit(1)
+	}
+	if cfg.Production && !authn.Enabled() {
+		logger.Error("production_security_invalid", "error", "JWT verification is disabled")
+		os.Exit(1)
+	}
+	tlsOn := cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""
+	if cfg.Production {
+		if _, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil {
+			logger.Error("production_security_invalid", "error", "TLS keypair: "+err.Error())
+			os.Exit(1)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -67,16 +96,6 @@ func main() {
 	// Аутентификация (Гл. 9.2): ключи из окружения. Без ключей шлюз
 	// работает открыто — это режим локального стенда, и он громко
 	// логируется, чтобы не уехать в прод незамеченным.
-	var deny auth.Denylist
-	if d := auth.NewRedisDenylist(cfg.RedisAddr, cfg.RedisPassword); d != nil {
-		defer d.Close()
-		deny = d
-	}
-	authn, err := auth.New(deny)
-	if err != nil {
-		logger.Error("auth_init_failed", "error", err)
-		os.Exit(1)
-	}
 	switch {
 	case !authn.Enabled():
 		logger.Warn("auth_disabled",
@@ -115,7 +134,6 @@ func main() {
 	// TLS (NFR-SEC-01): минимум 1.3 — понижение версии не допускается,
 	// поэтому MinVersion, а не список шифров. Сертификаты задаются
 	// TLS_CERT_FILE/TLS_KEY_FILE; без них слушаем HTTP (dev-стенд).
-	tlsOn := cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""
 	if tlsOn {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 	}

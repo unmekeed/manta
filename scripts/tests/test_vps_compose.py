@@ -39,6 +39,9 @@ yaml = pytest.importorskip("yaml", reason="PyYAML нужен для разбор
 DEPLOY = Path(__file__).resolve().parents[2] / "deployments"
 BASE = DEPLOY / "docker-compose.yml"
 VPS = DEPLOY / "docker-compose.vps.yml"
+NGINX_VPS = DEPLOY / "nginx.vps.conf"
+PROM_BASE = DEPLOY / "monitoring" / "prometheus.yml"
+PROM_VPS = DEPLOY / "monitoring" / "prometheus.vps.yml"
 
 
 def _load(path: Path) -> dict:
@@ -69,6 +72,7 @@ def merged_config() -> dict:
         "MANTA_CH_PASS_WRITER": "ch-writer-test-password",
         "MANTA_CH_PASS_TRAINER": "ch-trainer-test-password",
         "MANTA_REDIS_PASSWORD": "redis-test-password",
+        "MANTA_KEYS_DIR": "/tmp/manta-test-keys",
     }
     proc = subprocess.run(
         ["docker", "compose", "-f", str(BASE), "-f", str(VPS),
@@ -347,3 +351,44 @@ def test_vps_overlay_requires_storage_passwords_without_dev_fallbacks():
                 "MANTA_CH_PASS_TRAINER", "MANTA_REDIS_PASSWORD"):
         assert f"${{{var}:?" in text
         assert f"${{{var}:-" not in text
+
+
+def test_gateway_is_fail_closed_and_mounts_only_verification_material():
+    gateway = merged_config()["services"]["api-gateway"]
+    env = gateway["environment"]
+    assert env["MANTA_PROD"] == "1"
+    assert env["JWT_PUBLIC_KEY_FILE"] == "/run/manta-secrets/jwt-public.pem"
+    assert "JWT_PRIVATE_KEY_FILE" not in env
+    assert env["TLS_CERT_FILE"] == "/run/manta-secrets/tls-cert.pem"
+    assert env["TLS_KEY_FILE"] == "/run/manta-secrets/tls-key.pem"
+    mounts = {v["target"]: v for v in gateway["volumes"]}
+    assert set(mounts) == {
+        "/run/manta-secrets/jwt-public.pem",
+        "/run/manta-secrets/tls-cert.pem",
+        "/run/manta-secrets/tls-key.pem",
+    }
+    assert all(volume.get("read_only") is True for volume in mounts.values())
+
+
+def test_vps_gateway_is_still_published_only_on_loopback():
+    ports = published(merged_config()["services"]["api-gateway"])
+    assert ports and all(port.get("host_ip") == "127.0.0.1" for port in ports)
+
+
+def test_frontend_and_prometheus_use_verified_gateway_tls():
+    nginx = NGINX_VPS.read_text(encoding="utf-8")
+    assert "proxy_pass https://api-gateway:8080" in nginx
+    assert "proxy_ssl_verify on" in nginx
+    assert "proxy_ssl_trusted_certificate" in nginx
+    assert "proxy_ssl_verify off" not in nginx
+
+    base = yaml.safe_load(PROM_BASE.read_text(encoding="utf-8"))
+    vps = yaml.safe_load(PROM_VPS.read_text(encoding="utf-8"))
+    base_jobs = {job["job_name"] for job in base["scrape_configs"]}
+    vps_jobs = {job["job_name"] for job in vps["scrape_configs"]}
+    assert vps_jobs == base_jobs, "VPS monitoring config drifted from base jobs"
+    gateway = next(job for job in vps["scrape_configs"]
+                   if job["job_name"] == "api-gateway")
+    assert gateway["scheme"] == "https"
+    assert gateway["tls_config"]["server_name"] == "api-gateway"
+    assert gateway["tls_config"]["ca_file"].endswith("tls-cert.pem")
