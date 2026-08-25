@@ -58,6 +58,9 @@ services:
     mem_limit: 3g
     environment:
       CLICKHOUSE_SKIP_USER_SETUP: 0
+      # The official image applies this flag to CLICKHOUSE_USER (`dota`),
+      # enabling bootstrap to create the least-privilege roles and users.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ulimits:
       nofile:
         soft: 262144

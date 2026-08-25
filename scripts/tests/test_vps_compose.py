@@ -353,6 +353,11 @@ def test_vps_overlay_requires_storage_passwords_without_dev_fallbacks():
         assert f"${{{var}:-" not in text
 
 
+def test_clickhouse_bootstrap_admin_can_manage_service_identities():
+    clickhouse = merged_config()["services"]["clickhouse"]
+    assert clickhouse["environment"]["CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT"] == "1"
+
+
 def test_gateway_is_fail_closed_and_mounts_only_verification_material():
     gateway = merged_config()["services"]["api-gateway"]
     env = gateway["environment"]
