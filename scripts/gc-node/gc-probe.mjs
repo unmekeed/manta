@@ -77,7 +77,7 @@ const DetailsResponse = root.lookupType('CMsgGCMatchDetailsResponse');
 
 function parseArgs(argv) {
   const out = { limit: 100, delay: 1000, stopAfter: 5, idsFile: null,
-                verify: 0 };
+                verify: 0, cooldown: 0, cooldowns: 3 };
   for (let i = 0; i < argv.length; i++) {
     const next = () => argv[++i];
     switch (argv[i]) {
@@ -86,6 +86,8 @@ function parseArgs(argv) {
       case '--delay': out.delay = Number(next()); break;
       case '--stop-after': out.stopAfter = Number(next()); break;
       case '--verify': out.verify = Number(next()); break;
+      case '--cooldown': out.cooldown = Number(next()); break;
+      case '--cooldowns': out.cooldowns = Number(next()); break;
       default:
         console.error(`неизвестный аргумент: ${argv[i]}`);
         process.exit(2);
@@ -166,7 +168,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stats = {
   asked: 0, withSalt: 0, noSalt: 0, refused: 0, silent: 0,
   clusters: new Map(), firstFailureAt: null, salts: [],
-  saltsOk: 0, saltsBad: 0,
+  saltsOk: 0, saltsBad: 0, revived: 0, cooled: 0,
 };
 
 function note(cluster) {
@@ -268,8 +270,22 @@ function report() {
   console.log(`без соли:        ${stats.noSalt}`);
   console.log(`отказ GC:        ${stats.refused}`);
   console.log(`молчание:        ${stats.silent}`);
+  // Общий темп считать по всем запросам нельзя: неотвеченный стоит
+  // пятнадцати секунд таймаута, и «8.5 запросов/мин» на живом прогоне
+  // описывало не Valve, а нашу собственную арифметику ожидания.
+  const spentWaiting = stats.cooled * args.cooldown;
+  const working = Math.max(seconds - spentWaiting, 1);
   console.log(`время:           ${seconds.toFixed(0)} с ` +
-              `(${(stats.asked / (seconds / 60)).toFixed(1)} запросов/мин)`);
+              (spentWaiting ? `(из них передышек ${spentWaiting} с)` : ''));
+  console.log(`темп по ответам: ` +
+              `${(stats.withSalt / (working / 60)).toFixed(1)} солей/мин`);
+  if (stats.cooled) {
+    console.log(`передышек:       ${stats.cooled}, ` +
+                `ожил после ${stats.revived}`);
+    console.log(stats.revived
+      ? '  → GC оживает после паузы: упирались в ТЕМП, лечится задержкой'
+      : '  → после паузы не ожил: похоже на исчерпанный БЮДЖЕТ, не темп');
+  }
   if (stats.saltsOk || stats.saltsBad) {
     console.log(`соль качается:   ${stats.saltsOk} из ` +
                 `${stats.saltsOk + stats.saltsBad} проверенных`);
@@ -311,6 +327,7 @@ client.on('loggedOn', async () => {
 
   started = Date.now();
   let inARow = 0;
+  let revivedPending = false;
   for (const id of ids) {
     stats.asked++;
     const res = await requestDetails(id);
@@ -327,12 +344,33 @@ client.on('loggedOn', async () => {
       } else { stats.noSalt++; }
       note(m.cluster);
       inARow = 0;
+      if (revivedPending) { stats.revived++; revivedPending = false; }
     } else {
       if (res.kind === 'silent') stats.silent++; else stats.refused++;
       if (stats.firstFailureAt === null) stats.firstFailureAt = stats.asked;
       inARow++;
       if (inARow >= args.stopAfter) {
-        console.log(`\n${inARow} отказов подряд — дальше не идём.`);
+        // РАЗВИЛКА ЗАМЕРА, а не защита от зацикливания.
+        //
+        // GC не отказывает словами — он замолкает, и молчание одинаково
+        // выглядит и когда мы спрашиваем слишком часто, и когда выбрали
+        // суточный бюджет. Различить можно только временем: подождать и
+        // спросить снова. Ожил — дело в темпе, лечится паузой. Не ожил —
+        // бюджет исчерпан, и одним аккаунтом путь не закрыть.
+        //
+        // Без этой паузы замер обрывался на первой же серии молчаний и
+        // отвечал «потолок такой-то», не различив две совершенно разные
+        // причины.
+        if (args.cooldown > 0 && stats.cooled < args.cooldowns) {
+          stats.cooled++;
+          console.log(`\n${inARow} подряд без ответа — жду ${args.cooldown} с ` +
+                      `(передышка ${stats.cooled}/${args.cooldowns})…`);
+          await sleep(args.cooldown * 1000);
+          inARow = 0;
+          revivedPending = true;
+          continue;
+        }
+        console.log(`\n${inARow} подряд без ответа — дальше не идём.`);
         break;
       }
     }
