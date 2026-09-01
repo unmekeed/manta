@@ -76,7 +76,8 @@ const DetailsResponse = root.lookupType('CMsgGCMatchDetailsResponse');
 // -- аргументы ----------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { limit: 100, delay: 1000, stopAfter: 5, idsFile: null };
+  const out = { limit: 100, delay: 1000, stopAfter: 5, idsFile: null,
+                verify: 0 };
   for (let i = 0; i < argv.length; i++) {
     const next = () => argv[++i];
     switch (argv[i]) {
@@ -84,12 +85,41 @@ function parseArgs(argv) {
       case '--limit': out.limit = Number(next()); break;
       case '--delay': out.delay = Number(next()); break;
       case '--stop-after': out.stopAfter = Number(next()); break;
+      case '--verify': out.verify = Number(next()); break;
       default:
         console.error(`неизвестный аргумент: ${argv[i]}`);
         process.exit(2);
     }
   }
   return out;
+}
+
+// Ссылка на реплей: кластер, номер матча и соль. Формат Valve, и переврать
+// его легко — а цена ошибки в том, что «соль не работает» и «мы неверно
+// собрали адрес» выглядят одинаково: 404 в обоих случаях.
+function replayUrl(cluster, matchId, salt) {
+  return `http://replay${cluster}.valve.net/570/${matchId}_${salt}.dem.bz2`;
+}
+
+// Проверка соли БЕЗ скачивания: просим первый байт. Реплей весит 58 МиБ,
+// и качать их ради проверки формата — трата канала на вопрос, который
+// решается заголовком.
+//
+// Ответ 200/206 — соль настоящая и файл на месте. 404 — соль неверна ЛИБО
+// реплей у Valve уже удалён (он живёт около двух недель), и различить эти
+// два случая по коду нельзя: смотреть надо на возраст матча.
+async function checkSalt(cluster, matchId, salt, timeoutMs = 15000) {
+  const url = replayUrl(cluster, matchId, salt);
+  const stop = AbortSignal.timeout(timeoutMs);
+  try {
+    const resp = await fetch(url, { headers: { Range: 'bytes=0-0' },
+                                    signal: stop });
+    return { ok: resp.status === 200 || resp.status === 206,
+             status: resp.status, url };
+  } catch (err) {
+    return { ok: false, status: err.name === 'TimeoutError' ? 'таймаут'
+                                                            : err.message, url };
+  }
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -135,7 +165,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const stats = {
   asked: 0, withSalt: 0, noSalt: 0, refused: 0, silent: 0,
-  clusters: new Map(), firstFailureAt: null,
+  clusters: new Map(), firstFailureAt: null, salts: [],
+  saltsOk: 0, saltsBad: 0,
 };
 
 function note(cluster) {
@@ -210,6 +241,25 @@ async function waitForGC(timeoutMs = 45000) {
   });
 }
 
+// Соль, из которой не скачивается файл, — не соль. Проверять надо
+// ОТДЕЛЬНО от её получения: GC может честно отдать соль к реплею,
+// который Valve уже удалила, и по одному лишь «соль получена» это
+// неотличимо от рабочего случая.
+async function verifySalts(count) {
+  const sample = stats.salts.slice(0, count);
+  if (sample.length === 0) {
+    console.log('\nпроверять нечего: солей на достижимых кластерах нет');
+    return;
+  }
+  console.log(`\nпроверяю ${sample.length} солей на CDN (первый байт)…`);
+  for (const s of sample) {
+    const res = await checkSalt(s.cluster, s.matchId, s.salt);
+    if (res.ok) { stats.saltsOk++; } else { stats.saltsBad++; }
+    console.log(`  ${res.ok ? 'OK ' : 'нет'} матч ${s.matchId} ` +
+                `кластер ${s.cluster} → ${res.status}`);
+  }
+}
+
 function report() {
   const seconds = (Date.now() - started) / 1000;
   console.log('\n=== ЗАМЕР GC ===');
@@ -220,6 +270,10 @@ function report() {
   console.log(`молчание:        ${stats.silent}`);
   console.log(`время:           ${seconds.toFixed(0)} с ` +
               `(${(stats.asked / (seconds / 60)).toFixed(1)} запросов/мин)`);
+  if (stats.saltsOk || stats.saltsBad) {
+    console.log(`соль качается:   ${stats.saltsOk} из ` +
+                `${stats.saltsOk + stats.saltsBad} проверенных`);
+  }
   if (stats.firstFailureAt !== null) {
     console.log(`первый отказ на: ${stats.firstFailureAt}-м запросе`);
   }
@@ -231,6 +285,11 @@ function report() {
   }
   console.log('\nСоль без достижимого кластера бесполезна: проверьте, что');
   console.log('матчи, которые вы собираетесь качать, лежат не на 4xx.');
+  if (stats.refused + stats.silent === 0) {
+    console.log('\nОтказов не было НИ ОДНОГО — значит потолок Valve не найден,');
+    console.log(`а темп выше — это наша пауза ${args.delay} мс. Чтобы найти`);
+    console.log('потолок, нужен прогон длиннее и с меньшей паузой.');
+  }
 }
 
 let started = Date.now();
@@ -257,7 +316,15 @@ client.on('loggedOn', async () => {
     const res = await requestDetails(id);
     if (res.kind === 'ok' && res.response.result === 1 && res.response.match) {
       const m = res.response.match;
-      if (m.replay_salt) { stats.withSalt++; } else { stats.noSalt++; }
+      if (m.replay_salt) {
+        stats.withSalt++;
+        // Копим только достижимые кластеры: проверять 4xx незачем, до
+        // них нет маршрута, и таймауты съели бы всю проверку.
+        if (!String(m.cluster).startsWith('4')) {
+          stats.salts.push({ cluster: m.cluster, matchId: m.match_id,
+                             salt: m.replay_salt });
+        }
+      } else { stats.noSalt++; }
       note(m.cluster);
       inARow = 0;
     } else {
@@ -276,6 +343,7 @@ client.on('loggedOn', async () => {
     await sleep(args.delay);
   }
 
+  if (args.verify > 0) await verifySalts(args.verify);
   report();
   client.logOff();
   process.exit(0);
