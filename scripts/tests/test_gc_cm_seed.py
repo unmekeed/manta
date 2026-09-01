@@ -200,6 +200,89 @@ def test_nothing_reachable_leaves_the_client_untouched(monkeypatch):
     assert client.cm_servers.items == ["старое-мёртвое"]
 
 
+# -- перебор CM при входе ------------------------------------------------------
+
+class FakeEResult:
+    OK = 1
+    TryAnotherCM = 48
+    ServiceUnavailable = 20
+    Busy = 2
+    InvalidPassword = 5
+
+
+class RotatingClient(FakeClient):
+    def __init__(self, addr="cm-1"):
+        super().__init__()
+        self.current_server_addr = addr
+        self.cm_servers.bad = []
+        self.cm_servers.mark_bad = self.cm_servers.bad.append
+        self.disconnects = 0
+
+    def disconnect(self):
+        self.disconnects += 1
+
+
+def test_try_another_cm_is_a_redirect_not_a_refusal():
+    """ГЛАВНОЕ утверждение спринта.
+
+    TryAnotherCM Valve шлёт штатно — так она разводит нагрузку. Настоящий
+    клиент просто идёт к следующему серверу. Считать это отказом входа
+    значило бросать работу на ровном месте: аккаунт не отвергнут, его
+    перенаправили. Именно так замер и падал после того, как научился
+    подключаться.
+    """
+    answers = iter([FakeEResult.TryAnotherCM, FakeEResult.OK])
+    client = RotatingClient()
+    got = gc.login_rotating(client, "токен", lambda c, t: next(answers),
+                            FakeEResult, sleep=lambda _: None, log=lambda *a: None)
+    assert got == FakeEResult.OK
+
+
+def test_refusing_server_is_struck_off():
+    """Отказавший CM вычёркивается, иначе перебор ходит по кругу.
+
+    Без `mark_bad` следующая попытка вернулась бы к тому же адресу:
+    попытки кончились бы, а список остался бы нетронутым.
+    """
+    client = RotatingClient(addr="cm-плохой")
+    gc.login_rotating(client, "токен",
+                      lambda c, t: FakeEResult.TryAnotherCM, FakeEResult,
+                      attempts=2, sleep=lambda _: None, log=lambda *a: None)
+    assert client.cm_servers.bad == ["cm-плохой", "cm-плохой"]
+    assert client.disconnects == 2
+
+
+def test_real_refusal_is_not_retried():
+    """Протухший токен перебором не лечится.
+
+    Ходить по всем CM с недействительным токеном — пять одинаковых
+    отказов вместо одного внятного. Ровно эту ошибку спринт 155 чинил в
+    ranks fill: отказ в доступе и отказ сервера — разные вещи.
+    """
+    calls = []
+
+    def login(c, t):
+        calls.append(1)
+        return FakeEResult.InvalidPassword
+
+    got = gc.login_rotating(RotatingClient(), "токен", login, FakeEResult,
+                            sleep=lambda _: None, log=lambda *a: None)
+    assert got == FakeEResult.InvalidPassword
+    assert len(calls) == 1
+
+
+def test_attempts_are_bounded():
+    """Перебор конечен: сервер, отвечающий «попробуй другого» всегда,
+    не должен крутить нас вечно."""
+    calls = []
+    got = gc.login_rotating(RotatingClient(), "токен",
+                            lambda c, t: calls.append(1) or FakeEResult.TryAnotherCM,
+                            FakeEResult, attempts=3,
+                            sleep=lambda _: None, log=lambda *a: None)
+    assert len(calls) == 3
+    assert got == FakeEResult.TryAnotherCM
+
+
 def test_login_seeds_before_connecting():
     """Засев стоит ДО входа, а не после.
 
@@ -207,4 +290,4 @@ def test_login_seeds_before_connecting():
     """
     src = PROBE.read_text(encoding="utf-8")
     assert "seed_cm_servers(steam)" in src
-    assert src.index("seed_cm_servers(steam)") < src.index("login_with_token(steam")
+    assert src.index("seed_cm_servers(steam)") < src.index("login_rotating(steam")

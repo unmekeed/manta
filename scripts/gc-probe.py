@@ -169,6 +169,40 @@ def reachable_cms(pairs, probe=_tcp_probe, limit: int = CM_SEED_LIMIT):
     return found
 
 
+# Ответы CM, означающие «не я, попробуй другого». TryAnotherCM Valve шлёт
+# штатно — так она разводит нагрузку, и настоящий клиент просто идёт к
+# следующему серверу. Считать это отказом входа значит бросать работу на
+# ровном месте: сервер не отверг аккаунт, он перенаправил.
+CM_RETRY_RESULTS = ("TryAnotherCM", "ServiceUnavailable", "Busy")
+CM_LOGIN_ATTEMPTS = 5
+
+
+def login_rotating(client, token, login, eresult, attempts=CM_LOGIN_ATTEMPTS,
+                   sleep=time.sleep, log=print):
+    """Вход с перебором CM. `login(client, token)` возвращает EResult.
+
+    Отказавший сервер вычёркивается (`mark_bad`), соединение рвётся, и
+    следующая попытка идёт к другому. Без вычёркивания перебор мог бы
+    вечно возвращаться к тому же адресу — попытки кончились бы, а список
+    остался бы нетронутым.
+    """
+    retry_on = {getattr(eresult, name) for name in CM_RETRY_RESULTS
+                if hasattr(eresult, name)}
+    last = None
+    for attempt in range(1, attempts + 1):
+        last = login(client, token)
+        if last not in retry_on:
+            return last
+        addr = getattr(client, "current_server_addr", None)
+        if addr:
+            client.cm_servers.mark_bad(addr)
+        client.disconnect()
+        log(f"CM {addr or '?'} не принял ({last!r}) — беру следующий "
+            f"[{attempt}/{attempts}]")
+        sleep(1)
+    return last
+
+
 def seed_cm_servers(client, candidates=None) -> int:
     """Подсунуть клиенту проверенные адреса. Возвращает их число.
 
@@ -517,13 +551,18 @@ def connect():
     print("вход по токену …")
     print("(строки «Failed to parse: NNNNN» ниже — шум устаревших")
     print(" протоколов библиотеки, на замер они не влияют)")
-    result = login_with_token(steam, token)
+    from steam.enums import EResult
+    result = login_rotating(steam, token, login_with_token, EResult)
     if result != 1:                       # EResult.OK
         hint = ""
         if int(result) == 5:              # InvalidPassword
             hint = ("\nПри входе ТОКЕНОМ это значит, что токен отозван или "
                     "просрочен, а не что пароль неверен.\n"
                     "Обновить: make gc-token")
+        elif int(result) == 48:           # TryAnotherCM
+            hint = ("\nВсе засеянные CM ответили «попробуй другого». Список "
+                    "мог устареть — повторите запуск; если повторяется, "
+                    "смотрите docs/HANDOFF.md про вход в Steam.")
         die(f"Steam отказал: {result!r}{hint}")
     print("Steam: вошли")
 
