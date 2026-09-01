@@ -80,6 +80,110 @@ def die(msg: str) -> None:
     raise SystemExit(2)
 
 
+# -- куда стучаться в Steam -------------------------------------------------------
+#
+# ЗАЧЕМ ЭТО ЕСТЬ. Библиотека сама спрашивает у Valve список серверов
+# входа (CM) и получает адреса на порту 27017. С VPS не отвечает ни один
+# из двадцати четырёх — проверено поимённо, все двадцать четыре в
+# таймаут. Вход при этом не падает и не жалуется: `steam` молча ходит по
+# списку и переподключается, а замер стоит десять минут на строке «вход
+# по токену …».
+#
+# При этом сеть в порядке. Node с той же машины входит в Steam без
+# заминки (`make gc-token` прошёл), и TCP до CM на портах 27018 и 27019
+# устанавливается. Мертва не сеть и не аккаунт — мёртв ровно тот набор
+# адресов, который библиотека выбирает себе сама.
+#
+# Поэтому список ей даётся готовый: спрашиваем у Valve обе разновидности,
+# проверяем достижимость сами, оставляем ответившее. Порт 443
+# выбрасывается намеренно — там WebSocket-обвязка, а `steam==1.4.4`
+# говорит только сырым протоколом (websocket в ней нет ни в релизе, ни на
+# master — проверено установкой обоих).
+CM_DIRECTORY = ("https://api.steampowered.com/ISteamDirectory/"
+                "GetCMListForConnect/v1/?cellid={cell}&cmtype={kind}")
+CM_KINDS = ("netfilter", "websockets")
+CM_PROBE_TIMEOUT_S = 3.0
+CM_SEED_LIMIT = 5
+WSS_PORT = 443
+
+
+def _fetch_json(url: str):
+    import json
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        return json.load(resp)
+
+
+def _tcp_probe(host: str, port: int) -> str | None:
+    """IP, к которому удалось подключиться, или None."""
+    import socket
+    try:
+        ip = socket.gethostbyname(host)
+        socket.create_connection((ip, port), timeout=CM_PROBE_TIMEOUT_S).close()
+        return ip
+    except OSError:
+        return None
+
+
+def cm_candidates(fetch=_fetch_json, cell: int = 0) -> list[tuple[str, int]]:
+    """Адреса CM из ОБОИХ списков Valve — без 443 и без повторов.
+
+    Оба списка спрашиваются нарочно: на этой машине сырой протокол ожил
+    на портах из ВЕБСОКЕТНОГО списка. Рассудить «сырому протоколу — сырой
+    список» значило бы отбросить единственное, что работает.
+    """
+    seen: set[tuple[str, int]] = set()
+    out: list[tuple[str, int]] = []
+    for kind in CM_KINDS:
+        try:
+            data = fetch(CM_DIRECTORY.format(cell=cell, kind=kind))
+        except Exception:
+            continue                      # один список молчит — берём второй
+        for row in (data or {}).get("response", {}).get("serverlist", []) or []:
+            endpoint = row.get("endpoint", "") if isinstance(row, dict) else str(row)
+            host, _, port = endpoint.rpartition(":")
+            if not host or not port.isdigit():
+                continue
+            pair = (host, int(port))
+            if pair[1] == WSS_PORT or pair in seen:
+                continue
+            seen.add(pair)
+            out.append(pair)
+    return out
+
+
+def reachable_cms(pairs, probe=_tcp_probe, limit: int = CM_SEED_LIMIT):
+    """Первые `limit` адресов, до которых удалось достучаться.
+
+    Останавливаемся на `limit`, а не проверяем всё: в списке бывает сорок
+    адресов по три секунды таймаута, и полный обход стоил бы двух минут
+    перед каждым входом.
+    """
+    found = []
+    for host, port in pairs:
+        ip = probe(host, port)
+        if ip:
+            found.append((ip, port))
+            if len(found) >= limit:
+                break
+    return found
+
+
+def seed_cm_servers(client, candidates=None) -> int:
+    """Подсунуть клиенту проверенные адреса. Возвращает их число.
+
+    Ноль — не отказ: ничего не нашли, пусть библиотека пробует по-своему.
+    Но сказать об этом надо, иначе следующее десятиминутное молчание
+    опять придётся разгадывать с нуля.
+    """
+    pairs = reachable_cms(cm_candidates() if candidates is None else candidates)
+    if not pairs:
+        return 0
+    client.cm_servers.clear()
+    client.cm_servers.merge_list(pairs)
+    return len(pairs)
+
+
 # -- источник match_id ------------------------------------------------------------
 
 def match_ids_from_queue(limit: int) -> list[int]:
@@ -398,6 +502,12 @@ def connect():
     steam = SteamClient()
     steam.set_credential_location(str(CREDENTIAL_DIR))
     dota = Dota2Client(steam)
+
+    seeded = seed_cm_servers(steam)
+    if seeded:
+        print(f"CM: засеяно {seeded} проверенных адресов")
+    else:
+        print("CM: доступных адресов не нашлось — пробую списком библиотеки")
 
     # Библиотека печатает «Failed to parse: <номер>» на каждое сообщение
     # GC, которого нет в её протоколах: dota2 не обновлялась с 2022 года,
