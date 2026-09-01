@@ -27,6 +27,19 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "vps-bootstrap.sh"
 
 
+def _var(name: str) -> str:
+    """Присваивание верхнего уровня из скрипта — целиком, вместе с именем.
+
+    Записать значение в тест копией значило бы завести вторую точку
+    правды: маркер cron сменится в скрипте, тест останется зелёным на
+    старом, а на машине рядом с новым блоком будет жить старый.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    m = re.search(rf"^{name}=.*$", src, re.M)
+    assert m, f"переменная {name} не найдена в vps-bootstrap.sh"
+    return m.group(0)
+
+
 def _functions(*names: str) -> str:
     src = SCRIPT.read_text(encoding="utf-8")
     out = []
@@ -333,37 +346,134 @@ def test_stack_check_reports_running_containers(tmp_path):
     assert "OK" in out and "7" in out
 
 
+REPO_FAKE = "/tmp/manta"
+CRON_BACKUP = f"30 3 * * * cd {REPO_FAKE} && ./scripts/backup.sh"
+CRON_PEER = f"0 4 * * * cd {REPO_FAKE} && ./scripts/peer-sync.sh"
+CRON_BEAT = f"0 9 * * * cd {REPO_FAKE} && ./scripts/heartbeat.sh"
+
+
+def run_cron(tmp_path, *, existing="", peers="", check_only="0"):
+    """Прогнать setup_cron со стабом crontab. Возвращает (вывод, расписание).
+
+    Стаб хранит расписание в файле: `crontab -l` читает, `crontab -`
+    перезаписывает. Так проверяется не намерение скрипта, а то, что в
+    итоге оказалось у машины, — разница, на которой этот проект уже
+    обжигался (файл `sshd_config.d` был записан, а настройка не
+    применилась).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("grep", "bash", "cat"):
+        link = bin_dir / tool
+        if not link.exists():
+            link.symlink_to(shutil.which(tool))
+    cronfile = tmp_path / "crontab.txt"
+    cronfile.write_text(existing, encoding="utf-8")
+    (bin_dir / "crontab").write_text(
+        "#!/usr/bin/env bash\n"
+        f'F="{cronfile}"\n'
+        'if [ "$1" = "-l" ]; then cat "$F"; exit 0; fi\n'
+        'cat > "$F"\n', encoding="utf-8")
+    (bin_dir / "crontab").chmod(0o755)
+
+    harness = f"""
+set -uo pipefail
+export PATH="{bin_dir}"
+CHECK_ONLY={check_only}
+REPO={REPO_FAKE}
+MANTA_PEER_HOSTS={shlex.quote(peers)}
+say()  {{ printf '\\n>> %s\\n' "$1"; }}
+ok()   {{ printf '   OK   %s\\n' "$1"; }}
+warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
+load_host_settings() {{ :; }}
+{_var("CRON_MARKER")}
+{_functions("cron_wanted", "cron_mine", "cron_foreign", "setup_cron")}
+setup_cron
+"""
+    proc = subprocess.run([shutil.which("bash"), "-c", harness],
+                          capture_output=True, text=True,
+                          env={"PATH": str(bin_dir)})
+    return proc.stdout + proc.stderr, cronfile.read_text(encoding="utf-8")
+
+
 def test_cron_check_speaks_when_already_configured(tmp_path):
     """Настроенный cron — тоже повод сказать, а не промолчать.
 
     Ветка «уже настроено» самая частая: её видят на каждом повторном
     прогоне. Промолчи она — раздел выглядел бы непроверенным.
     """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    for tool in ("grep", "bash"):
-        link = bin_dir / tool
-        if not link.exists():
-            link.symlink_to(shutil.which(tool))
-    (bin_dir / "crontab").write_text(
-        "#!/usr/bin/env bash\necho '# manta-vps'\n", encoding="utf-8")
-    (bin_dir / "crontab").chmod(0o755)
-    harness = f"""
-set -uo pipefail
-export PATH="{bin_dir}"
-CHECK_ONLY=1
-REPO=/tmp/manta
-say()  {{ printf '\\n>> %s\\n' "$1"; }}
-ok()   {{ printf '   OK   %s\\n' "$1"; }}
-warn() {{ printf '   ВНИМАНИЕ %s\\n' "$1"; }}
-{_functions("setup_cron")}
-setup_cron
-"""
-    proc = subprocess.run([shutil.which("bash"), "-c", harness],
-                          capture_output=True, text=True,
-                          env={"PATH": str(bin_dir)})
-    out = proc.stdout + proc.stderr
+    marker = _var("CRON_MARKER").split("=", 1)[1].strip('"')
+    out, _ = run_cron(tmp_path, check_only="1",
+                      existing=f"{marker}\n{CRON_BACKUP}\n{CRON_BEAT}\n")
     assert "OK" in out, out
+
+
+def test_single_machine_gets_no_exchange_job(tmp_path):
+    """ГЛАВНОЕ утверждение спринта.
+
+    Обмен нужен двум собирающим машинам. На одиночной он падал бы каждую
+    ночь в 04:00 и слал бы красный алерт в Telegram — ложную тревогу по
+    расписанию, которая учит не читать канал.
+    """
+    out, cron = run_cron(tmp_path, peers="")
+    assert CRON_BACKUP in cron and CRON_BEAT in cron
+    assert "peer-sync" not in cron, cron
+    assert "обмена нет" in out
+
+
+def test_peers_bring_the_exchange_job_back(tmp_path):
+    """Обратная сторона: с соседями обмен обязан появиться.
+
+    Без этой проверки мутация «никогда не ставить обмен» прошла бы мимо, и
+    вторая машина молча не получала бы чужие слепки.
+    """
+    out, cron = run_cron(tmp_path, peers="pc2")
+    assert CRON_PEER in cron, cron
+
+
+def test_existing_schedule_is_repaired_not_left_alone(tmp_path):
+    """Правка обязана доехать до УЖЕ настроенной машины.
+
+    Прежняя версия выходила по первому совпадению с маркером: расписание,
+    заведённое старым скриптом, оставалось прежним навсегда. Правки
+    доезжали до чистых машин и не доезжали до работающих — ровно та беда,
+    которую в спринтах 159–161 чинили тремя отдельными коммитами уже на
+    живой VPS.
+
+    Здесь на машине лежит старое расписание С обменом, а соседей больше
+    нет. Строка обязана исчезнуть.
+    """
+    marker = _var("CRON_MARKER").split("=", 1)[1].strip('"')
+    old = f"{marker}\n{CRON_BACKUP}\n{CRON_PEER}\n{CRON_BEAT}\n"
+    out, cron = run_cron(tmp_path, existing=old, peers="")
+    assert "peer-sync" not in cron, cron
+    assert CRON_BACKUP in cron and CRON_BEAT in cron
+
+
+def test_foreign_cron_lines_survive(tmp_path):
+    """Чужие задачи в crontab не наши, и трогать их нельзя.
+
+    Скрипт переписывает crontab целиком — значит обязан вернуть на место
+    всё, что писал не он. Потерять чужую строку молча легко, а заметить
+    пропажу можно и через месяц.
+    """
+    foreign = "0 5 * * * /usr/local/bin/чужая-задача"
+    out, cron = run_cron(tmp_path, existing=f"{foreign}\n", peers="")
+    assert foreign in cron, cron
+
+
+def test_cron_setup_is_idempotent(tmp_path):
+    """Второй прогон ничего не меняет и говорит «уже настроено».
+
+    Скрипт задуман идемпотентным, и расписание — то место, где нарушение
+    заметно не сразу: дубли строк множат ночные задачи.
+    """
+    out1, cron1 = run_cron(tmp_path, peers="pc2")
+    cronfile = tmp_path / "crontab.txt"
+    out2, cron2 = run_cron(tmp_path, existing=cron1, peers="pc2")
+    assert cron1 == cron2, f"{cron1!r} != {cron2!r}"
+    assert "уже настроен" in out2
+    assert cron2.count("peer-sync") == 1
 
 
 def test_no_check_section_is_completely_mute(tmp_path):
@@ -979,8 +1089,15 @@ def test_check_mode_is_not_mute_about_what_is_missing(tmp_path):
 # -- правила, из-за которых спринт и случился ---------------------------------
 
 def scheduled_scripts() -> list[Path]:
-    """Скрипты, которые bootstrap ставит в cron."""
-    src = _functions("setup_cron")
+    """Скрипты, которые bootstrap ставит в cron.
+
+    Со спринта 163 само расписание объявляет `cron_wanted`, а `setup_cron`
+    его лишь примиряет с тем, что уже стоит на машине. Смотреть надо в
+    обе: разбор одной только `setup_cron` перестал бы находить хоть
+    что-нибудь — а проверки ниже параметризуются найденным, то есть
+    молча превратились бы в пустое множество.
+    """
+    src = _functions("setup_cron", "cron_wanted")
     found = re.findall(r"\./scripts/([a-z0-9-]+\.sh)", src)
     assert found, "в расписании не нашлось ни одного скрипта"
     return [SCRIPT.parent / name for name in sorted(set(found))]

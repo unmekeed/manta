@@ -124,38 +124,51 @@ fi
 # полезно как ПОДСКАЗКА: когда витрина стоит, а квота цела, ответ на
 # вопрос «квота или коллекторы?» — ровно в этом списке. На вердикт и код
 # возврата секция не влияет.
-echo "== Хостовые процессы (подсказка к диагнозу; вердикт — по данным)"
-down=0
-proc() {
-    if pgrep -f "$2" >/dev/null; then
-        printf '        %-18s %s\n' "$1" "up"
+echo "== Сервисы (подсказка к диагнозу; вердикт — по данным)"
+# Сервис жив, если работает ЛИБО его контейнер, ЛИБО хостовый процесс.
+#
+# Топологии две: дома сервисы поднимает dev-recover.sh процессами, на VPS
+# они живут в Docker. До спринта 163 проверка знала только про первую и на
+# VPS сообщала «11 процессов не запущено» при двадцати работающих
+# контейнерах. Предупреждение, неустранимое на этой машине в принципе, —
+# и оно уходило в Telegram вместе с ежедневным вердиктом сторожа.
+#
+# Топология здесь намеренно НЕ вычисляется. Определять «где мы» значит
+# завести ещё одно предположение, которое однажды разойдётся с
+# действительностью; спросить оба места дешевле и не ошибается.
+down=0; missing=""
+svc() {                       # svc <имя> <контейнер> <шаблон процесса>
+    if docker inspect -f '{{.State.Running}}' "$2" 2>/dev/null | grep -qx true; then
+        printf '        %-18s %s\n' "$1" "up (контейнер)"
+    elif pgrep -f "$3" >/dev/null; then
+        printf '        %-18s %s\n' "$1" "up (процесс)"
     else
         printf '   \033[33m  ?\033[0m %-18s %s\n' "$1" "DOWN"
-        down=$((down + 1))
+        down=$((down + 1)); missing="$missing $1"
     fi
 }
-proc data-collector   "collector --source opendota-public"
-proc timeline-coll.   "collector --source opendota-timeline --interval"
-proc pro-timeline     "collector --source opendota-timeline-pro"
-proc league-coll.     "collector --source opendota-league"
-proc pro-replay       "collector --source opendota --interval"
+svc data-collector     manta-data-collector-1         "collector --source opendota-public"
+svc timeline-coll.     manta-timeline-collector-1     "collector --source opendota-timeline --interval"
+svc pro-timeline       manta-pro-timeline-collector-1 "collector --source opendota-timeline-pro"
+svc league-coll.       manta-league-collector-1       "collector --source opendota-league"
+svc pro-replay         manta-pro-replay-collector-1   "collector --source opendota --interval"
 # STRATZ опционален: без токена этих коллекторов быть и не должно, и
 # отмечать их DOWN было бы ложной тревогой.
 if [ -n "${STRATZ_API_TOKEN:-}" ]; then
-    proc stratz-coll. "collector --source stratz-timeline --interval"
+    svc stratz-coll.   manta-stratz-collector-1       "collector --source stratz-timeline --interval"
     # stratz-timeline-pro намеренно не запускается со спринта 93 — весь
     # про-поток идёт через opendota-timeline-pro. Проверять его здесь
     # значило бы каждый раз поднимать ложную тревогу.
 fi
-proc parser-svc       "^/tmp/parser-svc"
-proc feature-extractor "python3 -u -m extractor"
-proc ml-service       "python3 -u -m app"
-proc report-generator "python3 -u -m reportgen"
-proc auto-train       "python3 -u -m training.auto"
+svc parser-svc         manta-parser-svc-1             "^/tmp/parser-svc"
+svc feature-extractor  manta-feature-extractor-1      "python3 -u -m extractor"
+svc ml-service         manta-ml-service-1             "python3 -u -m app"
+svc report-generator   manta-report-generator-1       "python3 -u -m reportgen"
+svc auto-train         manta-ml-autotrain-1           "python3 -u -m training.auto"
 if [ "$down" -gt 0 ]; then
-    warn "$down процесс(ов) не запущено — если данные стоят, начинать отсюда: make recover"
+    warn "не работают:$missing — если данные стоят, начинать отсюда"
 else
-    ok "все ключевые процессы запущены"
+    ok "все ключевые сервисы работают"
 fi
 
 echo "== Часы хоста vs ClickHouse (WSL2 дрейфует после сна)"
@@ -172,12 +185,36 @@ else
 fi
 
 echo "== Миграции"
-export PGPASSWORD="${PGPASSWORD:-dota_dev_password}"
-applied=$(psql -h "${POSTGRES_HOST:-localhost}" -U "${POSTGRES_USER:-dota}" \
-              -d "${POSTGRES_DB:-manta}" -qtA \
-              -c "SELECT filename FROM SchemaMigrations" 2>/dev/null)
-if [ -z "$applied" ]; then
-    fail "журнал SchemaMigrations пуст/недоступен — make migrate"
+# Postgres спрашивается ЧЕРЕЗ КОНТЕЙНЕР, как и всё остальное в проекте.
+#
+# Здесь стоял хостовый psql с дев-паролем по умолчанию — на VPS такого
+# клиента нет и быть не должно (спринты 143 и 152: инструмент берём
+# оттуда, где он уже есть). Клиента нет → запрос падает → `2>/dev/null`
+# съедает «command not found» → печатается «журнал пуст». Диагноз уводил
+# чинить миграции, которые в полном порядке, и делал вердикт doctor
+# вечным FAIL. В двадцати строках ниже проверка ClickHouse всё это время
+# ходила правильно — через контейнер.
+#
+# «Не смог спросить» и «журнал пуст» — РАЗНЫЕ беды, и различать их
+# обязательно: первое про инструмент, второе про данные.
+# Без `-i`: доктора запускают и из скриптов, и из тестов, где на входе
+# висит труба, которую никто не закроет. `docker exec -i` тянул бы из неё
+# вечно — проверка здоровья, которая сама зависает, хуже отсутствующей.
+# Данные внутрь мы не передаём, весь запрос идёт аргументом `-c`.
+PG_CONTAINER="${PG_CONTAINER:-manta-postgres-1}"
+applied=""
+pg_reachable=0
+if docker exec "$PG_CONTAINER" psql -U "${POSTGRES_USER:-dota}" \
+        -d "${POSTGRES_DB:-manta}" -qtA -c "SELECT 1" >/dev/null 2>&1; then
+    pg_reachable=1
+    applied=$(docker exec "$PG_CONTAINER" psql -U "${POSTGRES_USER:-dota}" \
+                  -d "${POSTGRES_DB:-manta}" -qtA \
+                  -c "SELECT filename FROM SchemaMigrations" 2>/dev/null)
+fi
+if [ "$pg_reachable" = "0" ]; then
+    warn "не смог спросить Postgres ($PG_CONTAINER) — журнал миграций не проверен"
+elif [ -z "$applied" ]; then
+    fail "журнал SchemaMigrations пуст — make migrate"
 else
     for f in infra/migrations/postgres/*.sql; do
         b=$(basename "$f")

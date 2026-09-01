@@ -226,12 +226,50 @@ def test_empty_cloud_is_not_a_failure(tmp_path):
     assert rc == 0
 
 
-def test_peer_allowlist_is_required(tmp_path):
-    """Пустой allowlist не означает «доверять всем»."""
+def test_empty_allowlist_never_means_trust_everyone(tmp_path):
+    """Пустой allowlist не означает «доверять всем».
+
+    Само свойство не менялось со спринта 158: без явного списка не
+    скачивается и не вливается НИЧЕГО. В спринте 163 изменился только
+    вердикт — раньше отказ с красным алертом в Telegram, теперь спокойный
+    выход.
+
+    Причина смены: обмен придуман для двух собирающих машин, а с
+    2026-09-01 машина одна. Обмен стоял в расписании ежесуточно, то есть
+    одиночная машина слала бы «ОБМЕН НЕ УДАЛСЯ» каждую ночь — вечную
+    ложную тревогу, которая учит не читать канал.
+    """
     rc, out, log = run(tmp_path, TWO, label="pc1", peer_hosts="")
-    assert rc != 0
-    assert "MANTA_PEER_HOSTS" in out
+    assert rc == 0
     assert "copy" not in log and "import" not in log
+    assert "не настроен" in out, "молчаливый выход неотличим от работы"
+
+
+def test_disabled_exchange_does_not_alert(tmp_path):
+    """И главное: выключенный обмен не трогает Telegram.
+
+    Без этой проверки предыдущая осталась бы зелёной, даже если бы код
+    по-прежнему слал алерт: код возврата и наличие сообщения — разные
+    вещи, и цена у них разная. Сообщение уходит владельцу в 04:00 каждую
+    ночь.
+    """
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    calls = tmp_path / "curl.log"
+    (bin_dir / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "curl $*" >> "{calls}"\nexit 0\n', encoding="utf-8")
+    (bin_dir / "curl").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "MANTA_TRAIN_ENV": str(tmp_path / "нет.env"),
+           "MANTA_BACKUP_DIR": str(tmp_path),
+           "MANTA_CLOUD_REMOTE": "crypt:manta",
+           "MANTA_PEER_HOSTS": "",
+           "TELEGRAM_BOT_TOKEN": "секрет", "TELEGRAM_CHAT_ID": "1"}
+    proc = subprocess.run(["bash", str(SCRIPT)], capture_output=True,
+                          text=True, env=env, cwd=ROOT)
+    assert proc.returncode == 0
+    assert not calls.exists(), (
+        f"выключенный обмен отправил сообщение: {calls.read_text()}")
 
 
 def test_unknown_peer_aborts_before_download(tmp_path):
