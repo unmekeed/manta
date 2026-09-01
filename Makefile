@@ -225,6 +225,11 @@ gc-login-check: ## Пускает ли Steam НОВЫМ путём аутент�
 	GC_STATE_DIR=$${GC_STATE_DIR:-$(HOME)/.manta-gc-node} \
 	node scripts/gc-node/login-check.mjs
 
+gc-token-login: ## Пускает ли Steam по СОХРАНЁННОМУ токену (пароль не нужен)
+	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
+	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
+	node scripts/gc-node/token-login.mjs
+
 gc-token:      ## Обменять пароль на refresh-токен для замера (нужно редко)
 	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
 	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
