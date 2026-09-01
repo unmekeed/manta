@@ -169,6 +169,11 @@ const stats = {
   asked: 0, withSalt: 0, noSalt: 0, refused: 0, silent: 0,
   clusters: new Map(), firstFailureAt: null, salts: [],
   saltsOk: 0, saltsBad: 0, revived: 0, cooled: 0,
+  // Время и счёт ПОСЛЕ первого молчания. До него бакет был наполнен
+  // простоем, и считать по всему прогону — значит мерить запас, а не
+  // скорость его восполнения. Первый живой замер дал из-за этого 200 из
+  // 200 подряд и вывод «ограничений нет».
+  firstFailureTime: null, afterFailure: 0,
 };
 
 function note(cluster) {
@@ -279,12 +284,46 @@ function report() {
               (spentWaiting ? `(из них передышек ${spentWaiting} с)` : ''));
   console.log(`темп по ответам: ` +
               `${(stats.withSalt / (working / 60)).toFixed(1)} солей/мин`);
+  // Установившаяся скорость: считается ПОСЛЕ первого молчания.
+  //
+  // До него бакет наполнен простоем, и счёт по всему прогону меряет
+  // ЗАПАС, а не скорость его восполнения. Первый живой замер дал из-за
+  // этого 200 подряд и вывод «ограничений нет», а следующий сломался на
+  // пятом запросе при той же самой паузе.
+  if (stats.firstFailureTime !== null) {
+    const after = (Date.now() - stats.firstFailureTime) / 1000;
+    const perMin = stats.afterFailure / (after / 60);
+    console.log(`после первого молчания: ${stats.afterFailure} солей за ` +
+                `${after.toFixed(0)} с`);
+    console.log(`установившийся темп:    ${perMin.toFixed(2)} солей/мин ` +
+                `≈ ${Math.round(perMin * 60 * 24)} в сутки`);
+  }
+
   if (stats.cooled) {
     console.log(`передышек:       ${stats.cooled}, ` +
                 `ожил после ${stats.revived}`);
-    console.log(stats.revived
-      ? '  → GC оживает после паузы: упирались в ТЕМП, лечится задержкой'
-      : '  → после паузы не ожил: похоже на исчерпанный БЮДЖЕТ, не темп');
+    // Вердикт по ДВУМ признакам, а не по одному.
+    //
+    // Первая версия печатала «упирались в темп» на одном лишь «ожил
+    // после паузы» — и ошиблась. Пауза была та же секундная, что в
+    // прогоне, прошедшем 200 из 200; сломалось на пятом запросе. Темп
+    // одинаковый, поведение противоположное, значит дело не в нём.
+    //
+    // «Ожил, дал немного и снова замолчал» — это бакет с медленным
+    // восполнением: копится в простое, тратится залпом, дальше отдаёт по
+    // капле. «Ожил и пошёл ровно» — вот это темп.
+    const perRevival = stats.revived ? stats.afterFailure / stats.revived : 0;
+    if (!stats.revived) {
+      console.log('  → после пауз не ожил: похоже на исчерпанный БЮДЖЕТ');
+    } else if (perRevival >= args.stopAfter * 2) {
+      console.log('  → после паузы идёт ровно: упирались в ТЕМП, ' +
+                  'лечится задержкой');
+    } else {
+      console.log(`  → после паузы отдаёт по ${perRevival.toFixed(1)} и снова ` +
+                  'молчит:');
+      console.log('    это НАКОПИТЕЛЬ, а не предел частоты. Смысл имеет не');
+      console.log('    пауза между запросами, а установившийся темп выше.');
+    }
   }
   if (stats.saltsOk || stats.saltsBad) {
     console.log(`соль качается:   ${stats.saltsOk} из ` +
@@ -344,10 +383,14 @@ client.on('loggedOn', async () => {
       } else { stats.noSalt++; }
       note(m.cluster);
       inARow = 0;
+      if (stats.firstFailureTime !== null) stats.afterFailure++;
       if (revivedPending) { stats.revived++; revivedPending = false; }
     } else {
       if (res.kind === 'silent') stats.silent++; else stats.refused++;
-      if (stats.firstFailureAt === null) stats.firstFailureAt = stats.asked;
+      if (stats.firstFailureAt === null) {
+        stats.firstFailureAt = stats.asked;
+        stats.firstFailureTime = Date.now();
+      }
       inARow++;
       if (inARow >= args.stopAfter) {
         // РАЗВИЛКА ЗАМЕРА, а не защита от зацикливания.
