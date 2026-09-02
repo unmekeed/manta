@@ -212,9 +212,21 @@ async function finish(code) {
 }
 
 client.on('loggedOn', async () => {
+  // ОБЯЗАТЕЛЬНО перед любым разговором с GC: объявить, что запустили
+  // Dota 2. Game Coordinator — часть игры, а не Steam; клиенту, который
+  // не «играет», он сессию не поднимает и ClientWelcome не шлёт, сколько
+  // ему ни здоровайся.
+  //
+  // Живой прогон 2026-09-02: наполнитель входил в Steam и молча ждал
+  // сорок пять секунд, потому что при переносе кода из замера эта одна
+  // строка не переехала. Отказ выглядел как «Valve не пускает».
+  client.gamesPlayed([APPID]);
+
   const ready = await waitForGC();
   if (!ready) {
-    console.error('GC не прислал ClientWelcome — сессия не поднялась');
+    console.error('GC не прислал ClientWelcome — сессия не поднялась.');
+    console.error('Аккаунт входит в Steam, но в Dota 2 его не пускают: '
+                  + 'проверьте, что игра есть в библиотеке и аккаунт не ограничен.');
     await finish(1);
     return;
   }
