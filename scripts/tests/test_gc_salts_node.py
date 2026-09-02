@@ -296,3 +296,53 @@ def test_the_day_boundary_is_utc():
     for sql in ("USED_SQL", "SPEND_SQL"):
         body = SRC.split(f"const {sql} = `")[1].split("`;")[0]
         assert "AT TIME ZONE 'UTC'" in body, f"{sql} считает сутки не в UTC"
+
+
+# -- адрес базы (спринт 177) ----------------------------------------------------
+
+def test_the_database_host_is_an_ip_not_localhost():
+    """ГЛАВНОЕ: 127.0.0.1, а НЕ localhost.
+
+    ЖИВОЙ СЛУЧАЙ 2026-09-02, первый прогон на VPS: `connect ECONNREFUSED
+    ::1:5432` при полностью работающей базе. Node с 17-й версии резолвит
+    имена «как отдал резолвер», и для localhost получает сначала ::1, а
+    Postgres опубликован на IPv4-петле (overlay docker-compose.vps.yml
+    держит порты на 127.0.0.1).
+
+    Наполнитель — первый процесс проекта, ходящий в базу С ХОСТА по TCP:
+    коллекторы живут в контейнерах и ходят по имени postgres, а
+    pg-migrate.sh — через docker exec. Поэтому раньше это не всплывало и
+    всплыть не могло.
+    """
+    assert "process.env.POSTGRES_HOST || '127.0.0.1'" in SRC
+    assert "|| 'localhost'" not in SRC, (
+        "localhost резолвится в ::1 раньше 127.0.0.1 — Node 17+")
+
+
+def test_a_failed_connection_says_where_it_knocked():
+    """Отказ называет АДРЕС, а не только код ошибки.
+
+    «ECONNREFUSED» без адреса не отличает «база лежит» от «стучимся не
+    туда» — а живой случай был как раз вторым, и без адреса в сообщении
+    диагноз занял бы вечер.
+    """
+    block = SRC.split("await db.connect();")[1].split("process.exit(2)")[0]
+    for part in ("cfg.host", "cfg.port", "cfg.database"):
+        assert part in block, f"адрес не собирается: нет {part}"
+    # И собранный адрес ДОЛЕТАЕТ до сообщения. Проверка «cfg.host есть в
+    # блоке» смотрела на вычисление, а не на употребление: мутация,
+    # убравшая ${where} из console.error, оставляла вычисление на месте и
+    # проходила незамеченной. Поймано мутацией.
+    printed = [ln for ln in block.splitlines() if "console.error" in ln]
+    assert any("${where}" in ln for ln in printed), (
+        "адрес вычислен, но в сообщение не попал")
+    assert "POSTGRES_HOST" in block, "не сказано, чем чинить"
+
+
+def test_the_database_password_never_reaches_the_output():
+    """И пароль в этот отказ не попадает.
+
+    Сообщение уезжает в лог cron, а при отказе — в Telegram.
+    """
+    block = SRC.split("await db.connect();")[1].split("process.exit(2)")[0]
+    assert "password" not in block

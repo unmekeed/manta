@@ -121,7 +121,16 @@ function dsn() {
   const url = process.env.POSTGRES_DSN;
   if (url) return { connectionString: url };
   return {
-    host: process.env.POSTGRES_HOST || 'localhost',
+    // 127.0.0.1, а НЕ localhost. Node с 17-й версии резолвит имена
+    // «как отдал резолвер» и для localhost получает сначала ::1, а
+    // Postgres опубликован на 127.0.0.1 (overlay docker-compose.vps.yml
+    // держит порты на IPv4-петле). Живой прогон 2026-09-02:
+    // `connect ECONNREFUSED ::1:5432` при работающей базе.
+    //
+    // Наполнитель — первый процесс проекта, ходящий в базу С ХОСТА по
+    // TCP: коллекторы живут в контейнерах и ходят по имени postgres, а
+    // pg-migrate.sh — через docker exec. Поэтому раньше не всплывало.
+    host: process.env.POSTGRES_HOST || '127.0.0.1',
     port: Number(process.env.POSTGRES_PORT || 5432),
     user: process.env.POSTGRES_USER || 'dota',
     password: process.env.POSTGRES_PASSWORD || process.env.MANTA_DB_PASSWORD || '',
@@ -285,7 +294,16 @@ client.on('error', async (err) => {
 try {
   await db.connect();
 } catch (err) {
-  console.error(`ОШИБКА: не подключиться к Postgres: ${err.message}`);
+  // Куда ходили — обязательная часть диагноза. «ECONNREFUSED» без адреса
+  // не отличает «база лежит» от «стучимся не туда», а живой случай был
+  // как раз вторым (::1 вместо 127.0.0.1). Пароль сюда не попадает.
+  const cfg = dsn();
+  const where = cfg.connectionString
+    ? 'POSTGRES_DSN'
+    : `${cfg.host}:${cfg.port}/${cfg.database} от имени ${cfg.user}`;
+  console.error(`ОШИБКА: не подключиться к Postgres (${where}): ${err.message}`);
+  console.error('адрес задаётся POSTGRES_DSN или POSTGRES_HOST/PORT/DB/USER '
+                + `в ${process.env.MANTA_TRAIN_ENV || '~/manta-train.env'}`);
   process.exit(2);
 }
 client.logOn({ refreshToken: token });
