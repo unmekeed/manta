@@ -103,3 +103,58 @@ def test_conditional_collectors_are_gated_like_at_home():
     assert up, "строка подъёма стека не найдена"
     assert any("$profiles" in l for l in up), (
         f"профили вычисляются, но не подставляются в up: {up}")
+
+
+# -- источник по солям (спринт 181) --------------------------------------------
+
+def test_the_salt_collector_is_a_service():
+    """Скачивание по солям поставлено на поток, а не запускается руками.
+
+    Соли добываются по cron ежечасно и накапливаются. Источник, который
+    надо запускать вручную, превращает накопление в долг: очередь растёт,
+    а реплеи — файлы с двухнедельным сроком жизни — успевают протухнуть
+    раньше, чем до них дойдут руки.
+    """
+    # Читаем файл напрямую, а не через `docker compose config`: docker
+    # есть не на всякой машине, где гоняют тесты, и проверка «сервис
+    # объявлен» не должна от него зависеть.
+    svc = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+    assert "salt-collector" in svc
+    assert svc["salt-collector"]["environment"]["COLLECTOR_SOURCE"] == "salts"
+
+
+def test_the_salt_collector_keeps_pace_with_the_miner():
+    """Темп скачивания согласован с темпом добычи.
+
+    Наполнитель берёт 8 солей в час (GC_SALTS_PER_RUN), значит и качать
+    надо 8 в час. Быстрее — очередь пустует и часть времени источник
+    работает вхолостую; медленнее — соли копятся, а реплей у Valve живёт
+    около двух недель, и разница уходит в протухшие ссылки.
+    """
+    filler = (Path(__file__).resolve().parents[1]
+              / "gc-node" / "gc-salts.mjs").read_text(encoding="utf-8")
+    mined = int(re.search(r"GC_SALTS_PER_RUN \|\| (\d+)", filler).group(1))
+
+    compose_text = COMPOSE.read_text(encoding="utf-8")
+    downloaded = int(re.search(r'SALTS_LIMIT: "\$\{SALTS_LIMIT:-(\d+)\}"',
+                               compose_text).group(1))
+    assert downloaded == mined, (
+        f"добываем {mined} солей за прогон, качаем {downloaded} реплеев — "
+        "очередь будет расти или простаивать")
+
+
+def test_the_salt_collector_needs_no_opendota_quota():
+    """У источника нет ключа OpenDota — и это его смысл.
+
+    Он работает ровно тогда, когда суточная квота выбрана и остальные
+    реплейные источники стоят. Появись здесь обращение к OpenDota — это
+    свойство пропало бы, а заметить пропажу было бы нечем: источник
+    продолжал бы качать, просто отказывая в самый нужный момент.
+    """
+    src = (ROOT / "apps" / "data-collector" / "src" / "collector"
+           / "sources" / "salts.py").read_text(encoding="utf-8")
+    # Загрузчик у всех источников общий (распаковка и проверка
+    # целостности написаны один раз), но ЗАПРОСОВ к API тут быть не
+    # должно: адрес уже готов.
+    assert "_match_detail" not in src
+    assert "proMatches" not in src and "publicMatches" not in src

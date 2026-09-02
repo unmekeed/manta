@@ -255,7 +255,10 @@ def build_source(name: str):
         db = psycopg.connect(dsn, autocommit=True)
         return SaltSource(
             SaltStore(db),
-            limit_per_cycle=int(os.getenv("SALTS_LIMIT", "5")),
+            # Восемь за прогон — столько же, сколько наполнитель добывает
+            # солей за час (scripts/gc-salts.sh). При часовом расписании
+            # очередь не растёт и не простаивает.
+            limit_per_cycle=int(os.getenv("SALTS_LIMIT", "8")),
             api_key=api_key, shard=shard)
     if name == "candidates":
         # Своя разбивка: список матчей — от Valve, ранги — из кэша, у

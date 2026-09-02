@@ -171,6 +171,14 @@ services:
       S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
     restart: unless-stopped
 
+  salt-collector:
+    environment:
+      <<: *clickhouse-writer-env
+      POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
+      S3_ACCESS_KEY: manta_ingest
+      S3_SECRET_KEY: "${MANTA_S3_PASS_INGEST:?MANTA_S3_PASS_INGEST is required}"
+    restart: unless-stopped
+
   candidates-collector:
     environment:
       <<: *clickhouse-writer-env

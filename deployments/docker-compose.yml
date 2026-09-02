@@ -32,6 +32,11 @@ x-collector-env:
       # прогон. Источник `parked` запускается вручную, но переменную
       # читает точка входа, а она общая для всех коллекторов.
       PARKED_LIMIT: "${PARKED_LIMIT:-5}"
+      # Скачивание по солям, добытым у GC (спринты 179, 181): сколько
+      # реплеев брать за прогон. Восемь в час согласовано с добычей —
+      # `scripts/gc-salts.sh` берёт столько же солей, — так что очередь
+      # не растёт и не простаивает.
+      SALTS_LIMIT: "${SALTS_LIMIT:-8}"
       # На сколько патчей назад принимаем матчи. Runbook 4a велит
       # поднимать её после выхода патча — до спринта 154 это указание
       # ничего не делало на VPS: переменная в контейнер не доезжала.
@@ -320,6 +325,36 @@ services:
       # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
       # стартовавший, остальные упали бы с «Address already in use».
       METRICS_PORT: "9109"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+
+  salt-collector:
+    # Реплеи по солям, добытым у Game Coordinator (спринт 181).
+    #
+    # Единственный источник, которому НЕ нужна квота OpenDota: соль и
+    # адрес уже лежат в ReplaySalts, их наполняет `scripts/gc-salts.sh`
+    # по cron. Поэтому он работает и тогда, когда суточная квота выбрана
+    # и остальные реплейные источники стоят.
+    #
+    # Темп согласован с добычей: наполнитель берёт 8 солей в час, здесь
+    # 8 реплеев в час — очередь не растёт и не простаивает. Это около
+    # 190 матчей и 11 ГБ в сутки; на диске держится втрое меньше, потому
+    # что REPLAY_RETENTION_DAYS=3 удаляет .dem через трое суток
+    # (спринт 138).
+    profiles: ["apps"]
+    build:
+      context: ..
+      dockerfile: apps/data-collector/Dockerfile
+    environment:
+      <<: [*app-env, *collector-env]
+      COLLECTOR_SOURCE: salts
+      COLLECTOR_INTERVAL_SECONDS: "${SALTS_INTERVAL:-3600}"
+      # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
+      # стартовавший, остальные упали бы с «Address already in use».
+      METRICS_PORT: "9118"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
