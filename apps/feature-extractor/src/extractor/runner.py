@@ -84,6 +84,70 @@ class Extractor:
 
     # -- онлайн Feature Store (Гл. 3.6) ---------------------------------------
 
+    def _carry_over_foreign_columns(self, match_id: int,
+                                    trows: list[dict]) -> None:
+        """Перенести в строки колонки, которых реплейный путь НЕ считает.
+
+        ЗАЧЕМ. MatchTimelineFeatures наполняют ДВА пути, и они считают
+        разное. JSON OpenDota даёт трек F (Roshan, аегис, байбэки,
+        предметы, варды, руны, нейтралки, уровни) плюс tier, avg_rank и
+        patch. Реплей даёт настоящие позиции — position_advance,
+        alive_diff, local_manpower_diff, spread_diff, — которых из JSON
+        точно не получить.
+
+        Беда в том, что таблица ReplacingMergeTree(computed_at) с ключом
+        (match_id, game_time), то есть побеждает последняя строка ЦЕЛИКОМ.
+        Реплей, пришедший вторым, обнулял всё, чего не считает. Молча: ни
+        ошибки, ни лога — просто у матча пропадали сигналы, а вместе с
+        ними patch (он управляет весами строк, A9) и tier (по нему гейт
+        отбирает про-эталон).
+
+        Вскрылось 2026-09-02, когда salt-collector начал качать реплеи
+        матчей, УЖЕ собранных JSON-путём: до него пути почти не
+        пересекались, и дефект спал.
+
+        КАК. Переносится всё, чего мы не посчитали сами, — список берётся
+        из СХЕМЫ таблицы, а не пишется руками. Рукописный перечень
+        разошёлся бы при первой же новой колонке, причём молча: новая
+        фича просто перестала бы переживать разбор реплея.
+        """
+        if not trows:
+            return
+        try:
+            schema = self.ch.select(
+                "SELECT name FROM system.columns"
+                " WHERE database = {db:String} AND table = {t:String}",
+                {"db": self.ch.database, "t": "MatchTimelineFeatures"})
+        except Exception:  # noqa: BLE001
+            # Не смогли спросить схему — вставляем как считали. Потерять
+            # чужие колонки плохо, но не вставить свои хуже: матч остался
+            # бы вовсе без строк.
+            logger.warning("матч %s: схема витрины недоступна, чужие "
+                           "колонки не перенесены", match_id, exc_info=True)
+            return
+        own = set(trows[0]) | {"computed_at"}
+        foreign = [c["name"] for c in schema if c["name"] not in own]
+        if not foreign:
+            return
+        cols = ", ".join(["game_time", *foreign])
+        prev = self.ch.select(
+            f"SELECT {cols} FROM MatchTimelineFeatures FINAL"
+            " WHERE match_id = {m:UInt64}", {"m": match_id})
+        if not prev:
+            return                       # матча ещё не было — переносить нечего
+        by_time = {int(r["game_time"]): r for r in prev}
+        carried = 0
+        for row in trows:
+            old = by_time.get(int(row["game_time"]))
+            if not old:
+                continue
+            for name in foreign:
+                row[name] = old[name]
+            carried += 1
+        logger.info("матч %s: перенесено %d колонок в %d строк "
+                    "(витрину наполняют два пути)",
+                    match_id, len(foreign), carried)
+
     def _push_online(self, match_id: int, trows: list[dict]) -> None:
         """Последний timeline-срез матча → онлайн-слой (view match_timeline).
 
@@ -235,6 +299,7 @@ class Extractor:
                         exc_info=True)
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)
+        self._carry_over_foreign_columns(match_id, trows)
         self.ch.insert_rows("MatchTimelineFeatures", trows)
         self._push_online(match_id, trows)
 
