@@ -42,8 +42,12 @@ def test_gateway_security_is_validated_before_external_connections():
 
 def test_bootstrap_generates_keys_before_starting_stack_and_checks_runtime():
     src = BOOTSTRAP.read_text(encoding="utf-8")
-    tail = src[src.index("# -- поехали") :]
-    assert tail.index("setup_gateway_keys") < tail.index("start_stack")
+    # Со спринта 176 порядок шагов задаёт список STEPS, а не
+    # последовательность вызовов в хвосте: из него же берётся и разбор
+    # --only, чтобы два перечня шагов не разошлись.
+    steps = [e.split(":", 1)[0]
+             for e in src.split("STEPS=(", 1)[1].split(")", 1)[0].split()]
+    assert steps.index("keys") < steps.index("stack"), steps
     runtime = src[src.index("verify_gateway_security()"):
                   src.index("build_images()")]
     for required in ("MANTA_PROD=1", "JWT_PUBLIC_KEY_FILE=",

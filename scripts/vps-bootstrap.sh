@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Развёртывание Manta на чистом VPS (спринт 143).
 #
-#     ./scripts/vps-bootstrap.sh            # полная установка
-#     ./scripts/vps-bootstrap.sh --check    # только проверить готовность
+#     ./scripts/vps-bootstrap.sh              # полная установка
+#     ./scripts/vps-bootstrap.sh --check      # только проверить готовность
+#     ./scripts/vps-bootstrap.sh --only cron  # только один шаг (список: --only ?)
 #
 # Скрипт ИДЕМПОТЕНТЕН: его можно гонять повторно после сбоя или обновления
 # репозитория, ничего не сломается.
@@ -36,12 +37,69 @@ ENV_COMPOSE="$REPO/deployments/.env"
 ENV_HOST="${MANTA_TRAIN_ENV:-$HOME/manta-train.env}"
 COMPOSE="docker compose -f deployments/docker-compose.yml -f deployments/docker-compose.vps.yml"
 CHECK_ONLY=0
-[ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
 say()  { printf '\n>> %s\n' "$1"; }
 ok()   { printf '   OK   %s\n' "$1"; }
 warn() { printf '   ВНИМАНИЕ %s\n' "$1"; }
 die()  { printf '\nОСТАНОВ: %s\n' "$1" >&2; exit 1; }
+
+# Шаги установки: имя для человека — функция, которая его делает. Список
+# ОДИН, из него и порядок прогона, и разбор --only: два перечня шагов
+# однажды разошлись бы, и --only тихо пропускал бы существующий шаг.
+STEPS=(secrets:setup_secrets
+       docker:setup_docker
+       tools:setup_host_tools
+       keys:setup_gateway_keys
+       firewall:setup_firewall
+       stack:start_stack
+       cron:setup_cron)
+
+# --only: выполнить НАЗВАННЫЕ шаги, а не всё подряд (спринт 176).
+#
+# ЗАЧЕМ. Полный прогон пересобирает образы по одному — на двухъядерном
+# VPS это десятки минут. Когда обновилась одна строка расписания, цена
+# «применить правку» оказывалась несоизмерима с правкой, и правку
+# откладывали. Так и вышло в спринтах 159–161: три коммита-починки cron
+# подряд не доезжали до машины, потому что ради них надо было пересобрать
+# весь стек.
+#
+# Установка, которую нельзя применить частично, применяется реже, чем
+# нужно, — а значит машина живёт со старой конфигурацией.
+ONLY=""
+
+step_names() { local s; for s in "${STEPS[@]}"; do printf '%s ' "${s%%:*}"; done; }
+
+for arg in "$@"; do
+    case "$arg" in
+        --check) CHECK_ONLY=1 ;;
+        --only)  ONLY="ЖДУ" ;;
+        --only=*) ONLY="${arg#--only=}" ;;
+        -*) die "неизвестный флаг $arg (есть --check и --only <шаг>)" ;;
+        *) if [ "$ONLY" = "ЖДУ" ]; then ONLY="$arg"
+           else die "лишний аргумент $arg"; fi ;;
+    esac
+done
+[ "$ONLY" = "ЖДУ" ] && die "--only без имени шага. Доступны: $(step_names)"
+if [ "$ONLY" = "?" ]; then
+    printf 'шаги установки: %s\n' "$(step_names)"
+    exit 0
+fi
+# Имена сверяются ДО первого действия. Опечатка в шаге иначе прошла бы
+# как «ничего не делать» — и выглядело бы это как успешная установка.
+if [ -n "$ONLY" ]; then
+    for want in ${ONLY//,/ }; do
+        case " $(step_names)" in
+            *" $want "*) ;;
+            *) die "нет шага «$want». Доступны: $(step_names)" ;;
+        esac
+    done
+fi
+
+wanted_step() {
+    [ -z "$ONLY" ] && return 0
+    case ",$ONLY," in *",$1,"*) return 0 ;; esac
+    return 1
+}
 
 need_root() {
     [ "$(id -u)" = "0" ] || command -v sudo >/dev/null || \
@@ -793,10 +851,13 @@ setup_cron() {
         return
     fi
     { [ -n "$foreign" ] && printf '%s\n' "$foreign"; cron_wanted; } | crontab -
+    # Перечисляется РОВНО то, что поставлено. Баннер, называющий не весь
+    # список, читается как полный: шаг, о котором он молчит, считается
+    # неслучившимся, и его идут заводить руками (или, хуже, не идут).
     if [ -n "${MANTA_PEER_HOSTS:-}" ]; then
-        ok "бэкап 03:30, обмен 04:00, сторож 09:00 (UTC)"
+        ok "бэкап 03:30, обмен 04:00, сторож 09:00, соли GC ежечасно (UTC)"
     else
-        ok "бэкап 03:30, сторож 09:00 (UTC); обмена нет — соседи не заданы"
+        ok "бэкап 03:30, сторож 09:00, соли GC ежечасно (UTC); обмена нет — соседи не заданы"
     fi
 }
 
@@ -807,17 +868,15 @@ echo "  Manta на VPS: $( [ "$CHECK_ONLY" = 1 ] && echo проверка || ech
 echo "  каталог: $REPO"
 echo "=================================================================="
 
-setup_secrets
-setup_docker
-setup_host_tools
-setup_gateway_keys
-setup_firewall
-start_stack
-setup_cron
+for step in "${STEPS[@]}"; do
+    wanted_step "${step%%:*}" && "${step##*:}"
+done
 
 echo
 echo "=================================================================="
-if [ "$CHECK_ONLY" = "1" ]; then
+if [ -n "$ONLY" ]; then
+    echo "  Выполнены только шаги: $ONLY"
+elif [ "$CHECK_ONLY" = "1" ]; then
     echo "  Проверка закончена."
 else
     # Список подсказок собирается ПО СОСТОЯНИЮ машины, а не печатается

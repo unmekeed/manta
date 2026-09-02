@@ -1009,7 +1009,18 @@ def host_tools() -> set[str]:
 
 
 def _host_entries() -> list[str]:
-    return _assignment("HOST_TOOLS").split("(", 1)[1].rstrip(")").split()
+    return _host_entries_of("HOST_TOOLS")
+
+
+def _host_entries_of(name: str) -> list[str]:
+    """Элементы bash-массива верхнего уровня, объявленного в скрипте.
+
+    Массивы в скрипте бывают многострочными (STEPS), поэтому берётся всё
+    от «(» до «)», а не одна строка.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    body = src.split(f"{name}=(", 1)[1].split(")", 1)[0]
+    return body.split()
 
 
 def host_packages() -> set[str]:
@@ -1214,7 +1225,181 @@ def test_tools_are_installed_before_the_schedule_is_written():
     cron уже заведён, а rclone ещё нет. На идемпотентном скрипте это
     мелочь, но именно из таких окон и складывается «вроде всё прошло».
     """
+    # Со спринта 176 порядок задаёт список STEPS, а не последовательность
+    # вызовов в хвосте: из него же берётся и разбор --only, чтобы два
+    # перечня шагов не разошлись.
+    order = [e.split(":", 1)[0] for e in _host_entries_of("STEPS")]
+    assert order.index("tools") < order.index("cron")
     src = SCRIPT.read_text(encoding="utf-8")
     tail = src[src.index("# -- поехали"):]
-    assert tail.index("setup_host_tools") < tail.index("setup_cron")
-    assert tail.index("setup_host_tools") < tail.index("Готово. Дальше")
+    assert tail.index("STEPS") < tail.index("Готово. Дальше")
+
+
+# -- частичная установка (спринт 176) ------------------------------------------
+#
+# ЗАЧЕМ ФЛАГ. Полный прогон пересобирает образы по одному — на двухъядерном
+# VPS это десятки минут. Когда меняется одна строка расписания, цена
+# «применить правку» несоизмерима с правкой, и правку откладывают. Ровно
+# так вышло в спринтах 159–161: три коммита-починки cron подряд не
+# доезжали до машины. Установка, которую нельзя применить частично,
+# применяется реже, чем нужно.
+
+def run_bootstrap(tmp_path, *args):
+    """Прогнать скрипт целиком со стабами вместо всех тяжёлых шагов.
+
+    Подменяются САМИ ФУНКЦИИ шагов: так проверяется настоящий разбор
+    аргументов и настоящий диспетчер, а не их пересказ.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    # Тело шагов заменяем на отметку в лог — до строки «поехали» скрипт
+    # только объявляет, поэтому подмена делается после его загрузки.
+    log = tmp_path / "steps.log"
+    stubs = "\n".join(
+        f'{fn}() {{ echo {name} >> "{log}"; }}'
+        for name, fn in (("secrets", "setup_secrets"), ("docker", "setup_docker"),
+                         ("tools", "setup_host_tools"), ("keys", "setup_gateway_keys"),
+                         ("firewall", "setup_firewall"), ("stack", "start_stack"),
+                         ("cron", "setup_cron")))
+    marker = "# -- поехали ---"
+    head, tail = src.split(marker, 1)
+    patched = head + stubs + "\n" + marker + tail
+    script = tmp_path / "bootstrap.sh"
+    script.write_text(patched, encoding="utf-8")
+    proc = subprocess.run(["bash", str(script), *args], capture_output=True,
+                          text=True, cwd=str(SCRIPT.parent.parent), timeout=60)
+    done = log.read_text(encoding="utf-8").split() if log.exists() else []
+    return proc.returncode, proc.stdout + proc.stderr, done
+
+
+def test_without_flags_every_step_runs(tmp_path):
+    """Страховка от проверки пустоты: без флагов делается всё.
+
+    Проверки ниже смотрят, что шагов стало МЕНЬШЕ; сломайся диспетчер
+    целиком — они прошли бы, а установка не делала бы ничего.
+    """
+    rc, out, done = run_bootstrap(tmp_path)
+    assert rc == 0, out
+    assert done == ["secrets", "docker", "tools", "keys", "firewall",
+                    "stack", "cron"], done
+
+
+def test_only_runs_a_single_step(tmp_path):
+    """ГЛАВНОЕ: --only cron не пересобирает стек.
+
+    Именно сборка образов делает полный прогон дорогим; ради строки в
+    расписании её платить не за что.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--only", "cron")
+    assert rc == 0, out
+    assert done == ["cron"], done
+
+
+def test_only_accepts_several_steps_in_declared_order(tmp_path):
+    """Несколько шагов — через запятую, и порядок берётся из списка.
+
+    Порядок шагов не произволен (пароли раньше стека, стек раньше cron).
+    Выполнять их в том порядке, в каком их назвали, значит разрешить
+    поднять стек до генерации паролей.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--only", "cron,secrets")
+    assert rc == 0, out
+    assert done == ["secrets", "cron"], done
+
+
+def test_a_misspelled_step_stops_instead_of_doing_nothing(tmp_path):
+    """Опечатка — отказ, а не тихое бездействие.
+
+    Пропусти её — прогон закончился бы словами «выполнены только шаги:
+    crn», не сделав ничего, и это выглядело бы как успешная установка.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--only", "crn")
+    assert rc != 0
+    assert done == [], done
+    assert "crn" in out and "cron" in out, "отказ не показывает доступные шаги"
+
+
+def test_the_step_names_are_checked_before_anything_happens(tmp_path):
+    """И проверяется ДО первого действия.
+
+    Иначе «--only secrets,crn» сгенерировал бы пароли и упал — то есть
+    опечатка в конце списка меняла бы состояние машины.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--only", "secrets,crn")
+    assert rc != 0
+    assert done == [], done
+
+
+def test_only_without_a_name_is_refused(tmp_path):
+    """`--only` без шага — не «сделай всё».
+
+    Молчаливое «значит, всё» на оборванной команде запустило бы
+    получасовую пересборку там, где просили один шаг.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--only")
+    assert rc != 0 and done == []
+
+
+def test_an_unknown_flag_is_refused(tmp_path):
+    """Неизвестный флаг не проглатывается.
+
+    Проглоченный `--сheck` с русской «с» выполнил бы полную установку
+    там, где просили проверку.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--chek")
+    assert rc != 0 and done == []
+    assert "--check" in out
+
+
+def test_the_step_list_asked_for_matches_the_dispatcher(tmp_path):
+    """`--only ?` печатает те же шаги, которые реально исполняются.
+
+    Два перечня шагов однажды разошлись бы, и `--only` тихо пропускал бы
+    существующий шаг.
+    """
+    rc, out, done = run_bootstrap(tmp_path, "--only", "?")
+    assert rc == 0 and done == []
+    listed = out.split(":", 1)[1].split()
+    _, _, all_done = run_bootstrap(tmp_path)
+    assert listed == all_done, (listed, all_done)
+
+
+def test_partial_run_says_it_was_partial(tmp_path):
+    """Итог не выдаёт частичный прогон за полную установку.
+
+    Напутствие «Готово. Дальше — docs/SETUP-VPS.md» после `--only cron`
+    сообщало бы, что машина настроена целиком.
+    """
+    rc, out, _ = run_bootstrap(tmp_path, "--only", "cron")
+    assert "только шаги" in out
+    assert "Готово. Дальше" not in out
+
+
+def test_the_cron_banner_names_every_job_it_installs():
+    """Баннер расписания перечисляет ровно то, что поставил.
+
+    Баннер, называющий не весь список, читается как полный: работа, о
+    которой он молчит, считается неслучившейся, и её идут заводить руками
+    — или, хуже, не идут. Поймано при деплое спринта 173: соли уже
+    ставились в расписание, а баннер о них молчал.
+    """
+    src = _functions("cron_wanted", "setup_cron")
+    jobs = set(re.findall(r"\./scripts/([a-z0-9-]+)\.sh", src))
+    names = {"backup": "бэкап", "peer-sync": "обмен", "heartbeat": "сторож",
+             "gc-salts": "соли"}
+    for job in jobs:
+        assert job in names, f"новая работа {job} — добавьте её в проверку"
+
+    # КАЖДЫЙ баннер отдельно, а не их объединение. Веток две (с соседями и
+    # без), и проверка по объединению пропускала мутацию, снявшую работу
+    # из одной из них, — та самая форма дефекта, что повторяется в этом
+    # проекте чаще прочих: верное решение применено к части своих случаев.
+    # Только ПЕРЕЧИСЛЯЮЩИЕ баннеры: в setup_cron есть ещё «cron уже
+    # настроен», который списка работ не содержит и содержать не должен.
+    banners = [b for b in re.findall(r'ok "([^"]+)"', src) if "UTC" in b]
+    assert len(banners) == 2, banners
+    # Обмен условен — он и в расписании появляется только при соседях.
+    always = {names[j] for j in jobs} - {"обмен"}
+    for banner in banners:
+        missing = sorted(w for w in always if w not in banner)
+        assert not missing, (
+            f"баннер «{banner}» молчит о {missing}, хотя расписание это ставит")
