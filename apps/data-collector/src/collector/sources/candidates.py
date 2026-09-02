@@ -14,6 +14,18 @@
 Тонкость, из-за которой источник не может быть простым SELECT: у свежего
 матча соли ещё нет. Это НЕ ошибка и не повод сдвигать курсор — матч надо
 отложить и вернуться к нему позже, чем и занимается CandidateQueue.defer.
+
+СПРИНТ 172. Соль теперь бывает и вторая — добытая у Game Coordinator и
+лежащая в `ReplaySalts`. Она НЕ вытесняет ответ OpenDota: за него уже
+заплачено вызовом, а внутри кроме адреса лежат ранги десяти игроков.
+Менять их на экономию одного вызова невыгодно — прямой путь за рангом
+(`/players/{id}`) даёт ОДИН ранг за вызов, а этот до десяти.
+
+Меняется другое — от чего источник ЗАВИСИТ. С солью на руках матч уходит
+в скачивание, даже если OpenDota его ещё не разобрала, ответила ошибкой
+или отказала по исчерпанной квоте. Последнее важнее всего: квота — самый
+дефицитный ресурс проекта, и 2026-08-06 её исчерпание положило весь сбор
+на шесть часов.
 """
 from __future__ import annotations
 
@@ -24,6 +36,7 @@ from typing import Iterable
 import requests
 
 from ..candidates import CandidateQueue
+from ..salts import SaltStore
 from . import MatchRef, PermanentDownloadError, Shard
 from .opendota import OpenDotaSource
 from .steam import ANONYMOUS_ACCOUNT_ID
@@ -43,8 +56,14 @@ class CandidateSource:
     def __init__(self, queue: CandidateQueue, limit_per_cycle: int = 20,
                  base_url: str = "https://api.opendota.com/api",
                  timeout: float = 30.0, api_key: str | None = None,
-                 shard: Shard | None = None, cache=None) -> None:
+                 shard: Shard | None = None, cache=None,
+                 salts: SaltStore | None = None) -> None:
         self._queue = queue
+        # Соли берутся у очереди сами, а не подаются из __main__: забыть
+        # передать их значило бы получить прежнее поведение молча — та
+        # самая форма дефекта, которая в этом проекте повторялась чаще
+        # прочих (верное решение применено не ко всем своим случаям).
+        self._salts = salts if salts is not None else SaltStore(queue.connection)
         # Кэш рангов опционален: без него источник работает как прежде,
         # просто не подкармливает кэш фактическими рангами.
         self._cache = cache
@@ -72,45 +91,86 @@ class CandidateSource:
         # очереди.
         taken = self._queue.take(self._limit * 3)
         stats["взято"] = len(taken)
+
+        # Соли, добытые у GC, — одним запросом на всю порцию (спринт 172).
+        # Матч, у которого соль уже есть, не зависит от OpenDota вообще:
+        # ни от того, разобрала ли она матч, ни от остатка квоты.
+        gc_urls = self._salts.urls_for([c.match_id for c in taken])
+        stats["соль от GC"] = 0
+        # Квота кончилась — состояние ЦИКЛА. Раньше оно обрывало цикл
+        # целиком; теперь обрывает только обращения к OpenDota, а выдача
+        # матчей с солью от GC продолжается.
+        od_exhausted = False
+        quota_error: Exception | None = None
+
         for cand in taken:
             if stats["отдано"] >= self._limit:
                 break
             if not self._shard.accepts(cand.match_id):
                 continue
+            gc_url = gc_urls.get(cand.match_id)
+            if od_exhausted and not gc_url:
+                # Спрашивать нечем и спросить не у кого. Кандидата НЕ
+                # откладываем: он ни в чём не виноват, и штраф за нашу
+                # исчерпанную квоту приблизил бы его к `no_salt` — ровно
+                # та ошибка, что стоила шести часов простоя 2026-08-06.
+                stats["ждут квоты"] = stats.get("ждут квоты", 0) + 1
+                continue
+            detail = None
             try:
-                detail = self._od._match_detail(cand.match_id)
+                if not od_exhausted:
+                    detail = self._od._match_detail(cand.match_id)
             except requests.HTTPError as exc:
                 status = (exc.response.status_code
                           if exc.response is not None else None)
-                if status != 429:
+                if status == 429:
+                    # Исчерпанная квота — состояние ЦИКЛА, а не свойство
+                    # матча. Живой прогон 2026-08-06: 429 обрабатывался
+                    # как «у этого матча нет соли», цикл шёл к следующему
+                    # кандидату и сжигал шестьдесят запросов на пустом
+                    # месте («взято 60, отдано 0, нет соли 60»), дожигая и
+                    # без того отрицательный остаток. Хуже того, каждому
+                    # из шестидесяти прибавлялась попытка, и через восемь
+                    # циклов очередь молча превратилась бы в no_salt —
+                    # из-за простоя, а не из-за матчей.
+                    #
+                    # Поэтому к OpenDota в этом цикле больше не ходим. Но
+                    # цикл теперь не обрывается: у части кандидатов соль
+                    # уже добыта у GC, и им квота не нужна вовсе.
+                    od_exhausted = True
+                    quota_error = exc
+                    stats["квота исчерпана"] = 1
+                    logger.warning(
+                        "квота OpenDota исчерпана после %d выдач: %s. "
+                        "Выдача продолжается на солях GC, ранги в этом "
+                        "цикле больше не собираются", stats["отдано"], exc)
+                    if not gc_url:
+                        continue
+                elif not gc_url:
                     self._queue.defer(cand.match_id, error=str(exc)[:200])
                     stats["нет соли"] += 1
                     continue
-                # Исчерпанная квота — состояние ЦИКЛА, а не свойство
-                # матча. Живой прогон 2026-08-06: 429 обрабатывался как
-                # «у этого матча нет соли», цикл шёл к следующему
-                # кандидату и сжигал шестьдесят запросов на пустом месте
-                # («взято 60, отдано 0, нет соли 60»), дожигая и без того
-                # отрицательный остаток. Хуже того, каждому из шестидесяти
-                # прибавлялась попытка, и через восемь циклов очередь
-                # молча превратилась бы в no_salt — из-за простоя, а не
-                # из-за матчей.
-                #
-                # Пробрасываем наверх: в __main__ уже есть разбор 429 с
-                # ожиданием до сброса квоты. Свой обработчик здесь только
-                # мешал ему сработать.
-                stats["квота исчерпана"] = 1
-                self.last_cycle = stats
-                logger.warning("цикл кандидатов оборван квотой OpenDota "
-                               "после %d выдач: %s", stats["отдано"], exc)
-                raise
+                else:
+                    # Отказ OpenDota больше не приговор матчу: адрес у нас
+                    # уже есть. Теряем только сбор рангов из ответа.
+                    stats["без рангов"] = stats.get("без рангов", 0) + 1
             except requests.RequestException as exc:
-                # Сетевой сбой — не приговор матчу, но и не повод
-                # тратить цикл: откладываем и идём дальше.
-                self._queue.defer(cand.match_id, error=str(exc)[:200])
-                stats["нет соли"] += 1
-                continue
+                # Сетевой сбой — не приговор матчу, но и не повод тратить
+                # цикл: откладываем и идём дальше. Если соль от GC есть,
+                # откладывать нечего — матч уходит без сбора рангов.
+                if not gc_url:
+                    self._queue.defer(cand.match_id, error=str(exc)[:200])
+                    stats["нет соли"] += 1
+                    continue
+                stats["без рангов"] = stats.get("без рангов", 0) + 1
+            # Соль от GC — ЗАПАСНОЙ путь, а не основной: ответ OpenDota
+            # содержит и адрес, и ранги, и его мы уже оплатили. Брать
+            # свою соль поверх оплаченного ответа значило бы выбросить
+            # ранги, за которые заплачено.
             replay_url = (detail or {}).get("replay_url")
+            if not replay_url and gc_url:
+                replay_url = gc_url
+                stats["соль от GC"] += 1
             if not replay_url:
                 state = self._queue.defer(cand.match_id, error="нет replay_url")
                 stats["безнадёжных" if state == "no_salt" else "нет соли"] += 1
@@ -128,6 +188,16 @@ class CandidateSource:
         self.last_cycle = stats
         logger.info("цикл кандидатов: %s",
                     ", ".join(f"{k} {v}" for k, v in stats.items()))
+        if quota_error is not None and not stats["отдано"]:
+            # Квота кончилась И соли от GC не спасли ни одного матча —
+            # значит ждать всё-таки нечего кроме сброса квоты. Пробрасываем
+            # наверх: в __main__ уже есть разбор 429 с ожиданием до сброса,
+            # и свой обработчик здесь только мешал бы ему сработать.
+            #
+            # А вот если хоть один матч ушёл на соли GC, спать нельзя:
+            # конвейер работает, и усыпить его значило бы променять
+            # рабочую выдачу на ожидание ресурса, который ей не нужен.
+            raise quota_error
         if not stats["взято"]:
             self._explain_idleness()
 

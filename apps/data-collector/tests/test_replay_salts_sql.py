@@ -210,3 +210,58 @@ def test_both_sources_are_merged_without_duplicates(db):
     collected(db, 700, has_replay=False)
     candidate(db, 700, state="new")
     assert pick(db) == [700]
+
+
+# -- чтение солей коллектором (спринт 172) -------------------------------------
+
+def test_the_store_builds_the_url_from_what_gc_gave(db):
+    """Адрес собирается из кластера и соли, взятых из базы.
+
+    Ошибка здесь даёт 404, НЕОТЛИЧИМЫЙ от «соль неверна»: рабочий
+    механизм выглядел бы сломанным, и чинили бы не то.
+    """
+    from collector.salts import SaltStore
+    salt(db, 800, cluster=271, value=MAX_SALT)
+    got = SaltStore(db).urls_for([800])
+    assert got == {
+        800: f"http://replay271.valve.net/570/800_{MAX_SALT}.dem.bz2"}
+
+
+def test_the_store_returns_nothing_for_matches_without_a_salt(db):
+    """Нет соли — нет ключа, а не пустая строка и не чужой адрес.
+
+    Спутать «соли нет» с солью соседнего матча значило бы скачать чужой
+    файл и записать его как этот матч.
+    """
+    from collector.salts import SaltStore
+    salt(db, 801, cluster=271, value=5)
+    got = SaltStore(db).urls_for([801, 802])
+    assert set(got) == {801}
+
+
+def test_the_store_asks_once_for_the_whole_batch(db):
+    """Вся порция — одним запросом.
+
+    Цикл кандидатов берёт десятки за проход; обращение к базе на каждый
+    матч ради одного целого числа — трата на пустом месте.
+    """
+    from collector.salts import SaltStore
+    for mid in range(810, 820):
+        salt(db, mid, cluster=1, value=mid)
+    got = SaltStore(db).urls_for(list(range(810, 820)))
+    assert len(got) == 10
+
+
+def test_an_empty_batch_does_not_touch_the_database(db):
+    """Пустая порция не ходит в базу вовсе.
+
+    Цикл с пустой очередью — штатное состояние (например, ночью), и
+    запрос `WHERE match_id = ANY('{}')` в нём был бы чистым шумом.
+    """
+    from collector.salts import SaltStore
+
+    class Boom:
+        def cursor(self):
+            raise AssertionError("пустая порция полезла в базу")
+
+    assert SaltStore(Boom()).urls_for([]) == {}

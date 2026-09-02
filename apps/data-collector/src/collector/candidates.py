@@ -63,6 +63,16 @@ class CandidateQueue:
     def close(self) -> None:
         self._db.close()
 
+    @property
+    def connection(self):
+        """Соединение очереди — чтобы соседям не заводить своё.
+
+        Соли (`ReplaySalts`) лежат в той же базе и читаются в том же
+        цикле. Второе соединение ради одного SELECT — лишний коннект на
+        каждый процесс коллектора, а их несколько.
+        """
+        return self._db
+
     # -- запись ---------------------------------------------------------------
 
     def add(self, rows: list[Candidate]) -> int:
