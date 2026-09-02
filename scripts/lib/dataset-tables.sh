@@ -73,8 +73,14 @@ companion_tables() {
 # Имена ЗДЕСЬ В НИЖНЕМ РЕГИСТРЕ, потому что так они и лежат в Postgres:
 # CREATE TABLE PlayerRanks заводит таблицу playerranks. Сверка со схемой
 # это учитывает.
+#
+# replaysalts переносится по той же причине, что и playerranks: это не
+# производная витрина, а НАКОПЛЕННЫЙ дефицитный ресурс. Соль знает только
+# Game Coordinator, и отдаёт он их порядка 200–400 в сутки на аккаунт
+# (спринт 171). Не перенести таблицу — значит выбросить недели добычи и
+# заново потратить бюджет на то, что уже добыто.
 PG_TABLES=(collectedmatches matchreports playerranks
-           replaycandidates parkedreplays)
+           replaycandidates parkedreplays replaysalts)
 
 # Пропускается осознанно, по трём разным причинам:
 #
@@ -248,6 +254,13 @@ pg_merge_sql() {
             ;;
         playerranks)
             printf 'ON CONFLICT (account_id) DO UPDATE SET %s' "$(_set_ranks "$2")"
+            ;;
+        replaysalts)
+            # Соль матча неизменна: её выдал GC, и второй раз он выдаст
+            # ту же. Значит спорить не о чем — но и перезаписывать нечем,
+            # а DO NOTHING заодно бережёт свой found_at, по которому
+            # видно, когда добыто.
+            printf 'ON CONFLICT (match_id) DO NOTHING'
             ;;
         replaycandidates|parkedreplays)
             # Ценность строки — сам факт «этот матч стоит скачать» (её

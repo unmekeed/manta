@@ -15,7 +15,7 @@ GC_VENV ?= $(HOME)/.manta-gc-venv
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 .PHONY: candidates-queue candidates-sql-test dedup-sql-test sql-test wp-rates-sql-test pytest-check
-.PHONY: gc-venv gc-probe gc-node gc-login-check gc-token
+.PHONY: gc-venv gc-probe gc-node gc-login-check gc-token gc-token-login gc-probe-node gc-salts
 .PHONY: golden-test signals-golden-update
 .PHONY: wsl-anchor wsl-anchor-status wsl-anchor-stop
 .PHONY: backup-drill heartbeat tg-test map-calibrate farm-core-backfill peer-sync
@@ -224,6 +224,11 @@ gc-login-check: ## Пускает ли Steam НОВЫМ путём аутент�
 	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
 	GC_STATE_DIR=$${GC_STATE_DIR:-$(HOME)/.manta-gc-node} \
 	node scripts/gc-node/login-check.mjs
+
+gc-salts:      ## Добыть порцию солей у GC в таблицу ReplaySalts
+	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
+	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
+	node scripts/gc-node/gc-salts.mjs
 
 gc-probe-node: ## Замер GC через steam-user: ARGS="--ids-file /tmp/ids.txt --limit 200"
 	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
