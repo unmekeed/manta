@@ -220,6 +220,21 @@ def build_source(name: str):
             ParkedStore(db),
             limit_per_cycle=int(os.getenv("PARKED_LIMIT", "5")),
             api_key=api_key, shard=shard)
+    if name == "salts":
+        # Матчи, соль которых уже добыта у GC (спринт 179). Ни OpenDota,
+        # ни STEAM_API_KEY, ни квоты здесь не участвуют: всё нужное уже
+        # лежит в базе.
+        from .salts import SaltStore
+        from .sources.salts import SaltSource
+        import psycopg
+        dsn = os.getenv(
+            "POSTGRES_DSN",
+            "postgresql://dota:dota_dev_password@localhost:5432/manta")
+        db = psycopg.connect(dsn, autocommit=True)
+        return SaltSource(
+            SaltStore(db),
+            limit_per_cycle=int(os.getenv("SALTS_LIMIT", "5")),
+            api_key=api_key, shard=shard)
     if name == "candidates":
         # Своя разбивка: список матчей — от Valve, ранги — из кэша, у
         # OpenDota остаётся только соль. Один запрос на матч вместо

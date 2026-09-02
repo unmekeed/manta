@@ -63,7 +63,8 @@ def db():
         # Схема из НАСТОЯЩИХ миграций: своя копия проверяла бы сама себя.
         for name in ("002_outbox.sql", "008_replay_candidates.sql",
                      "009_candidate_truth.sql", "011_api_budget.sql",
-                     "012_collected_has_replay.sql", "014_replay_salts.sql"):
+                     "012_collected_has_replay.sql", "013_parked_replays.sql",
+                     "014_replay_salts.sql"):
             cur.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         cur.execute(f"SET search_path = {SCHEMA}")
     yield conn
@@ -319,3 +320,104 @@ def test_all_sources_of_one_api_share_the_ceiling(db):
     spend(db, 100, source="gc-salts")
     spend(db, 50, source="gc-salts-2")
     assert used(db) == 150
+
+
+# -- очередь на скачивание по добытой соли (спринт 179) ------------------------
+#
+# ЖИВОЙ СЛУЧАЙ 2026-09-02: солей 16, кандидатов 0, скачано ноль. Соли
+# читались только по списку кандидатов, а на VPS этот список пуст — его
+# наполняет `ranks scan`, которого нет ни в одном расписании (спринт 154).
+# Добыча шла исправно, потребителя у добытого не было.
+
+def parked(db, match_id, url="http://old/1.bz2"):
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO ParkedReplays (match_id, replay_url, host,"
+                    " reason) VALUES (%s, %s, 'h', 'r')", (match_id, url))
+
+
+def wanted(db, limit=10):
+    from collector.salts import SaltStore
+    return SaltStore(db).wanted(limit)
+
+
+def test_a_salt_without_a_replay_is_queued(db):
+    """ГЛАВНОЕ: соль есть, реплея нет — качаем.
+
+    Ни очередь кандидатов, ни OpenDota, ни квота здесь не участвуют:
+    всё нужное уже лежит в базе.
+    """
+    collected(db, 900, has_replay=False)
+    salt(db, 900, cluster=182, value=77)
+    assert wanted(db) == [
+        (900, "http://replay182.valve.net/570/900_77.dem.bz2")]
+
+
+def test_a_collected_replay_leaves_the_queue_by_itself(db):
+    """Скачанный матч исчезает сам, без второй отметки «сделано».
+
+    Вторая отметка — это второй способ с ней разойтись: матч считался бы
+    нужным после успеха или ненужным до него.
+    """
+    collected(db, 901, has_replay=True)
+    salt(db, 901)
+    assert wanted(db) == []
+
+
+def test_a_match_we_never_saw_is_not_queued(db):
+    """Соль без матча в CollectedMatches не качается.
+
+    Скачать реплей матча, которого мы не собирали, значит записать его в
+    витрину в обход отбора — то есть тихо расширить датасет мусором.
+
+    Тонкость, замеченная мутацией: замена JOIN на LEFT JOIN этот тест НЕ
+    ломает — `WHERE NOT c.has_replay` отсекает NULL-строки сам, по
+    трёхзначной логике SQL. Мутация эквивалентна, и убивать её нечем.
+    JOIN оставлен потому, что выражает намерение прямо, а не полагается
+    на побочное свойство условия в WHERE: убери кто-нибудь это условие —
+    и LEFT JOIN начал бы отдавать соли без матчей.
+    """
+    salt(db, 902)
+    assert wanted(db) == []
+
+
+def test_parked_matches_are_left_to_their_own_source(db):
+    """Припаркованные не берутся: ими занят ParkedSource.
+
+    Взять их обоими источниками значит качать 58 МиБ дважды.
+    """
+    collected(db, 903, has_replay=False)
+    salt(db, 903)
+    parked(db, 903)
+    assert wanted(db) == []
+
+
+def test_unreachable_chinese_clusters_are_not_queued(db):
+    """Кластеры 4xx не качаются.
+
+    До них нет маршрута ни с VPS, ни из дома (спринт 153, 141 матч
+    припаркован именно оттуда). Каждая попытка стоила бы полного
+    таймаута ради заведомо известного ответа. Соль при этом хранится —
+    знать, что матч недостижим, полезно.
+    """
+    collected(db, 904, has_replay=False)
+    salt(db, 904, cluster=414)
+    assert wanted(db) == []
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM ReplaySalts WHERE match_id = 904")
+        assert cur.fetchone()[0] == 1, "соль недостижимого матча стёрлась"
+
+
+def test_fresh_matches_are_downloaded_first(db):
+    """Свежие вперёд: Valve держит реплеи около двух недель."""
+    for mid in (910, 930, 920):
+        collected(db, mid, has_replay=False)
+        salt(db, mid)
+    assert [m for m, _ in wanted(db)] == [930, 920, 910]
+
+
+def test_the_download_limit_is_respected(db):
+    """Порция ограничена: реплей весит 58 МиБ, и канал — узкое место."""
+    for mid in range(940, 950):
+        collected(db, mid, has_replay=False)
+        salt(db, mid)
+    assert len(wanted(db, limit=3)) == 3

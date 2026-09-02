@@ -72,3 +72,47 @@ class SaltStore:
             rows = cur.fetchall()
         return {int(mid): replay_url(mid, cluster, salt)
                 for mid, cluster, salt in rows}
+
+    def wanted(self, limit: int) -> list[tuple[int, str]]:
+        """[(match_id, адрес)] — соль добыта, реплея ещё нет (спринт 179).
+
+        ЗАЧЕМ ОТДЕЛЬНАЯ ВЫБОРКА. До этого соли читались только по списку
+        кандидатов (`urls_for`), то есть работали лишь для матчей,
+        попавших в `ReplayCandidates`. На VPS эта очередь пуста — её
+        наполняет `ranks scan`, которого нет ни в одном расписании
+        (спринт 154), — и добытые соли не использовал никто. Здесь
+        выборка идёт ОТ СОЛЕЙ: раз соль есть, а реплея нет, матч можно
+        качать немедленно и ни у кого ничего не спрашивая.
+
+        Матч, реплей которого уже собран, исчезает из выдачи сам — по
+        `CollectedMatches.has_replay`. Заводить вторую отметку «сделано»
+        значило бы завести и второй способ с ней разойтись.
+
+        Свежие вперёд: Valve держит реплеи около двух недель, и соль к
+        старому матчу — соль к файлу, которого уже нет.
+
+        Два исключения в запросе стоят объяснения.
+
+        Припаркованные не берутся: ими занят ParkedSource, и брать их
+        обоими источниками значит качать 58 МиБ дважды.
+
+        Кластеры 4xx не берутся: это китайские серверы, до которых нет
+        маршрута ни с VPS, ни из дома (спринт 153, 141 матч припаркован
+        именно оттуда). Соли для них мы храним намеренно — знать, что
+        матч недостижим, полезно, — но каждая попытка скачать стоила бы
+        полного таймаута ради заведомо известного ответа.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                """SELECT s.match_id, s.cluster, s.salt
+                     FROM ReplaySalts s
+                     JOIN CollectedMatches c ON c.match_id = s.match_id
+                     LEFT JOIN ParkedReplays p ON p.match_id = s.match_id
+                    WHERE NOT c.has_replay
+                      AND p.match_id IS NULL
+                      AND s.cluster < 400
+                    ORDER BY s.match_id DESC
+                    LIMIT %s""", (int(limit),))
+            rows = cur.fetchall()
+        return [(int(mid), replay_url(mid, cluster, salt))
+                for mid, cluster, salt in rows]
