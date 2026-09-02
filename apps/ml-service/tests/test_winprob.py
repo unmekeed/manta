@@ -607,3 +607,136 @@ def test_gate_prefers_fresh_matches_holdout():
                         if k != "max_match_id"}
     ok2, reason2 = evaluate_gate(cand, prod2, ds)
     assert ok2 and "валидация" in reason2
+
+
+# -- застрявший гейт и вторая цифра (спринт 174) --------------------------------
+
+def test_gate_reports_both_holdouts_not_only_the_deciding_one():
+    """Отказ обязан называть ОБЕ оценки.
+
+    ЖИВОЙ СЛУЧАЙ 2026-09-01: четыре цикла подряд «NOT promoted» с
+    объяснением про один только про-эталон. Из такого текста не следует,
+    стал ли кандидат хуже ВООБЩЕ или только на двух десятках про-матчей,
+    — а это разные диагнозы: чинить обучение или признать эталон слишком
+    маленьким. Вторая цифра различает их сразу.
+    """
+    from training.train_winprob import train, evaluate_gate
+    from training.dataset import PRO_TIER
+
+    ds = synth_matches(120, seed=5)
+    ds.tiers = np.array([PRO_TIER if g % 2 == 0 else "" for g in ds.groups])
+    art = train(ds, num_rounds=60)
+    _, reason = evaluate_gate(art, art, ds)
+    assert "про-эталон" in reason, reason
+    # Вторая половина — не про-матчи. Она может доехать как «валидация» или
+    # как «свежие матчи»: обе — та самая справочная оценка.
+    assert ("валидация" in reason or "свежие матчи" in reason), reason
+
+
+def test_the_deciding_holdout_comes_first_in_the_explanation():
+    """Причина отказа стоит раньше контекста.
+
+    Порядок здесь смысловой: справочная цифра, напечатанная первой,
+    читалась бы как причина решения — и чинили бы не то.
+    """
+    from training.train_winprob import train, evaluate_gate
+    from training.dataset import PRO_TIER
+
+    ds = synth_matches(120, seed=5)
+    ds.tiers = np.array([PRO_TIER if g % 2 == 0 else "" for g in ds.groups])
+    art = train(ds, num_rounds=60)
+    _, reason = evaluate_gate(art, art, ds)
+    assert reason.index("про-эталон") == 0, reason
+
+
+def test_the_extra_holdout_does_not_change_the_verdict():
+    """Справочная оценка НЕ голосует.
+
+    Решает первый holdout по приоритету. Позволь второму влиять — гейт
+    стал бы строже или мягче в зависимости от того, набралось ли
+    про-матчей, то есть менял бы правило от прогона к прогону.
+    """
+    from training.train_winprob import train, evaluate_gate
+
+    big = synth_matches(120, seed=3)
+    weak = train(synth_matches(30, seed=99), num_rounds=5, mirror=False)
+    strong = train(big, num_rounds=150)
+    assert not evaluate_gate(weak, strong, big)[0]
+    assert evaluate_gate(strong, weak, big)[0]
+
+
+def test_the_first_holdout_decides_when_the_two_disagree(monkeypatch):
+    """Когда оценки РАСХОДЯТСЯ, решает первая.
+
+    Ради этого всё и затевалось: вторая цифра справочная. Настоящие
+    модели редко расходятся по знаку на двух выборках, поэтому расхождение
+    задаётся прямо — иначе проверка правила зависела бы от того, повезло
+    ли данным разойтись.
+
+    Поймано мутацией: пока обе оценки совпадали, «решает последний» и
+    «решает первый» давали один ответ, и правило не проверялось вовсе.
+    """
+    from training import train_winprob as tw
+
+    verdicts = {"benchmark_pro": False, "valid": True}
+
+    def fake_judge(new_art, prod_art, prod_max, X, y, groups, kind, tol):
+        return verdicts[kind], f"{kind}: подстановка", kind
+
+    class TwoHoldouts:
+        def eval_holdouts(self):
+            import numpy as _np
+            one = _np.array([1])
+            return [(one, one, one, "benchmark_pro"),
+                    (one, one, one, "valid")]
+
+    monkeypatch.setattr(tw, "_judge_holdout", fake_judge)
+    ok, reason = tw.evaluate_gate({}, {}, TwoHoldouts())
+    assert ok is False, "решила справочная оценка, а не первая"
+    assert reason.startswith("benchmark_pro")
+
+    verdicts["benchmark_pro"], verdicts["valid"] = True, False
+    ok, _ = tw.evaluate_gate({}, {}, TwoHoldouts())
+    assert ok is True, "решила справочная оценка, а не первая"
+
+
+def test_both_holdouts_are_disjoint():
+    """Оценки считаются на РАЗНЫХ строках.
+
+    Пересекись они — «две оценки» оказались бы одной, показанной дважды,
+    и вся польза второй цифры исчезла бы, оставив видимость проверки.
+    """
+    from training.dataset import PRO_TIER
+
+    ds = synth_matches(60)
+    ds.tiers = np.array([PRO_TIER if g % 2 == 0 else "" for g in ds.groups])
+    holdouts = ds.eval_holdouts(min_bench_matches=5)
+    assert len(holdouts) == 2
+    a, b = (set(np.unique(h[2]).tolist()) for h in holdouts)
+    assert a and b and not (a & b)
+
+
+def test_a_small_benchmark_leaves_a_single_holdout():
+    """Мало про-матчей — про-эталона нет вовсе, а не пустая оценка.
+
+    Пустой holdout дал бы строку «0 матчей: new 0.0000 vs prod 0.0000»,
+    которую легко прочитать как измерение.
+    """
+    ds = synth_matches(40)
+    holdouts = ds.eval_holdouts()
+    assert [h[3] for h in holdouts] == ["valid"]
+
+
+def test_the_gate_floor_matches_what_ablation_calls_material():
+    """Порог гейта — тот же, которым мы меряем пользу.
+
+    До спринта 174 их было два: гейт считал существенным сдвиг Brier от
+    0.0005, а `ablation.MIN_EFFECT` — только от 0.001. Один и тот же
+    сдвиг абляция объявляла ничтожным, а гейт — поводом отклонить
+    кандидата, то есть гейт был строже той меры, которой мы сами
+    определяем пользу.
+    """
+    from training.train_winprob import GATE_TOL_FLOOR
+    from training.ablation import MIN_EFFECT
+
+    assert GATE_TOL_FLOOR == MIN_EFFECT

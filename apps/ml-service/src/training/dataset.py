@@ -250,13 +250,40 @@ class Dataset:
 
         Возвращает (X, y, groups, kind), kind ∈ {"benchmark_pro", "valid"}.
         """
+        return self.eval_holdouts(min_bench_matches, valid_frac, seed)[0]
+
+    def eval_holdouts(self, min_bench_matches: int = 15,
+                      valid_frac: float = 0.2, seed: int = 42):
+        """ВСЕ сопоставимые holdout'ы, в порядке приоритета (спринт 174).
+
+        Решает по-прежнему первый — `eval_holdout` это он и есть. Но
+        считать стоит оба, потому что отказ гейта без второй цифры
+        неинформативен.
+
+        ЖИВОЙ СЛУЧАЙ. Четыре цикла подряд отклонили кандидата с
+        объяснением «про-эталон, одни данные (…): new хуже prod». Из
+        этого не следует, стал ли кандидат хуже ВООБЩЕ или только на
+        двадцати про-матчах, — а это разные диагнозы: в первом случае
+        чинить обучение, во втором эталон слишком мал и мерит шум.
+        Вторая цифра различает их сразу, а стоит она одного лишнего
+        предсказания на уже загруженной модели.
+
+        Выборки НЕ пересекаются, и это свойство здесь не обеспечивается, а
+        НАСЛЕДУЕТСЯ: `_valid_mask` набирает матчи из `~pro`, то есть
+        эталонных в валидации нет по построению. Раньше на этом месте
+        стояло ещё и `& ~pro`; мутационная проверка показала, что снять его
+        не меняет ничего, — то есть это была недостижимая защита, а такой
+        код в проекте не держат. Само свойство сторожит тест: пересекись
+        выборки, и «две оценки» стали бы одной, показанной с двух сторон.
+        """
+        out = []
         pro = self._bench_mask(seed)
-        pro_matches = sorted(set(self.groups[pro].tolist()))
-        if len(pro_matches) >= min_bench_matches:
-            return self.X[pro], self.y[pro], self.groups[pro], "benchmark_pro"
-        in_valid, _ = self._valid_mask(valid_frac, seed)
-        va = in_valid & ~pro
-        return self.X[va], self.y[va], self.groups[va], "valid"
+        if len(set(self.groups[pro].tolist())) >= min_bench_matches:
+            out.append((self.X[pro], self.y[pro], self.groups[pro],
+                        "benchmark_pro"))
+        va, _ = self._valid_mask(valid_frac, seed)
+        out.append((self.X[va], self.y[va], self.groups[va], "valid"))
+        return out
 
 
 # Колонки витрины, из которых row_to_features собирает вектор.

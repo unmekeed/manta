@@ -410,30 +410,32 @@ def _paired_bootstrap_delta(y, p_new, p_prod, groups, n_boot: int = 200,
     return delta_point, float(np.std(deltas))
 
 
-def evaluate_gate(new_art: dict, prod_art: dict, ds,
-                  tol_floor: float = 0.0005) -> tuple[bool, str]:
-    """Честный гейт: обе модели считаются на ОДНОМ holdout текущих данных.
+# Минимальный допуск гейта: разница Brier меньше него — не разница.
+#
+# Число НЕ выбирается здесь: оно взято у ablation.MIN_EFFECT, где им
+# отвечают на тот же самый вопрос — «этот сдвиг Brier вообще что-нибудь
+# значит?». До спринта 174 их было два (0.0005 и 0.001), то есть один и
+# тот же сдвиг абляция объявляла ничтожным, а гейт — поводом отклонить
+# кандидата. Расхождение работало против нас: гейт был строже той меры,
+# которой мы сами измеряем пользу.
+from .ablation import MIN_EFFECT as GATE_TOL_FLOOR  # noqa: E402
 
-    Убирает залипание на «удачном» маленьком prod-датасете — production
-    пересчитывается на актуальной выборке, а не сравнивается по своей старой
-    сохранённой метрике. Продвигаем, если кандидат НЕ ЗНАЧИМО хуже: Δ Brier в
-    пределах шума (± bootstrap-σ по матчам). При равенстве в пределах шума
-    предпочитаем новую версию — она обучена на бОльших данных и устойчивее.
-    """
-    X, y, groups, kind = ds.eval_holdout()
+
+def _judge_holdout(new_art: dict, prod_art: dict, prod_max,
+                   X, y, groups, kind: str, tol_floor: float):
+    """Одна оценка: (прошёл ли, текст, kind). Решение принимается не здесь."""
     # Матчи новее всего, что видела production, — идеальный holdout: их не
     # видел никто (prod — потому что их ещё не существовало, кандидат —
     # потому что валидация исключена из его обучения). Снимает смещение
     # переходного периода, когда prod старой схемы обучала калибратор на
     # общем valid-сплите и имела на нём нечестное преимущество.
-    prod_max = (prod_art.get("dataset") or {}).get("max_match_id")
     if kind == "valid" and prod_max:
         fresh = groups > int(prod_max)
         if len(set(groups[fresh].tolist())) >= 30:
             X, y, groups = X[fresh], y[fresh], groups[fresh]
             kind = "fresh"
     if len(y) == 0:
-        return True, "нет общего holdout — продвигаем"
+        return None, None, kind
     p_new = predict_calibrated(new_art, X)
     p_prod = predict_calibrated(prod_art, X)
     b_new, b_prod = _brier(y, p_new), _brier(y, p_prod)
@@ -444,9 +446,43 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
              "fresh": "свежие матчи (никто не видел)"}.get(kind, "валидация")
     n_m = len(set(groups.tolist()))
     verdict = "не хуже prod" if ok else "значимо хуже prod"
-    reason = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
-              f"prod {b_prod:.4f} (Δ{delta:+.4f}, σ{std:.4f}) — {verdict}")
-    return ok, reason
+    text = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
+            f"prod {b_prod:.4f} (Δ{delta:+.4f}, σ{std:.4f}) — {verdict}")
+    return ok, text, kind
+
+
+def evaluate_gate(new_art: dict, prod_art: dict, ds,
+                  tol_floor: float = GATE_TOL_FLOOR) -> tuple[bool, str]:
+    """Честный гейт: обе модели считаются на ОДНОМ holdout текущих данных.
+
+    Убирает залипание на «удачном» маленьком prod-датасете — production
+    пересчитывается на актуальной выборке, а не сравнивается по своей старой
+    сохранённой метрике. Продвигаем, если кандидат НЕ ЗНАЧИМО хуже: Δ Brier в
+    пределах шума (± bootstrap-σ по матчам). При равенстве в пределах шума
+    предпочитаем новую версию — она обучена на бОльших данных и устойчивее.
+
+    РЕШАЕТ первый holdout по приоритету (про-эталон, если он достаточно
+    велик), но СЧИТАЕТ и остальные, называя их в объяснении (спринт 174).
+    Отказ с одной цифрой не отвечает на главный вопрос: кандидат стал хуже
+    вообще или только на двух десятках про-матчей? Это разные диагнозы —
+    чинить обучение или признать эталон слишком маленьким, — а стоит
+    вторая цифра одного лишнего предсказания на уже загруженной модели.
+    """
+    prod_max = (prod_art.get("dataset") or {}).get("max_match_id")
+    decided, parts = None, []
+    for X, y, groups, kind in ds.eval_holdouts():
+        ok, text, kind = _judge_holdout(new_art, prod_art, prod_max,
+                                        X, y, groups, kind, tol_floor)
+        if ok is None:
+            continue
+        parts.append(text)
+        if decided is None:
+            decided = ok
+    if decided is None:
+        return True, "нет общего holdout — продвигаем"
+    # Решающая оценка идёт первой, справочные за ней: читающий отказ должен
+    # увидеть причину раньше контекста.
+    return decided, "; ".join(parts)
 
 
 def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None

@@ -29,6 +29,7 @@ import argparse
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -153,6 +154,98 @@ _replay_alerted = False
 REPLAY_STALLED = Gauge(
     "training_replay_path_stalled",
     "1 — ReplayEvents не пополняется дольше REPLAY_STALL_ALERT_H")
+
+
+# Застрявший гейт (спринт 174). Гейт может честно отклонять кандидата
+# циклами подряд — и это НЕ отказ: он ровно для того и стоит. Беда в том,
+# что со стороны застой неотличим от исправной работы. Живой случай
+# 2026-09-01: четыре цикла подряд «NOT promoted», а обслуживала модель от
+# 25 августа — и заметно это стало только потому, что владелец руками
+# заглянул в лог.
+#
+# Возраст production — сигнал ДОЛГОВЕЧНЫЙ: он считается из метаданных
+# версии и переживает перезапуск процесса. Счётчик отказов подряд живёт в
+# памяти и перезапуском обнуляется, поэтому решение принимается по
+# возрасту, а счётчик служит пояснением к нему.
+PROD_AGE_H = Gauge("wp_production_age_hours",
+                   "Часов с обучения модели, которая обслуживает запросы")
+GATE_REJECTIONS = Gauge(
+    "wp_gate_rejections_consecutive",
+    "Кандидатов подряд, отклонённых гейтом (сбрасывается перезапуском)")
+GATE_FROZEN = Gauge(
+    "wp_gate_frozen",
+    "1 — гейт отклоняет кандидатов, а production не обновлялась дольше "
+    "GATE_FROZEN_ALERT_H")
+
+# Возраст неизвестен, пока не прочитаны метаданные production. NaN, а не
+# ноль: ноль означал бы «только что обучена» — самый благополучный из
+# возможных ответов на вопрос, ответа на который у нас нет.
+PROD_AGE_H.set(float("nan"))
+GATE_REJECTIONS.set(0)
+GATE_FROZEN.set(0)
+
+_gate_rejections = 0
+_gate_alerted = False
+
+
+def _prod_age_hours(prod: dict | None) -> float | None:
+    """Часов с обучения production. None — узнать не удалось."""
+    stamp = (prod or {}).get("trained_at")
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        # Метка без зоны — UTC: так её пишет train_winprob. Прочитать её
+        # как местное время значило бы получить возраст, смещённый на
+        # часовой пояс машины, — на VPS и дома по-разному.
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() / 3600
+
+
+def _check_gate_freeze(prod: dict | None, promoted: bool) -> None:
+    """Отличить «гейт работает» от «гейт застрял».
+
+    Отклонённый кандидат сам по себе не новость. Новость — СОЧЕТАНИЕ:
+    кандидатов отклоняют, и при этом запросы обслуживает модель,
+    обученная давно. Каждое из двух по отдельности законно — гейт обязан
+    отклонять слабых, а свежая production может просто не требовать
+    замены, — и алерт по одному из них был бы ложной тревогой того сорта,
+    что учит не читать канал.
+    """
+    global _gate_rejections, _gate_alerted
+    age = _prod_age_hours(prod)
+    PROD_AGE_H.set(float("nan") if age is None else age)
+    if promoted:
+        _gate_rejections = 0
+        GATE_REJECTIONS.set(0)
+        GATE_FROZEN.set(0)
+        if _gate_alerted and _notifier.enabled:
+            _notifier.send("✅ <b>Manta</b>: гейт снова продвигает — "
+                           "production обновилась")
+        _gate_alerted = False
+        return
+    _gate_rejections += 1
+    GATE_REJECTIONS.set(_gate_rejections)
+    limit_h = float(os.getenv("GATE_FROZEN_ALERT_H", "72"))
+    if age is None or age < limit_h:
+        GATE_FROZEN.set(0)
+        return
+    GATE_FROZEN.set(1)
+    if _gate_alerted:
+        return
+    _gate_alerted = True
+    logger.warning("гейт застрял: %d отказов подряд, production обучена "
+                   "%.0f ч назад", _gate_rejections, age)
+    if _notifier.enabled:
+        _notifier.send(
+            f"⚠️ <b>Manta</b>: гейт продвижения застрял — {_gate_rejections} "
+            f"отказов подряд, а запросы обслуживает модель возрастом "
+            f"{age:.0f} ч.\nЧто смотреть — объяснение отказа: если кандидат "
+            "хуже ТОЛЬКО на про-эталоне, эталон мал и мерит шум; если и на "
+            "валидации — дело в обучении.")
 
 
 def _replay_freshness_ts() -> float | None:
@@ -283,6 +376,9 @@ def check_and_train(min_new: int, min_total: int, out_path: Path) -> str:
     if promoted:
         _publish_production_metrics(m)
     RETRAINS.labels("promoted" if promoted else "rejected").inc()
+    # Возраст берётся у ТОЙ версии, что обслуживает запросы после гейта:
+    # при продвижении это свежий кандидат, при отказе — прежняя prod.
+    _check_gate_freeze(artifact if promoted else prod, promoted)
     # D2: реестр растёт на ~4 версии/день — держим последние N + все
     # продвигавшиеся. MLflow-бэкенд управляет хранением сам (cleanup нет).
     keep_last = int(os.getenv("REGISTRY_KEEP_LAST", "10"))
