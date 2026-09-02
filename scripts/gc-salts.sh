@@ -62,7 +62,28 @@ STATE_DIR="${GC_STATE_DIR:-$HOME/.manta-gc}"
 # «настроено, но не работает» обязаны различаться: во втором случае
 # реплеи тихо перестают доезжать, а выглядит всё зелёным.
 command -v node >/dev/null || die "node не установлен"
-[ -d scripts/gc-node/node_modules ] || die "нет зависимостей Node — make gc-node"
+
+# Проверяется НАЛИЧИЕ МОДУЛЕЙ, а не каталога node_modules.
+#
+# Каталог есть на любой машине, где хоть раз делали `make gc-node`, — а
+# зависимости с тех пор могли прибавиться (так и вышло в спринте 173:
+# наполнителю понадобился `pg`). Node падает на `require` кодом 1,
+# неотличимым от нашего «сессия не поднялась», и обёртка отрапортовала бы
+# про Steam о беде, до Steam не дошедшей: диагноз увёл бы чинить чужое.
+#
+# Список берётся ИЗ package.json, а не переписывается сюда: рукописный
+# перечень зависимостей разъедется при первой же новой, и разъедется
+# молча.
+missing=$(node -e '
+  const pkg = require("./scripts/gc-node/package.json");
+  const paths = ["./scripts/gc-node/node_modules"];
+  const out = [];
+  for (const m of Object.keys(pkg.dependencies || {})) {
+    try { require.resolve(m, { paths }); } catch { out.push(m); }
+  }
+  process.stdout.write(out.join(" "));
+' 2>/dev/null) || die "не прочитать scripts/gc-node/package.json"
+[ -z "$missing" ] || die "не установлены модули Node ($missing) — make gc-node"
 
 echo "=================================================================="
 echo "  Соли Game Coordinator: порция ${GC_SALTS_PER_RUN:-8}"

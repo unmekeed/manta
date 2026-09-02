@@ -26,19 +26,33 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "gc-salts.sh"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None,
-                                reason="нужен bash")
+pytestmark = pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("node") is None,
+    reason="нужны bash и node: проверка модулей исполняется настоящая")
+
+REAL_NODE = shutil.which("node") or "node"
 
 
 def run(tmp_path, *, node_rc=0, node_out="соли: спрошено 8", token=True,
-        node_installed=True, deps=True):
+        node_installed=True, deps=True, modules=("steam-user", "protobufjs", "pg")):
     """Прогнать обёртку в поддельном репозитории. -> (rc, вывод, телеграм)."""
     repo = tmp_path / "repo"
     (repo / "scripts" / "gc-node").mkdir(parents=True)
     shutil.copy(SCRIPT, repo / "scripts" / "gc-salts.sh")
     (repo / "scripts" / "gc-node" / "gc-salts.mjs").write_text("//", "utf-8")
+    # package.json — источник списка зависимостей и для скрипта, и отсюда.
+    (repo / "scripts" / "gc-node" / "package.json").write_text(
+        '{"dependencies": {"steam-user": "^5", "protobufjs": "^7", "pg": "^8"}}',
+        "utf-8")
     if deps:
-        (repo / "scripts" / "gc-node" / "node_modules").mkdir()
+        mods = repo / "scripts" / "gc-node" / "node_modules"
+        mods.mkdir()
+        for name in modules:
+            (mods / name).mkdir()
+            (mods / name / "package.json").write_text(
+                '{"name": "%s", "version": "1.0.0", "main": "i.js"}' % name,
+                "utf-8")
+            (mods / name / "i.js").write_text("", "utf-8")
 
     state = tmp_path / "state"
     state.mkdir()
@@ -53,8 +67,14 @@ def run(tmp_path, *, node_rc=0, node_out="соли: спрошено 8", token=T
     (bindir / "curl").write_text(
         f'#!/bin/sh\nprintf "%s\\n" "$*" >> {tg_log}\n', "utf-8")
     if node_installed:
+        # Стаб подменяет только ЗАПУСК наполнителя. Вызов `node -e`, которым
+        # обёртка проверяет установленные модули, делегируется настоящему
+        # node: иначе проверка модулей исполнялась бы стабом, то есть не
+        # проверялась бы вовсе, а параметр `modules` ничего не значил бы.
         (bindir / "node").write_text(
-            f'#!/bin/sh\necho "{node_out}"\nexit {node_rc}\n', "utf-8")
+            f'#!/bin/sh\n'
+            f'if [ "$1" = "-e" ]; then exec {REAL_NODE} "$@"; fi\n'
+            f'echo "{node_out}"\nexit {node_rc}\n', "utf-8")
     for name in ("curl", "node"):
         p = bindir / name
         if p.exists():
@@ -201,3 +221,38 @@ def test_the_token_value_never_reaches_the_output(tmp_path):
     rc, out, tg = run(tmp_path, node_rc=1)
     assert "не-настоящий-токен" not in out
     assert "не-настоящий-токен" not in tg
+
+
+def test_a_present_directory_with_a_missing_module_is_named_correctly(tmp_path):
+    """ГЛАВНОЕ, ради чего проверка стала проверять модули.
+
+    ЖИВОЙ СЛУЧАЙ, пойманный ПЕРЕД деплоем спринта 173. Наполнителю
+    понадобился `pg`, а на машине каталог node_modules существовал с
+    прошлого `make gc-node`. Проверка «каталог на месте» проходила, node
+    падал на require кодом 1 — тем же, каким мы обозначаем «сессия Steam
+    не поднялась», — и в Telegram уезжало бы про Steam о беде, до Steam
+    не дошедшей. Чинить пошли бы токен и сеть.
+
+    Проверять надо ЭФФЕКТ (модули на месте), а не АРТЕФАКТ (каталог
+    создан) — та же форма ошибки, что и «файл записан» вместо «настройка
+    подействовала» в спринте 169.
+    """
+    rc, out, tg = run(tmp_path, modules=("steam-user", "protobufjs"))  # без pg
+    assert rc == 1
+    assert "pg" in out, out
+    assert "gc-node" in out, "не сказано, чем чинить"
+    # И ни слова про Steam: беда до него не дошла.
+    assert "Steam" not in out and "сессия" not in out, out
+
+
+def test_the_dependency_list_is_taken_from_package_json(tmp_path):
+    """Список зависимостей не переписан в скрипт руками.
+
+    Рукописный перечень разъедется при первой же новой зависимости — и
+    разъедется молча, ровно как это и случилось с `pg`.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "package.json" in src
+    for name in ("steam-user", "protobufjs", "pg"):
+        assert f'"{name}"' not in src, (
+            f"{name} вписан в обёртку руками — список обязан быть один")
