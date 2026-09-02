@@ -87,6 +87,36 @@ const SAVE_SQL = `
   VALUES ($1, $2, $3, 'gc')
   ON CONFLICT (match_id) DO NOTHING`;
 
+// -- учёт бюджета (спринт 173) -------------------------------------------------
+//
+// Считаются ЗАПРОСЫ, а не добытые соли. Единицу бюджета съедает сам
+// вопрос: матч, у которого соли не оказалось, стоил столько же, сколько
+// удачный, и учёт по успехам показывал бы расход меньше настоящего —
+// ошибка в ту самую сторону, в какую ошибаться нельзя.
+//
+// Таблица та же, что у OpenDota (ApiBudget, миграция 011): у неё уже есть
+// колонка api, заведённая под это («на будущее: stratz, steam»). Все её
+// запросы фильтруют по api, поэтому наши строки чужой счёт не трогают.
+const BUDGET_API = 'steam-gc';
+const BUDGET_SOURCE = 'gc-salts';
+
+const USED_SQL = `
+  SELECT coalesce(sum(calls), 0)::int AS used FROM ApiBudget
+  WHERE day = (NOW() AT TIME ZONE 'UTC')::date AND api = $1`;
+
+const SPEND_SQL = `
+  INSERT INTO ApiBudget (day, api, source, calls)
+  VALUES ((NOW() AT TIME ZONE 'UTC')::date, $1, $2, $3)
+  ON CONFLICT (day, api, source) DO UPDATE
+    SET calls = ApiBudget.calls + EXCLUDED.calls`;
+
+// Потолок за сутки. Замеры дали 200–400; берём верх диапазона — это не
+// цель, а предохранитель от прогона, который в отказ упирается не сразу
+// (накопитель после долгого простоя отдаёт сотнями). День — UTC, как у
+// OpenDota: разные границы суток в одной таблице пришлось бы каждый раз
+// вспоминать.
+const DAILY_MAX = Number(process.env.GC_SALTS_DAILY_MAX || 400);
+
 function dsn() {
   const url = process.env.POSTGRES_DSN;
   if (url) return { connectionString: url };
@@ -180,16 +210,32 @@ client.on('loggedOn', async () => {
     return;
   }
 
-  const { rows } = await db.query(PICK_SQL, [PER_RUN]);
+  // Сколько бюджета уже израсходовано сегодня. Порция урезается до
+  // остатка, а не отменяется целиком: обрубить последние три запроса
+  // ради круглого числа значило бы выбросить три соли даром.
+  const used = (await db.query(USED_SQL, [BUDGET_API])).rows[0].used;
+  const left = DAILY_MAX - used;
+  if (left <= 0) {
+    // Штатный конец суток, не ошибка: ровно то же, что и молчание GC.
+    console.log(`суточный потолок выбран: ${used} из ${DAILY_MAX}`);
+    await finish(0);
+    return;
+  }
+
+  const { rows } = await db.query(PICK_SQL, [Math.min(PER_RUN, left)]);
   if (rows.length === 0) {
     console.log('нечего спрашивать: у всех известных матчей соль уже есть');
     await finish(0);
     return;
   }
 
-  let saved = 0, silent = 0, noSalt = 0;
+  let saved = 0, silent = 0, noSalt = 0, asked = 0;
   for (const row of rows) {
     const id = String(row.match_id);
+    // Считаем ДО ответа: единицу бюджета съедает отправленный вопрос, и
+    // молчание в ответ — тоже расход. Учёт по ответам показывал бы
+    // расход меньше настоящего.
+    asked++;
     const res = await requestDetails(id);
     if (!res) {
       silent++;
@@ -217,7 +263,16 @@ client.on('loggedOn', async () => {
     await sleep(DELAY_MS);
   }
 
-  console.log(`соли: сохранено ${saved}, без соли ${noSalt}, молчание ${silent}`);
+  // Расход записывается ВСЕГДА, даже когда порция ничего не добыла:
+  // запросы были, бюджет потрачен. Записывать только удачные прогоны
+  // значило бы вести учёт, который занижает расход тем сильнее, чем хуже
+  // идут дела, — то есть врёт именно тогда, когда нужен.
+  if (asked > 0) {
+    await db.query(SPEND_SQL, [BUDGET_API, BUDGET_SOURCE, asked]);
+  }
+  console.log(`соли: спрошено ${asked}, сохранено ${saved}, `
+              + `без соли ${noSalt}, молчание ${silent}; `
+              + `за сутки ${used + asked} из ${DAILY_MAX}`);
   await finish(0);
 });
 

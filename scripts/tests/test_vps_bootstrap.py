@@ -350,6 +350,7 @@ REPO_FAKE = "/tmp/manta"
 CRON_BACKUP = f"30 3 * * * cd {REPO_FAKE} && ./scripts/backup.sh"
 CRON_PEER = f"0 4 * * * cd {REPO_FAKE} && ./scripts/peer-sync.sh"
 CRON_BEAT = f"0 9 * * * cd {REPO_FAKE} && ./scripts/heartbeat.sh"
+CRON_SALTS = f"17 * * * * cd {REPO_FAKE} && ./scripts/gc-salts.sh"
 
 
 def run_cron(tmp_path, *, existing="", peers="", check_only="0"):
@@ -403,8 +404,9 @@ def test_cron_check_speaks_when_already_configured(tmp_path):
     прогоне. Промолчи она — раздел выглядел бы непроверенным.
     """
     marker = _var("CRON_MARKER").split("=", 1)[1].strip('"')
-    out, _ = run_cron(tmp_path, check_only="1",
-                      existing=f"{marker}\n{CRON_BACKUP}\n{CRON_BEAT}\n")
+    out, _ = run_cron(
+        tmp_path, check_only="1",
+        existing=f"{marker}\n{CRON_BACKUP}\n{CRON_BEAT}\n{CRON_SALTS}\n")
     assert "OK" in out, out
 
 
@@ -997,8 +999,22 @@ def host_tools() -> set[str]:
     `HOST_TOOLS="make rclone"` попадала в проверку предписанных команд
     как «make rclone» — то есть объявление списка читалось как приказ
     выполнить несуществующую цель. Ложная тревога на верной настройке.
+
+    Со спринта 173 записаны они парами «команда:пакет»: apt ставит
+    `nodejs`, а в PATH появляется `node`, и путать эти имена нельзя.
+    Здесь нужна КОМАНДА — её ищут скрипты расписания строкой
+    `command -v X || die`.
     """
-    return set(_assignment("HOST_TOOLS").split("(", 1)[1].rstrip(")").split())
+    return {e.split(":", 1)[0] for e in _host_entries()}
+
+
+def _host_entries() -> list[str]:
+    return _assignment("HOST_TOOLS").split("(", 1)[1].rstrip(")").split()
+
+
+def host_packages() -> set[str]:
+    """Имена пакетов apt — правая половина тех же пар."""
+    return {e.split(":")[-1] for e in _host_entries()}
 
 
 def run_host_tools(tmp_path, installed=(), check_only="0"):
@@ -1057,7 +1073,8 @@ def test_only_the_missing_ones_are_installed(tmp_path):
 
 
 def test_nothing_is_installed_when_everything_is_there(tmp_path):
-    rc, out, apt = run_host_tools(tmp_path, installed=("make", "rclone"))
+    rc, out, apt = run_host_tools(
+        tmp_path, installed=("make", "rclone", "node", "npm"))
     assert rc == 0, out
     assert apt == "", f"apt звали впустую: {apt!r}"
     assert "OK" in out
@@ -1108,7 +1125,11 @@ def test_the_schedule_and_the_scripts_are_actually_found():
     names = {p.name for p in scheduled_scripts()}
     assert {"backup.sh", "peer-sync.sh", "heartbeat.sh"} <= names, names
     assert all(p.exists() for p in scheduled_scripts())
-    assert host_tools() == {"make", "rclone"}
+    assert "gc-salts.sh" in names, "добыча солей выпала из расписания"
+    assert host_tools() == {"make", "rclone", "node", "npm"}
+    # Пакет apt для node зовётся иначе, чем команда, и это ровно та
+    # разница, из-за которой список стал парами.
+    assert "nodejs" in host_packages()
 
 
 @pytest.mark.parametrize("script", [p.name for p in scheduled_scripts()])

@@ -225,10 +225,12 @@ gc-login-check: ## Пускает ли Steam НОВЫМ путём аутент�
 	GC_STATE_DIR=$${GC_STATE_DIR:-$(HOME)/.manta-gc-node} \
 	node scripts/gc-node/login-check.mjs
 
+# Через обёртку, а не прямым вызовом node: она грузит env, различает
+# «бюджет на сегодня» и настоящую поломку и ровно её же гоняет cron.
+# Второй путь запуска однажды разошёлся бы с первым, и расходились бы они
+# молча — а проверять руками стали бы тот, что короче.
 gc-salts:      ## Добыть порцию солей у GC в таблицу ReplaySalts
-	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }
-	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
-	node scripts/gc-node/gc-salts.mjs
+	./scripts/gc-salts.sh
 
 gc-probe-node: ## Замер GC через steam-user: ARGS="--ids-file /tmp/ids.txt --limit 200"
 	@test -d scripts/gc-node/node_modules || { echo "сначала make gc-node"; exit 2; }

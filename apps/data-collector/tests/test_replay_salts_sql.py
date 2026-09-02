@@ -62,8 +62,8 @@ def db():
         cur.execute(f"SET search_path = {SCHEMA}")
         # Схема из НАСТОЯЩИХ миграций: своя копия проверяла бы сама себя.
         for name in ("002_outbox.sql", "008_replay_candidates.sql",
-                     "009_candidate_truth.sql", "012_collected_has_replay.sql",
-                     "014_replay_salts.sql"):
+                     "009_candidate_truth.sql", "011_api_budget.sql",
+                     "012_collected_has_replay.sql", "014_replay_salts.sql"):
             cur.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         cur.execute(f"SET search_path = {SCHEMA}")
     yield conn
@@ -265,3 +265,57 @@ def test_an_empty_batch_does_not_touch_the_database(db):
             raise AssertionError("пустая порция полезла в базу")
 
     assert SaltStore(Boom()).urls_for([]) == {}
+
+
+# -- учёт бюджета GC (спринт 173) ----------------------------------------------
+#
+# Наполнитель считает СВОЙ расход в той же таблице ApiBudget, что и
+# OpenDota, — у неё для этого есть колонка api. Ошибиться здесь можно
+# ровно двумя способами, и оба тихие: занизить свой расход (тогда потолок
+# не потолок) или попасть в чужой счёт (тогда коллекторы решат, что квота
+# OpenDota выбрана, и остановятся при полной квоте).
+
+def spend(db, n, source="gc-salts", api="steam-gc"):
+    with db.cursor() as cur:
+        cur.execute(_sql_from_script("SPEND_SQL"), (api, source, n))
+
+
+def used(db, api="steam-gc"):
+    with db.cursor() as cur:
+        cur.execute(_sql_from_script("USED_SQL"), (api,))
+        return cur.fetchone()[0]
+
+
+def test_spending_accumulates_within_the_day(db):
+    """Второй прогон прибавляет, а не заменяет.
+
+    Замена выглядела бы как «за сутки 8 из 400» после сорока прогонов —
+    потолок перестал бы быть потолком, а расход мы бы недосчитали ровно
+    настолько, насколько усердно работали.
+    """
+    spend(db, 8)
+    spend(db, 5)
+    assert used(db) == 13
+
+
+def test_gc_spending_does_not_touch_the_opendota_budget(db):
+    """Чужой счёт не трогаем — иначе остановим сбор при полной квоте.
+
+    Все запросы бюджета фильтруют по api. Попади наш расход в строки
+    OpenDota — коллекторы решили бы, что 2000 в сутки выбраны, и
+    замолчали бы при нетронутой квоте.
+    """
+    spend(db, 300)
+    assert used(db, api="opendota") == 0
+
+
+def test_all_sources_of_one_api_share_the_ceiling(db):
+    """Потолок общий на api, а не на процесс.
+
+    Бюджет живёт у АККАУНТА Steam. Считать его по каждому процессу
+    отдельно значило бы разрешить двум наполнителям выбрать двойную
+    норму — ровно так квота OpenDota однажды ушла в минус.
+    """
+    spend(db, 100, source="gc-salts")
+    spend(db, 50, source="gc-salts-2")
+    assert used(db) == 150

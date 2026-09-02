@@ -53,7 +53,7 @@ def test_the_portion_size_reaches_the_query(tmp_path=None):
     стоит появиться второму месту, читающему ту же выборку.
     """
     assert "LIMIT $1" in SRC
-    assert "db.query(PICK_SQL, [PER_RUN])" in SRC
+    assert "db.query(PICK_SQL, [Math.min(PER_RUN, left)])" in SRC
 
 
 def test_there_is_a_pause_between_requests():
@@ -103,7 +103,7 @@ def test_silence_ends_the_run_calmly():
     # Именно console.log, а не console.error: разбор логов делит потоки.
     assert "console.error" not in tail.split("break;")[0]
     # После цикла — выход нулём.
-    after = SRC.split("console.log(`соли: сохранено")[1]
+    after = SRC.split("console.log(`соли: спрошено")[1]
     assert "finish(0)" in after
 
 
@@ -214,3 +214,85 @@ def test_a_missing_token_says_what_to_do():
     # и наивная нарезка обрывала бы проверку прямо перед подсказкой.
     block = SRC.split("} catch {")[1].split("\n}")[0]
     assert "make gc-token" in block, "подсказка не в ветке отказа"
+
+
+# -- учёт бюджета (спринт 173) --------------------------------------------------
+
+def test_spending_counts_requests_not_salts():
+    """Считается ВОПРОС, а не удача.
+
+    Единицу бюджета съедает отправленный запрос: матч, у которого соли не
+    оказалось, стоил столько же, сколько удачный. Учёт по сохранённым
+    солям занижал бы расход — и занижал бы тем сильнее, чем хуже идут
+    дела, то есть врал бы именно тогда, когда нужен.
+    """
+    loop = _loop()
+    assert "asked++" in loop
+    # До ответа, а не после: молчание в ответ — тоже потраченная единица.
+    assert loop.index("asked++") < loop.index("await requestDetails")
+
+
+def test_spending_is_recorded_even_when_nothing_was_saved():
+    """Расход пишется и после неудачной порции.
+
+    Записывать только удачные прогоны значило бы вести учёт, который
+    занижает потраченное ровно в тех сутках, когда бюджет и кончился.
+    """
+    block = SRC.split("if (asked > 0) {")[1].split("}")[0]
+    assert "SPEND_SQL" in block
+    assert "saved" not in block, "расход зависит от удач"
+
+
+def test_the_daily_ceiling_stops_the_run_calmly():
+    """Выбранный потолок — штатный конец, а не отказ.
+
+    Он наступает каждые сутки, если добыча идёт хорошо. Ненулевой код
+    здесь дал бы ежесуточный красный алерт на признак успеха.
+    """
+    block = SRC.split("if (left <= 0) {")[1].split("\n  }")[0]
+    assert "finish(0)" in block
+    assert "console.error" not in block
+
+
+def test_the_portion_shrinks_to_what_is_left():
+    """Остаток бюджета урезает порцию, а не отменяет её.
+
+    Обрубить последние три запроса ради круглого числа значило бы
+    выбросить три соли даром.
+    """
+    assert "Math.min(PER_RUN, left)" in SRC
+
+
+def test_the_ceiling_is_read_before_the_portion_is_picked():
+    """Сначала остаток, потом выборка.
+
+    Иначе порция бралась бы полной и урезалась постфактум — то есть
+    предел применялся бы к циклу, но не к запросу, и второе место,
+    читающее ту же выборку, получило бы лишнее.
+    """
+    assert SRC.index("const used =") < SRC.index("db.query(PICK_SQL")
+
+
+def test_the_budget_is_kept_apart_from_the_opendota_one():
+    """Свой счёт — под своим именем api.
+
+    Попади расход GC в строки OpenDota, коллекторы решили бы, что квота
+    в 2000 выбрана, и остановились бы при нетронутой квоте. Все запросы
+    бюджета фильтруют по api, поэтому имя должно быть своим.
+    """
+    assert "const BUDGET_API = 'steam-gc';" in SRC
+    for sql in ("USED_SQL", "SPEND_SQL"):
+        body = SRC.split(f"const {sql} = `")[1].split("`;")[0]
+        assert "api = $1" in body or "(day, api, source)" in body
+
+
+def test_the_day_boundary_is_utc():
+    """Сутки — UTC, как у OpenDota.
+
+    Две границы суток в одной таблице пришлось бы каждый раз
+    вспоминать, а ошибка дала бы «потолок выбран» на час раньше или
+    позже — то есть потерянный или удвоенный час добычи.
+    """
+    for sql in ("USED_SQL", "SPEND_SQL"):
+        body = SRC.split(f"const {sql} = `")[1].split("`;")[0]
+        assert "AT TIME ZONE 'UTC'" in body, f"{sql} считает сутки не в UTC"
