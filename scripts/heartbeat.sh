@@ -93,17 +93,36 @@ matches=$(printf '%s\n' "$doctor_out" |
 quota=$(printf '%s\n' "$doctor_out" |
     grep -oE 'remaining-day=[0-9-]+' | head -1)
 
+# Деньги за месяц (спринт 183) — из отчёта doctor.sh, а НЕ своим
+# запросом к базе. Сторож строится поверх доктора и не заводит второго
+# мнения о состоянии машины: иначе два места считали бы одно и то же и
+# однажды посчитали бы по-разному. Поймано собственным тестом
+# `test_built_on_top_of_doctor_not_beside_it`.
+money=$(printf '%s\n' "$doctor_out" | grep -oE 'OpenDota за месяц: [^(]+\([0-9]+% потолка\)' | head -1)
+money_alert=""
+pct=$(printf '%s' "$money" | grep -oE '[0-9]+% потолка' | grep -oE '^[0-9]+')
+if [ -n "$pct" ] && [ "$pct" -ge "${OPENDOTA_ALERT_PCT:-80}" ]; then
+    # Порог 80%, а не 100%: сообщать о перерасходе, когда он уже
+    # случился, поздно — деньги потрачены. На 80% ещё можно решить,
+    # поднимать потолок или переждать до первого числа.
+    money_alert="• $money"
+    problems=$(printf '%s\n%s' "$problems" "$money_alert")
+    doctor_code=1
+fi
+
 # -- сообщение -----------------------------------------------------------------
 
 if [ "$doctor_code" -eq 0 ]; then
     text="✅ <b>Manta</b> ($HOST): всё в норме
 матчей: ${matches:-?}   ${bage_text}
-${quota:-квота неизвестна}"
+${quota:-квота неизвестна}${money:+
+$money}"
 else
     text="🔴 <b>Manta</b> ($HOST): есть проблемы
 $(printf '%s' "$problems" | sed '/^$/d')
 
-матчей: ${matches:-?}   ${bage_text}
+матчей: ${matches:-?}   ${bage_text}${money:+
+$money}
 лечение: docs/runbooks.md"
 fi
 

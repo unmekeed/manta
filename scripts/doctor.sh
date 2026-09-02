@@ -119,6 +119,42 @@ elif [ "${q#-}" != "$q" ] || [ "$q" -lt 100 ]; then
 else ok "remaining-day=$q"
 fi
 
+# Деньги за месяц. Платный тариф OpenDota считает КАЛЕНДАРНЫЙ месяц
+# ($0.01 за 100 вызовов), а суточная квота про месяц не знает ничего:
+# 15 000 в сутки — это $46,5 в месяце из 31 дня, и без этой строки о
+# перерасходе узнают из счёта, когда менять что-либо поздно.
+#
+# Считается только при заданном потолке: на бесплатном тарифе вызовы
+# денег не стоят, и строка про доллары была бы выдумкой — той самой, от
+# которой перестают верить остальным строкам.
+if [ "${OPENDOTA_MONTHLY_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
+    # api = 'opendota': соли GC живут в той же таблице под своим именем
+    # и денег не стоят. Сложи их сюда — и доктор объявил бы перерасход
+    # там, где не потрачено ни цента.
+    # `docker exec` и `psql` — В ОДНОЙ строке: проверка «psql только через
+    # контейнер» смотрит построчно, и перенос читался бы как хостовый
+    # вызов с дев-паролем. Поймано тестом.
+    calls=$(docker exec "${PG_CONTAINER:-manta-postgres-1}" psql -U "${POSTGRES_USER:-dota}" -d "${POSTGRES_DB:-manta}" -tAc \
+        "SELECT coalesce(sum(calls), 0) FROM ApiBudget
+          WHERE api = 'opendota'
+            AND day >= date_trunc('month', (NOW() AT TIME ZONE 'UTC'))::date" \
+        2>/dev/null | tr -d ' ')
+    if [ -z "$calls" ]; then
+        warn "месячный расход OpenDota неизвестен — база не ответила"
+    else
+        cost=$(awk -v c="$calls" -v r="${OPENDOTA_COST_PER_CALL:-0.0001}" \
+               'BEGIN{printf "%.2f", c*r}')
+        pct=$(awk -v c="$calls" -v l="$OPENDOTA_MONTHLY_LIMIT" \
+              'BEGIN{printf "%d", c*100/l}')
+        line="OpenDota за месяц: \$$cost ($pct% потолка)"
+        if [ "$pct" -ge "${OPENDOTA_ALERT_PCT:-80}" ]; then
+            warn "$line"
+        else
+            ok "$line"
+        fi
+    fi
+fi
+
 # Вердикт этого скрипта — по ДАННЫМ (мета-урок HANDOFF), и это не
 # меняется: живой pgrep ничего не доказывает. Но обратное показание
 # полезно как ПОДСКАЗКА: когда витрина стоит, а квота цела, ответ на

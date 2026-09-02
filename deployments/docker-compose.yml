@@ -27,6 +27,11 @@ x-collector-env:
       OPENDOTA_GLOBAL_LIMIT: "${OPENDOTA_GLOBAL_LIMIT:-1900}"
       OPENDOTA_LIMIT: "${OPENDOTA_LIMIT:-3}"
       OPENDOTA_MIN_PATCH: "${OPENDOTA_MIN_PATCH:-}"
+      # Платный тариф (спринт 183): месячный потолок вызовов и цена
+      # вызова. 0 — потолка нет, верное умолчание для бесплатного
+      # тарифа; на ключе коллектор предупредит, что дыра открыта.
+      OPENDOTA_MONTHLY_LIMIT: "${OPENDOTA_MONTHLY_LIMIT:-0}"
+      OPENDOTA_COST_PER_CALL: "${OPENDOTA_COST_PER_CALL:-0.0001}"
       OPENDOTA_MIN_RANK: "${OPENDOTA_MIN_RANK:-80}"
       # Возврат к припаркованным реплеям (спринт 153): сколько брать за
       # прогон. Источник `parked` запускается вручную, но переменную

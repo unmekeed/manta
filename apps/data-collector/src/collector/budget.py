@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import psycopg
@@ -54,6 +55,32 @@ SHARES = {
 }
 
 
+# -- месячный потолок (спринт 183) ---------------------------------------------
+#
+# ЗАЧЕМ ОТДЕЛЬНО ОТ СУТОЧНОГО. Платный тариф OpenDota считает деньги ЗА
+# МЕСЯЦ ($0.01 за 100 вызовов), а суточный лимит про месяц ничего не
+# знает: 15 000 в сутки — это $46,5 в месяце из 31 дня, и никто об этом
+# не скажет. Разница между «квота кончилась» и «пришёл счёт» в том, что
+# первое видно сразу, а второе — в конце месяца и деньгами.
+#
+# 0 — потолка нет, и это верное умолчание для БЕСПЛАТНОГО тарифа: там
+# суточный лимит и так не даёт потратить деньги, потому что денег нет.
+# А вот на ключе выключенный месячный потолок — тихая дыра, поэтому
+# configure() про это предупреждает вслух.
+MONTHLY_LIMIT = int(os.getenv("OPENDOTA_MONTHLY_LIMIT", "0"))
+
+# Цена вызова на платном тарифе: $0.01 за 100. Держится числом, потому
+# что расход в вызовах владельцу не говорит ничего, а в долларах —
+# говорит всё.
+COST_PER_CALL_USD = float(os.getenv("OPENDOTA_COST_PER_CALL", "0.0001"))
+
+# Как часто пересчитывается месячная сумма. Спрашивать её на каждый вызов
+# значило бы добавить запрос к базе на каждый запрос к API; минута даёт
+# перелёт порядка десятка вызовов (то есть центов) ценой одного запроса в
+# минуту.
+MONTH_REFRESH_S = 60
+
+
 class BudgetExhausted(RuntimeError):
     """Источник выбрал свою долю суточной квоты.
 
@@ -62,8 +89,25 @@ class BudgetExhausted(RuntimeError):
     """
 
 
+class MonthlyBudgetExhausted(BudgetExhausted):
+    """Выбран МЕСЯЧНЫЙ потолок — деньги, а не квота.
+
+    Наследник, а не отдельный тип: для __main__ это тот же случай
+    «сегодня брать нечего, спи». Но имя своё, потому что причина другая
+    и лечится иначе — сутки его не сбросят, нужен либо новый месяц, либо
+    решение владельца поднять потолок.
+    """
+
+
 class ApiBudget:
     """Счётчик вызовов одного источника к одному API за сутки UTC."""
+
+    # Умолчания НА УРОВНЕ КЛАССА, а не только в __init__: объект собирают
+    # и через __new__ (так делают тесты, чтобы подсунуть своё соединение),
+    # и такой экземпляр не должен падать на отсутствующем атрибуте.
+    # Поймано существующими тестами при добавлении месячного потолка.
+    _monthly = 0
+    _month_cache = (0.0, 0)
 
     def __init__(self, dsn: str, source: str, limit: int,
                  api: str = "opendota", shares: dict[str, int] | None = None,
@@ -75,6 +119,8 @@ class ApiBudget:
         self._api = api
         self._shares = dict(SHARES if shares is None else shares)
         self._global = global_limit or GLOBAL_LIMIT
+        self._monthly = MONTHLY_LIMIT
+        self._month_cache = (0.0, 0)     # (момент замера, вызовов за месяц)
 
     def close(self) -> None:
         self._db.close()
@@ -90,6 +136,40 @@ class ApiBudget:
         now = datetime.now(timezone.utc)
         passed = now.hour * 3600 + now.minute * 60 + now.second
         return max(0.0, 1.0 - passed / 86400.0)
+
+    def _month_start(self) -> str:
+        """Первое число текущего месяца UTC.
+
+        Тариф считает календарный месяц, поэтому и мы считаем его же — а
+        не «последние тридцать дней». Скользящее окно давало бы расход,
+        не совпадающий со счётом, и спорить с провайдером пришлось бы
+        своими цифрами против его.
+        """
+        now = datetime.now(timezone.utc)
+        return now.date().replace(day=1).isoformat()
+
+    def month_used(self, force: bool = False) -> int:
+        """Вызовов к этому API с начала месяца — всеми источниками.
+
+        Потолок общий на API, а не на процесс: платит владелец за сумму,
+        и делить его по коллекторам значило бы разрешить шестерым выбрать
+        шесть потолков.
+        """
+        now = time.monotonic()
+        ts, value = self._month_cache
+        if not force and now - ts < MONTH_REFRESH_S:
+            return value
+        with self._db.cursor() as cur:
+            cur.execute(
+                "SELECT coalesce(sum(calls), 0) FROM ApiBudget "
+                " WHERE day >= %s AND api = %s",
+                (self._month_start(), self._api))
+            value = int(cur.fetchone()[0])
+        self._month_cache = (now, value)
+        return value
+
+    def month_cost_usd(self) -> float:
+        return self.month_used() * COST_PER_CALL_USD
 
     def _used_by_source(self) -> dict[str, int]:
         with self._db.cursor() as cur:
@@ -148,6 +228,19 @@ class ApiBudget:
         """
         if self._limit <= 0:
             return 0
+        # Месячный потолок проверяется ДО инкремента, в отличие от
+        # суточного. Суточный терпит перелёт (на него оставлен запас до
+        # настоящей квоты), а здесь перелёт — это деньги, и списывать
+        # вызов, которого не будет, незачем.
+        if self._monthly > 0:
+            month = self.month_used()
+            if month + n > self._monthly:
+                raise MonthlyBudgetExhausted(
+                    f"{self._source}: МЕСЯЧНЫЙ потолок {self._api} выбран "
+                    f"({month}/{self._monthly} вызовов, "
+                    f"${month * COST_PER_CALL_USD:.2f}). Сутки его не "
+                    f"сбросят — нужен новый месяц или другое значение "
+                    f"OPENDOTA_MONTHLY_LIMIT")
         with self._db.cursor() as cur:
             cur.execute(
                 "INSERT INTO ApiBudget (day, api, source, calls) "
@@ -213,6 +306,20 @@ def configure(dsn: str, source: str, limit: int,
     _current = ApiBudget(dsn, source, limit, api)
     logger.info("бюджет %s для %s: %d вызовов в сутки (потрачено %d)",
                 api, source, limit, _current.used())
+    if MONTHLY_LIMIT > 0:
+        spent = _current.month_used(force=True)
+        logger.info("месячный потолок %s: %d вызовов ($%.2f), "
+                    "потрачено %d ($%.2f)", api, MONTHLY_LIMIT,
+                    MONTHLY_LIMIT * COST_PER_CALL_USD,
+                    spent, spent * COST_PER_CALL_USD)
+    elif os.getenv("OPENDOTA_API_KEY"):
+        # Ключ есть — значит тариф платный и вызовы стоят денег. Молчать
+        # тут нельзя: «потолка нет» на бесплатном тарифе безобидно, а на
+        # платном это единственное, что стоит между расписанием и счётом.
+        logger.warning(
+            "OPENDOTA_API_KEY задан, а OPENDOTA_MONTHLY_LIMIT — нет: "
+            "расход за месяц ничем не ограничен, а вызовы платные "
+            "($%.4f за вызов)", COST_PER_CALL_USD)
     return _current
 
 
