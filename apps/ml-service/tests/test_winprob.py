@@ -740,3 +740,36 @@ def test_the_gate_floor_matches_what_ablation_calls_material():
     from training.ablation import MIN_EFFECT
 
     assert GATE_TOL_FLOOR == MIN_EFFECT
+
+
+def test_every_difference_feature_is_mirrored():
+    """Каждая разностная фича меняет знак при зеркалировании.
+
+    ПОЙМАНО МУТАЦИЕЙ: состав MIRROR_NEGATE не проверялся вовсе, и фичу
+    можно было добавить в FEATURES, забыв здесь. Это не падает —
+    аугментация просто выдаёт отражение, в котором часть колонок смотрит
+    не в ту сторону, и модель учится на несогласованных данных.
+
+    Правило простое и проверяемое: имя на `_diff` означает разность
+    Radiant − Dire, а разность при смене сторон меняет знак. Фича-
+    вероятность вела бы себя иначе (1 − p) и живёт в MIRROR_COMPLEMENT.
+    """
+    from training.dataset import FEATURES, MIRROR_COMPLEMENT, MIRROR_NEGATE
+
+    missing = [f for f in FEATURES if f.endswith("_diff")
+               and f not in MIRROR_NEGATE and f not in MIRROR_COMPLEMENT]
+    assert not missing, (
+        f"разностные фичи без зеркалирования: {missing}")
+
+
+def test_the_mirror_list_has_no_strangers():
+    """И наоборот: в списке нет фич, которых нет в модели.
+
+    Забытая при удалении фичи строка сама по себе безвредна, но делает
+    список неверным описанием модели — а на него смотрят, когда решают,
+    как зеркалить следующую.
+    """
+    from training.dataset import FEATURES, MIRROR_NEGATE
+
+    strangers = sorted(set(MIRROR_NEGATE) - set(FEATURES))
+    assert not strangers, f"в MIRROR_NEGATE лишние имена: {strangers}"

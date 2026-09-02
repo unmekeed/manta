@@ -161,7 +161,9 @@ def test_runner_inserts_and_marks(monkeypatch):
     # vision_coverage_diff — в фикстуре нет вардов с координатами.
     # Проверка на ТОЧНОЕ число намеренна: лишний nan означает потерянную
     # фичу, недостающий — ноль вместо пропуска, то есть ложный сигнал.
-    assert lines[0].count("nan") == 6
+    # Спринт 185: +5 — готовых рядов OpenDota (lh/dn/урон/лечение/
+    # стаки) в фикстуре нет, и это ПРОПУСК, а не «никто не фармил».
+    assert lines[0].count("nan") == 11
     assert "opendota-json@3" in lines[0]
     # PG: INSERT в CollectedMatches и CollectorCursor
     kinds = [k for k, _ in pg_store["sql"]]

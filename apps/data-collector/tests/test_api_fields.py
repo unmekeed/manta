@@ -104,15 +104,25 @@ def test_the_used_list_matches_what_the_code_reads():
 
 
 @pytest.mark.parametrize("field", ["lh_t", "dn_t", "hero_damage_t",
-                                   "teamfights"])
-def test_the_cheap_per_minute_series_are_named_as_candidates(field):
-    """Готовые поминутные ряды — в кандидатах поимённо.
+                                  "hero_healing_t", "camps_stacked_t"])
+def test_the_cheap_per_minute_series_are_taken(field):
+    """Готовые поминутные ряды ВЗЯТЫ (спринт 185).
 
-    Это самое дешёвое из всего неиспользованного: те же массивы по 34
-    значения, что gold_t, в том же ответе, за те же деньги. Потерять их
-    из виду значит платить за данные и выбрасывать их.
+    Это было самое дешёвое из неиспользованного: те же массивы по 34
+    значения, что gold_t, в том же ответе, за те же деньги. Вернуться в
+    кандидаты они могут только вместе с удалением фичи — и тогда это
+    осознанное решение, а не забывчивость.
     """
-    assert field in A.PLAYER_CANDIDATE or field in A.MATCH_CANDIDATE
+    assert field in A.PLAYER_USED
+
+
+def test_teamfights_are_still_on_the_list():
+    """Драки пока не взяты, но и не потеряны.
+
+    Следующая волна: `teamfights` — единственное, что прямо отвечает на
+    вопрос «кто выигрывает бои». Модель знает только, кто богаче.
+    """
+    assert "teamfights" in A.MATCH_CANDIDATE
 
 
 def test_a_new_field_is_actually_noticed():

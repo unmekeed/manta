@@ -56,6 +56,14 @@ FEATURES = [
     "runes_diff",         # подобрано рун R−D (F5)
     "neutral_tier_diff",  # сумма тиров нейтралок R−D (F6)
     "levels_diff",        # сумма уровней героев R−D (F6)
+    # Спринт 185: готовые поминутные ряды OpenDota (миграция 024).
+    # Самое дешёвое из невзятого: те же массивы, что gold_t, в том же
+    # ответе, за тот же вызов.
+    "lh_diff",            # добитки R−D: фарм против убийств
+    "dn_diff",            # денаи R−D: давление на линии
+    "hero_damage_diff",   # урон ПО ГЕРОЯМ R−D: кто ведёт бой
+    "hero_healing_diff",  # лечение R−D: цена размена
+    "camps_stacked_diff", # стаки лагерей R−D: работа саппорта
     # G1 (спринт 131): производные — темп изменения метрики за окно,
     # единиц метрики в минуту. Дописаны В КОНЕЦ намеренно: артефакты
     # моделей хранят свой список фич, и старая модель (27 фич) обязана
@@ -99,7 +107,15 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  "vision_coverage_diff", "unspent_gold_diff",
                  "buyback_availability",
                  "sen_wards_diff", "runes_diff", "neutral_tier_diff",
-                 "levels_diff"}
+                 "levels_diff",
+                 # Спринт 185: готовые ряды OpenDota. Все пять — разности
+                 # R−D, значит при зеркалировании меняют знак. Забыть их
+                 # здесь значило бы учить модель на несогласованных
+                 # данных, и это не упало бы: аугментация просто выдала
+                 # бы отражение, в котором пять фич смотрят не в ту
+                 # сторону.
+                 "lh_diff", "dn_diff", "hero_damage_diff",
+                 "hero_healing_diff", "camps_stacked_diff"}
 
 # Производная разностной величины меняет знак вместе с ней: если при
 # зеркалировании networth_diff становится −networth_diff, то и «сколько
@@ -303,6 +319,9 @@ ROW_COLUMNS = [
     "roshan_diff", "aegis_alive", "buybacks_diff", "first_blood",
     "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
     "runes_diff", "neutral_tier_diff", "levels_diff",
+    # Спринт 185 (миграция 024)
+    "lh_diff", "dn_diff", "hero_damage_diff", "hero_healing_diff",
+    "camps_stacked_diff",
     # Волна 1 (спринты 90, 91): их добавили в FEATURES и забыли здесь —
     # обучение падало IndexError на зеркальной аугментации.
     "vision_coverage_diff", "unspent_gold_diff", "buyback_availability",
@@ -409,6 +428,13 @@ def row_to_features(row: dict) -> list[float]:
         "runes_diff": _f("runes_diff"),
         "neutral_tier_diff": _f("neutral_tier_diff"),
         "levels_diff": _f("levels_diff"),
+        # Спринт 185: готовые ряды OpenDota (миграция 024). NaN у матчей,
+        # разобранных раньше, и у пришедших реплейным путём.
+        "lh_diff": _f("lh_diff"),
+        "dn_diff": _f("dn_diff"),
+        "hero_damage_diff": _f("hero_damage_diff"),
+        "hero_healing_diff": _f("hero_healing_diff"),
+        "camps_stacked_diff": _f("camps_stacked_diff"),
     }
     # G1: производные (арифметика — в libs/wp_rates.py, чтобы у
     # report-generator была ровно та же).

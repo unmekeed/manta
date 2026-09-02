@@ -550,12 +550,82 @@ def neutral_level_features(m: dict, minutes: list[int]
     return {"levels_diff": levels, "neutral_tier_diff": tier_series}
 
 
+# Готовые поминутные ряды OpenDota: поле у игрока → имя нашей фичи.
+#
+# САМОЕ ДЕШЁВОЕ ИЗ ВСЕГО, ЧТО ОТДАЁТ API (инвентаризация, спринт 184).
+# Массивы той же длины и той же сетки, что `gold_t`, в том же ответе, за
+# тот же вызов: их не надо ни собирать из логов, ни восстанавливать по
+# событиям. До спринта 185 мы за них платили и выбрасывали.
+#
+# Что каждый даёт модели:
+#
+#   lh_t   добитки. Разделяет «богат, потому что фармит» и «богат,
+#          потому что убивает» — сейчас у модели есть только
+#          networth_diff, и этих случаев она не различает вовсе.
+#   dn_t   денаи: давление на линии, невидимое в золоте.
+#   hero_damage_t  урон ПО ГЕРОЯМ. Сильнейший из пятёрки: показывает,
+#          кто ведёт бой, а не кто копит. Команда, ведущая по золоту и
+#          отстающая по урону, — совсем другая игра, чем просто богатая.
+#   hero_healing_t лечение: цена размена в драках.
+#   camps_stacked_t стаки лагерей — работа саппорта, которой нет ни в
+#          одной другой фиче.
+MINUTE_SERIES = {
+    "lh_t": "lh_diff",
+    "dn_t": "dn_diff",
+    "hero_damage_t": "hero_damage_diff",
+    "hero_healing_t": "hero_healing_diff",
+    "camps_stacked_t": "camps_stacked_diff",
+}
+
+
+def _series_at(series: list, t: int) -> float:
+    """Значение поминутного ряда на секунде t.
+
+    Индекс равен номеру минуты — как в `_gold_earned_at`. За хвостом
+    ряда берётся последнее известное: матч мог кончиться раньше
+    последней минуты сетки, и ноль там означал бы «показатель
+    обнулился», а не «данных дальше нет».
+    """
+    if not series:
+        return 0.0
+    i = min(max(t // 60, 0), len(series) - 1)
+    try:
+        return float(series[i] or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def minute_series_features(m: dict, minutes: list[int]
+                           ) -> dict[str, list[float]]:
+    """Готовые поминутные ряды OpenDota как командные дифференциалы.
+
+    Ряда нет ни у кого — фичу НЕ отдаём вовсе: матч разобран старой
+    версией парсера OpenDota, и нули здесь были бы неправдой («никто не
+    фармил»), а не пропуском. LightGBM обрабатывает пропуск нативно, а
+    ноль он принял бы за факт.
+
+    Ряда нет у ОДНОГО игрока — считаем его нулём: выбрасывать данные
+    девяти остальных из-за одного пропуска дороже.
+    """
+    out: dict[str, list[float]] = {}
+    players = m.get("players") or []
+    for field, name in MINUTE_SERIES.items():
+        per_player = [(_sign(team_of(p.get("player_slot", 0))),
+                       p.get(field) or []) for p in players]
+        if not any(series for _, series in per_player):
+            continue
+        out[name] = [sum(sign * _series_at(series, t)
+                         for sign, series in per_player)
+                     for t in minutes]
+    return out
+
+
 def all_minute_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     """Все поминутные фичи трека F одним вызовом."""
     out: dict[str, list[float]] = {}
     for fn in (objective_features, vision_features, vision_coverage,
                item_features, economy_reserve_features,
-               neutral_level_features):
+               neutral_level_features, minute_series_features):
         try:
             out.update(fn(m, minutes))
         except Exception:  # noqa: BLE001 — сбой одной группы не рушит остальные

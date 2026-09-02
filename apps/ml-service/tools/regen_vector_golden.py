@@ -77,6 +77,12 @@ def full_row() -> dict:
         "obs_wards_diff": 5, "vision_coverage_diff": 0.125,
         "sen_wards_diff": -3, "runes_diff": 6, "neutral_tier_diff": 7,
         "levels_diff": -4,
+        # Спринт 185: готовые ряды OpenDota. Числа опять же попарно
+        # РАЗНЫЕ — эталон ловит перестановку колонок только тогда, когда
+        # значения различаются; пять одинаковых пропусков дали бы пять
+        # взаимозаменяемых фич, и тест это сразу показал.
+        "lh_diff": 42, "dn_diff": -8, "hero_damage_diff": 15300,
+        "hero_healing_diff": -640, "camps_stacked_diff": 9,
         **_windows(900),
     }
 
@@ -87,6 +93,14 @@ def scenarios() -> list[dict]:
     for key in ("position_advance", "alive_diff", "local_manpower_diff",
                 "spread_diff"):
         json_row[key] = None
+
+    replay_row = full_row()
+    # Реплейный путь: готовых рядов OpenDota в демке нет — они приходят
+    # только с JSON-ответом (спринт 185). Сценарий нужен, чтобы политика
+    # «пропуск, а не ноль» проверялась и на них.
+    for key in ("lh_diff", "dn_diff", "hero_damage_diff",
+                "hero_healing_diff", "camps_stacked_diff"):
+        replay_row[key] = None
 
     old_row = full_row()
     # Строки, собранные до миграции 008: зданий и живых героев нет.
@@ -115,13 +129,18 @@ def scenarios() -> list[dict]:
 
     return [
         {"name": "полная строка реплея",
-         "why": "все 41 фича известны — базовый эталон и проверка порядка",
+         "why": "все фичи известны — базовый эталон и проверка порядка",
          "row": full_row()},
         {"name": "JSON-путь: нет геометрии",
          "why": "position_advance/alive_diff/manpower/spread считаются "
                 "только из реплея. Ждём NaN, а не ноль: ноль у разностной "
                 "фичи значит «ровно посередине» — ложный сигнал",
          "row": json_row},
+        {"name": "реплейный путь: нет рядов OpenDota",
+         "why": "lh/dn/урон/лечение/стаки приходят только с JSON-ответом "
+                "(спринт 185). У матча, разобранного из демки, их нет — "
+                "и это пропуск, а не «никто не фармил»",
+         "row": replay_row},
         {"name": "строка до миграции 008",
          "why": "зданий и живых героев в старых строках нет; модель обязана "
                 "получить пропуск, а не выдуманное равенство",

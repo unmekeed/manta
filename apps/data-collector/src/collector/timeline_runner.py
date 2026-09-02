@@ -46,12 +46,15 @@ MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
                "item_value_diff", "key_items_diff", "unspent_gold_diff",
                "obs_wards_diff", "vision_coverage_diff",
                "sen_wards_diff", "runes_diff", "neutral_tier_diff",
-               "levels_diff"]
+               "levels_diff",
+               # Спринт 185: готовые поминутные ряды OpenDota (миграция 024)
+               "lh_diff", "dn_diff", "hero_damage_diff",
+               "hero_healing_diff", "camps_stacked_diff"]
 
 # Фичи трека F и волны 1, которых может не быть (битый JSON) — пишем nan.
 # Срез считается от конца: добавляя колонку в хвост MTF_COLUMNS, поправить
 # и это число, иначе новая фича не попадёт в заполнение nan-ами.
-F_TRACK_COLUMNS = MTF_COLUMNS[-14:]
+F_TRACK_COLUMNS = MTF_COLUMNS[-19:]
 
 DRAFT_COLUMNS = ["match_id", "patch", "tier", "radiant_win", "radiant_heroes",
                  "dire_heroes", "bans", "first_pick_team", "source"]
