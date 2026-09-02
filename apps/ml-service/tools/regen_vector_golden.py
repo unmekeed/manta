@@ -83,6 +83,10 @@ def full_row() -> dict:
         # взаимозаменяемых фич, и тест это сразу показал.
         "lh_diff": 42, "dn_diff": -8, "hero_damage_diff": 15300,
         "hero_healing_diff": -640, "camps_stacked_diff": 9,
+        # Спринт 186: драки. Снова попарно разные числа — иначе эталон не
+        # заметит перестановки колонок.
+        "fights_won_diff": 2, "fight_gold_diff": 1750,
+        "fight_deaths_diff": -3, "since_fight_s": 95,
         **_windows(900),
     }
 
@@ -99,7 +103,10 @@ def scenarios() -> list[dict]:
     # только с JSON-ответом (спринт 185). Сценарий нужен, чтобы политика
     # «пропуск, а не ноль» проверялась и на них.
     for key in ("lh_diff", "dn_diff", "hero_damage_diff",
-                "hero_healing_diff", "camps_stacked_diff"):
+                "hero_healing_diff", "camps_stacked_diff",
+                # Драки тоже приходят только с JSON-ответом (спринт 186).
+                "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
+                "since_fight_s"):
         replay_row[key] = None
 
     old_row = full_row()

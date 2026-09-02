@@ -163,7 +163,9 @@ def test_runner_inserts_and_marks(monkeypatch):
     # фичу, недостающий — ноль вместо пропуска, то есть ложный сигнал.
     # Спринт 185: +5 — готовых рядов OpenDota (lh/dn/урон/лечение/
     # стаки) в фикстуре нет, и это ПРОПУСК, а не «никто не фармил».
-    assert lines[0].count("nan") == 11
+    # Спринт 186: +4 — драк в фикстуре нет, и это тоже
+    # ПРОПУСК, а не «драк не случилось».
+    assert lines[0].count("nan") == 15
     assert "opendota-json@3" in lines[0]
     # PG: INSERT в CollectedMatches и CollectorCursor
     kinds = [k for k, _ in pg_store["sql"]]

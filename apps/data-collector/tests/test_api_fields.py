@@ -116,13 +116,13 @@ def test_the_cheap_per_minute_series_are_taken(field):
     assert field in A.PLAYER_USED
 
 
-def test_teamfights_are_still_on_the_list():
-    """Драки пока не взяты, но и не потеряны.
+def test_teamfights_are_taken():
+    """Драки взяты (спринт 186).
 
-    Следующая волна: `teamfights` — единственное, что прямо отвечает на
-    вопрос «кто выигрывает бои». Модель знает только, кто богаче.
+    Единственное поле, прямо отвечающее на вопрос «кто выигрывает бои»:
+    до него модель знала только, кто богаче.
     """
-    assert "teamfights" in A.MATCH_CANDIDATE
+    assert "teamfights" in A.MATCH_USED
 
 
 def test_a_new_field_is_actually_noticed():

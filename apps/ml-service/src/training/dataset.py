@@ -64,6 +64,13 @@ FEATURES = [
     "hero_damage_diff",   # урон ПО ГЕРОЯМ R−D: кто ведёт бой
     "hero_healing_diff",  # лечение R−D: цена размена
     "camps_stacked_diff", # стаки лагерей R−D: работа саппорта
+    # Спринт 186: драки как СОБЫТИЯ с исходом (миграция 025). Не сумма
+    # убийств: пять смертей по карте за десять минут и пять смертей в
+    # одном замесе — разные игры.
+    "fights_won_diff",    # счёт выигранных драк R−D (меньше потерь = победа)
+    "fight_gold_diff",    # золото, взятое В ДРАКАХ, R−D
+    "fight_deaths_diff",  # смерти в драках R−D (знак буквальный)
+    "since_fight_s",      # секунд с последней драки; НЕ зеркалится
     # G1 (спринт 131): производные — темп изменения метрики за окно,
     # единиц метрики в минуту. Дописаны В КОНЕЦ намеренно: артефакты
     # моделей хранят свой список фич, и старая модель (27 фич) обязана
@@ -115,7 +122,12 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  # бы отражение, в котором пять фич смотрят не в ту
                  # сторону.
                  "lh_diff", "dn_diff", "hero_damage_diff",
-                 "hero_healing_diff", "camps_stacked_diff"}
+                 "hero_healing_diff", "camps_stacked_diff",
+                 # Спринт 186: три разностные зеркалятся. `since_fight_s`
+                 # СРЕДИ НИХ НЕТ намеренно: время с последней драки
+                 # одинаково для обеих сторон, и смена знака превратила
+                 # бы его в отрицательное время.
+                 "fights_won_diff", "fight_gold_diff", "fight_deaths_diff"}
 
 # Производная разностной величины меняет знак вместе с ней: если при
 # зеркалировании networth_diff становится −networth_diff, то и «сколько
@@ -322,6 +334,9 @@ ROW_COLUMNS = [
     # Спринт 185 (миграция 024)
     "lh_diff", "dn_diff", "hero_damage_diff", "hero_healing_diff",
     "camps_stacked_diff",
+    # Спринт 186 (миграция 025)
+    "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
+    "since_fight_s",
     # Волна 1 (спринты 90, 91): их добавили в FEATURES и забыли здесь —
     # обучение падало IndexError на зеркальной аугментации.
     "vision_coverage_diff", "unspent_gold_diff", "buyback_availability",
@@ -435,6 +450,11 @@ def row_to_features(row: dict) -> list[float]:
         "hero_damage_diff": _f("hero_damage_diff"),
         "hero_healing_diff": _f("hero_healing_diff"),
         "camps_stacked_diff": _f("camps_stacked_diff"),
+        # Спринт 186: драки (миграция 025).
+        "fights_won_diff": _f("fights_won_diff"),
+        "fight_gold_diff": _f("fight_gold_diff"),
+        "fight_deaths_diff": _f("fight_deaths_diff"),
+        "since_fight_s": _f("since_fight_s"),
     }
     # G1: производные (арифметика — в libs/wp_rates.py, чтобы у
     # report-generator была ровно та же).

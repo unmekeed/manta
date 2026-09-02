@@ -620,12 +620,96 @@ def minute_series_features(m: dict, minutes: list[int]
     return out
 
 
+def teamfight_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
+    """Драки: кто их выигрывает (спринт 186).
+
+    ЗАЧЕМ ОТДЕЛЬНО ОТ УБИЙСТВ И УРОНА. У модели уже есть `kills_diff`
+    (все убийства за матч) и `hero_damage_diff` (весь урон). Драка — это
+    не сумма, а СОБЫТИЕ с исходом: пять смертей, размазанные по карте за
+    десять минут, и пять смертей в одном замесе — разные игры. Первое
+    означает, что кого-то ловят поодиночке; второе — что команда
+    проиграла бой и следующие полминуты у неё нет ни одного героя на
+    карте.
+
+    ЧЕТЫРЕ ФИЧИ.
+
+      fights_won_diff  накопительный счёт выигранных драк. Выиграла та
+                       сторона, что потеряла МЕНЬШЕ героев; равные потери
+                       не засчитываются никому — это размен, а не победа.
+      fight_gold_diff  накопительная разница золота, взятого В ДРАКАХ.
+                       Отделяет «выиграли бой» от «выиграли бой выгодно».
+      fight_deaths_diff смерти в драках, буквально Radiant − Dire. Знак
+                       БУКВАЛЬНЫЙ, как у всех наших разностей: больше —
+                       значит Radiant теряет больше. Удобный знак («выгода
+                       Radiant») был бы исключением из правила, а
+                       исключение здесь стоит дороже неудобства.
+      since_fight_s    секунд с конца последней ЗАВЕРШЁННОЙ драки. Темп
+                       игры: минута после замеса и минута тишины на
+                       тридцатой — разные состояния при одинаковой
+                       экономике.
+
+    Считаются только ЗАВЕРШЁННЫЕ к моменту t драки (`end <= t`). У
+    идущей прямо сейчас исхода ещё нет, а данные по игрокам API отдаёт за
+    всю драку целиком — учесть её частично нельзя, и учитывать целиком
+    значило бы подглядывать в будущее.
+    """
+    fights = m.get("teamfights") or []
+    if not fights:
+        # Драк не было вовсе — или матч разобран старой версией парсера.
+        # Отличить одно от другого нельзя, поэтому фичи не отдаём: ноль
+        # означал бы «драк не случилось», а это утверждение о матче.
+        return {}
+
+    # Сторона игрока берётся из `match.players` по индексу: массив
+    # `teamfights[].players` идёт в том же порядке. Полагаться на «первые
+    # пять — Radiant» нельзя, порядок задан данными, а не соглашением.
+    signs = [_sign(team_of(p.get("player_slot", 0)))
+             for p in m.get("players") or []]
+    if len(signs) < 2:
+        return {}
+
+    events = []
+    for f in fights:
+        end = f.get("end")
+        if end is None:
+            continue
+        won = gold = deaths = 0.0
+        per_side = {1: 0.0, -1: 0.0}
+        for i, pl in enumerate(f.get("players") or []):
+            if i >= len(signs):
+                break
+            sign = signs[i]
+            d = float(pl.get("deaths") or 0)
+            deaths += sign * d
+            gold += sign * float(pl.get("gold_delta") or 0)
+            per_side[sign] = per_side.get(sign, 0.0) + d
+        if per_side[1] != per_side[-1]:
+            # Победила сторона с МЕНЬШИМИ потерями.
+            won = 1.0 if per_side[1] < per_side[-1] else -1.0
+        events.append((int(end), won, gold, deaths))
+    events.sort()
+
+    won_s, gold_s, deaths_s, since_s = [], [], [], []
+    for t in minutes:
+        done = [e for e in events if e[0] <= t]
+        won_s.append(sum(e[1] for e in done))
+        gold_s.append(sum(e[2] for e in done))
+        deaths_s.append(sum(e[3] for e in done))
+        # До первой драки «времени с прошлой» не существует. Ноль здесь
+        # означал бы «драка только что кончилась» — самое неверное из
+        # возможных, а game_time у модели и так есть.
+        since_s.append(float(t - done[-1][0]) if done else float("nan"))
+    return {"fights_won_diff": won_s, "fight_gold_diff": gold_s,
+            "fight_deaths_diff": deaths_s, "since_fight_s": since_s}
+
+
 def all_minute_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     """Все поминутные фичи трека F одним вызовом."""
     out: dict[str, list[float]] = {}
     for fn in (objective_features, vision_features, vision_coverage,
                item_features, economy_reserve_features,
-               neutral_level_features, minute_series_features):
+               neutral_level_features, minute_series_features,
+               teamfight_features):
         try:
             out.update(fn(m, minutes))
         except Exception:  # noqa: BLE001 — сбой одной группы не рушит остальные

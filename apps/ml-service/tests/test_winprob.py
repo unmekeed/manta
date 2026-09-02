@@ -773,3 +773,35 @@ def test_the_mirror_list_has_no_strangers():
 
     strangers = sorted(set(MIRROR_NEGATE) - set(FEATURES))
     assert not strangers, f"в MIRROR_NEGATE лишние имена: {strangers}"
+
+
+def test_mirroring_flips_differences_but_not_time():
+    """Зеркалирование проверяется ЭФФЕКТОМ, а не составом списка.
+
+    ПОЙМАНО МУТАЦИЕЙ: добавление `since_fight_s` в MIRROR_NEGATE
+    проходило все списочные проверки — имя есть в FEATURES, значит
+    «не лишнее». А по существу это ошибка: время с последней драки
+    одинаково для обеих сторон, и смена знака превращает его в
+    ОТРИЦАТЕЛЬНОЕ время, которого не бывает.
+
+    Здесь строится настоящий вектор, зеркалится и сверяется покомпонентно.
+    """
+    import numpy as np
+    from training.dataset import FEATURES, mirror_xy
+
+    idx = {f: i for i, f in enumerate(FEATURES)}
+    x = np.zeros((1, len(FEATURES)))
+    x[0, idx["networth_diff"]] = 5000.0
+    x[0, idx["fights_won_diff"]] = 2.0
+    x[0, idx["since_fight_s"]] = 95.0
+    x[0, idx["game_time"]] = 900.0
+
+    Xm, ym = mirror_xy(x, np.array([1]))
+    mirrored = Xm[1]
+    assert mirrored[idx["networth_diff"]] == -5000.0
+    assert mirrored[idx["fights_won_diff"]] == -2.0
+    assert mirrored[idx["since_fight_s"]] == 95.0, (
+        "время с последней драки поменяло знак — отрицательного времени "
+        "не бывает")
+    assert mirrored[idx["game_time"]] == 900.0
+    assert ym.tolist() == [1, 0]
