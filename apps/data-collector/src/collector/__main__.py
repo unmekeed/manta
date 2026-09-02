@@ -197,6 +197,28 @@ def report_parked() -> None:
         print(f"  {n:5d}  {host}")
 
 
+# Имена источников — ОДИН список на весь модуль (спринт 180).
+#
+# До этого их было два: перечень в `choices` парсера и ветки самой
+# фабрики. Они разъехались молча — `parked` и `salts` фабрика создавала, а
+# парсер о них не знал. Держалось это на тонкости argparse: значение по
+# умолчанию он по choices НЕ проверяет, поэтому через COLLECTOR_SOURCE
+# проходило что угодно, а через `--source` то же имя отвергалось. Два
+# способа задать одно и то же вели себя по-разному, и usage при этом
+# показывал неполный список — то есть врал.
+#
+# Порядок здесь читаемый, а не алфавитный: сначала обычные источники,
+# потом те, что запускаются по требованию.
+SOURCES = (
+    "fixture", "opendota", "opendota-public", "candidates",
+    "opendota-timeline", "opendota-timeline-pro", "opendota-league",
+    "stratz-timeline", "stratz-timeline-pro",
+    # По требованию: возврат к непокорившимся реплеям и скачивание по
+    # уже добытой соли (спринты 153 и 179).
+    "parked", "salts",
+)
+
+
 def build_source(name: str):
     limit = int(os.getenv("OPENDOTA_LIMIT", "3"))
     api_key = os.getenv("OPENDOTA_API_KEY") or None
@@ -326,7 +348,11 @@ def build_source(name: str):
             # «User is not an admin» на Default-токене (спринт 122).
             batch_size=int(os.getenv("STRATZ_BATCH_SIZE", "1")),
         )
-    raise ValueError(f"unknown source {name!r}")
+    # Имена перечисляются в отказе: COLLECTOR_SOURCE задаётся в env-файле
+    # и в compose, где опечатку глазами не поймать, а «unknown source
+    # 'slats'» без списка отправляет читать исходники.
+    raise ValueError(
+        f"неизвестный источник {name!r}. Доступны: {', '.join(SOURCES)}")
 
 
 def main() -> None:
@@ -337,11 +363,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
-                        choices=["fixture", "opendota", "opendota-public",
-                                 "candidates",
-                                 "opendota-timeline", "opendota-timeline-pro",
-                                 "opendota-league",
-                                 "stratz-timeline", "stratz-timeline-pro"])
+                        choices=SOURCES)
     parser.add_argument("--interval", type=int,
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
     parser.add_argument("--once", action="store_true",
