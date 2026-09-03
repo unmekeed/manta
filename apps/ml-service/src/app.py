@@ -39,6 +39,11 @@ PREDICTIONS = Counter("ml_predictions_total", "Выполненные предс
 MODEL_LOADED = Gauge(
     "ml_model_loaded",
     "1 — основная модель загружена; 0 — сервис отвечает UNAVAILABLE")
+MODEL_RELOADS = Counter(
+    "ml_model_reloads_total",
+    "Переключений на новую версию модели из реестра без перезапуска")
+MODEL_FEATURES = Gauge(
+    "ml_model_features", "Число фич в загруженной модели")
 
 
 class ModelSlot:
@@ -62,16 +67,37 @@ class ModelSlot:
     Повторная попытка нужна, чтобы сервис ПОДХВАТИЛ модель, как только
     ml-autotrain её опубликует. Без неё контейнер пришлось бы
     перезапускать руками, а знать момент неоткуда.
+
+    ЖИВОЙ ОТКАЗ 2-3 СЕНТЯБРЯ, из-за которого слот переписан (спринт 191).
+    Всё сказанное выше было верно ровно для перехода «модели НЕТ → есть».
+    Переход «есть → есть новее» не покрывался: загруженная модель
+    кэшировалась навсегда. Гейт продвинул модель с новым составом фич,
+    сервис продолжал отдавать старую, и полтора суток это никому не
+    мешало — пока контейнер по неизвестной причине не перезапустился и не
+    подхватил новую. Генерация отчётов встала на 29 часов.
+
+    Дефект той же формы, что `--probe` в спринте 189: ВЕРНОЕ решение,
+    применённое к части своих случаев и не применённое к соседним. И
+    заметить это по коду нельзя — обе половины выглядят разумно.
+
+    Теперь слот следит за версией стейджа в реестре и переключается сам.
+    Спрашивается ТОЛЬКО номер версии (`stage_version`), а не артефакт:
+    иначе проверка «не сменилась ли модель» стоила бы скачивания весов.
     """
 
     def __init__(self, spec, *, retry_after_s: float = 60.0,
-                 loader=None, clock=None):
+                 refresh_after_s: float = 300.0,
+                 loader=None, prober=None, clock=None):
         self._spec = spec
         self._retry_after = retry_after_s
+        self._refresh_after = refresh_after_s
         self._load = loader or (lambda s: WinProbability(_resolve_model_path(s)))
+        self._probe = prober or _stage_version_of
         self._clock = clock or time.monotonic
         self._model: WinProbability | None = None
+        self._version: str | None = None
         self._last_try: float | None = None
+        self._last_check: float | None = None
         MODEL_LOADED.set(0)
 
     @classmethod
@@ -79,32 +105,92 @@ class ModelSlot:
         """Слот с уже загруженной моделью — для тестов и прямых вызовов."""
         slot = cls.__new__(cls)
         slot._spec, slot._retry_after, slot._load = None, 0.0, None
+        slot._refresh_after, slot._probe = 0.0, None
         slot._clock, slot._model, slot._last_try = time.monotonic, model, None
+        slot._version, slot._last_check = None, None
         MODEL_LOADED.set(1)
         return slot
 
     def get(self) -> WinProbability | None:
-        """Модель или None. Повторная попытка — не чаще retry_after_s.
+        """Модель или None; по дороге — подхват новой версии из реестра.
 
         Ограничение по времени тут не про скорость: без него каждый запрос
         при пустом реестре ходил бы в MinIO, и сервис БЕЗ модели грузил бы
         хранилище сильнее, чем сервис с моделью.
         """
-        if self._model is not None or self._load is None:
+        if self._load is None:
+            return self._model
+        if self._model is not None:
+            self._maybe_refresh()
             return self._model
         now = self._clock()
         if self._last_try is not None and now - self._last_try < self._retry_after:
             return None
         self._last_try = now
+        return self._reload("основная модель загружена")
+
+    def _maybe_refresh(self) -> None:
+        """Сменилась ли версия стейджа — не чаще refresh_after_s.
+
+        Сбой опроса НЕ роняет и не разряжает слот: недоступный на минуту
+        реестр не повод перестать обслуживать запросы уже загруженной
+        моделью. Молча продолжаем со старой — это худший из безопасных
+        исходов, а не лучший из опасных.
+        """
+        if not self._refresh_after or self._probe is None:
+            return
+        now = self._clock()
+        if (self._last_check is not None
+                and now - self._last_check < self._refresh_after):
+            return
+        self._last_check = now
         try:
-            self._model = self._load(self._spec)
+            latest = self._probe(self._spec)
+        except Exception as e:  # noqa: BLE001 — реестр недоступен, работаем
+            logger.warning("не удалось проверить версию модели (%s): %s",
+                           self._spec, e)
+            return
+        if latest is None or latest == self._version:
+            return
+        logger.info("в реестре новая версия модели: %s → %s",
+                    self._version, latest)
+        before = self._model
+        if self._reload("модель переключена на новую версию") is not before:
+            MODEL_RELOADS.inc()
+
+    def _reload(self, done_msg: str) -> WinProbability | None:
+        try:
+            model = self._load(self._spec)
         except Exception as e:  # noqa: BLE001 — любая беда реестра равнозначна
-            logger.warning("основная модель недоступна (%s): %s", self._spec, e)
-            MODEL_LOADED.set(0)
-            return None
-        logger.info("основная модель загружена (%s)", self._spec)
+            if self._model is None:
+                logger.warning("основная модель недоступна (%s): %s",
+                               self._spec, e)
+                MODEL_LOADED.set(0)
+            else:
+                # Уже работающую модель неудачная попытка не отнимает.
+                logger.warning("новую версию загрузить не удалось (%s): %s",
+                               self._spec, e)
+            return self._model
+        self._model = model
+        self._version = self._safe_version()
+        # Только что загруженную модель проверять на свежесть незачем:
+        # без этой строки первый же следующий запрос шёл бы в реестр
+        # снова, и ограничение по времени начинало бы действовать лишь со
+        # второй проверки.
+        self._last_check = self._clock()
+        logger.info("%s (%s, версия %s, фич %d)", done_msg, self._spec,
+                    self._version, len(getattr(model, "features", []) or []))
         MODEL_LOADED.set(1)
-        return self._model
+        MODEL_FEATURES.set(len(getattr(model, "features", []) or []))
+        return model
+
+    def _safe_version(self) -> str | None:
+        if self._probe is None:
+            return None
+        try:
+            return self._probe(self._spec)
+        except Exception:  # noqa: BLE001 — версия справочна, модель уже есть
+            return None
 
 
 def _vector_from_features(fv, features: list[str]) -> np.ndarray:
@@ -193,6 +279,23 @@ class MLService(services_pb2_grpc.MLServiceServicer):
             )
 
 
+def _stage_version_of(spec: str | os.PathLike) -> str | None:
+    """Версия стейджа для `registry://name/stage`; None для всего прочего.
+
+    Локальный путь версии не имеет, и это не ошибка: слот с файловой
+    моделью просто никогда не переключается. Точная версия
+    (`registry://name/0.9.0-...`) — тоже неподвижная цель, и опрашивать её
+    смысла нет: она по определению не меняется.
+    """
+    spec_s = str(spec)
+    if not spec_s.startswith("registry://"):
+        return None
+    from registry import registry_from_env
+
+    name, _, ref = spec_s[len("registry://"):].partition("/")
+    return registry_from_env().stage_version(name, ref or "production")
+
+
 def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
     """`registry://name/ref` → скачать из реестра во временный файл;
     иначе — локальный путь как есть."""
@@ -222,7 +325,8 @@ def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server,
     не при первом запросе через сутки.
     """
     slot = ModelSlot(model_path,
-                     retry_after_s=float(os.getenv("MODEL_RETRY_S", "60")))
+                     retry_after_s=float(os.getenv("MODEL_RETRY_S", "60")),
+                     refresh_after_s=float(os.getenv("MODEL_REFRESH_S", "300")))
     slot.get()
     # Дополнительные модели: NAME_MODEL_PATH из окружения (пусто/сбой —
     # сервим без них, Predict вернёт NOT_FOUND по этому имени).

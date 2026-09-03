@@ -487,6 +487,11 @@ services:
     environment:
       <<: *app-env
       ML_GRPC_ADDR: ml-service:50051
+      # Сторож за производством отчётов (спринт 191). БЕЗ токена он
+      # молчит — а молчащий сторож ровно то, что стоило проекту 29 часов
+      # незамеченного отказа генерации 2-3 сентября.
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     depends_on:
       kafka: { condition: service_healthy }
       postgres: { condition: service_healthy }

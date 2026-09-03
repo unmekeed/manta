@@ -385,11 +385,20 @@ IMPORT_TO_PACKAGE: dict[str, tuple[str, ...]] = {
 def acceptable_packages(imp: str) -> set[str]:
     """Каким пакетом может быть удовлетворён импорт (нормализованно)."""
     return {norm(p) for p in IMPORT_TO_PACKAGE.get(imp, (imp,))}
-STDLIB_HINT = {
-    "__future__", "logging", "os", "sys", "json", "math", "re", "time",
-    "typing", "pathlib", "dataclasses", "datetime", "collections", "bisect",
-    "itertools", "functools", "subprocess", "hashlib", "random", "shutil",
-}
+
+
+# Стандартная библиотека берётся У ИНТЕРПРЕТАТОРА, а не выписывается
+# руками (спринт 191). Здесь лежал перечень из двадцати имён, и первый же
+# новый модуль libs, импортировавший `html`, объявил стандартный модуль
+# недостающим ПАКЕТОМ: тест потребовал добавить в requirements.txt то,
+# чего в PyPI нет. Список, который надо не забыть пополнить, — дефект той
+# же формы, что комментарий «дописывать сюда»: работает ровно до первого
+# случая, о котором не подумали.
+#
+# Ниже по файлу `sys.stdlib_module_names` уже используется для той же
+# цели. Две версии одного понятия в одном файле разошлись, как и
+# положено, молча.
+STDLIB_HINT = set(sys.stdlib_module_names) | {"__future__"}
 
 
 def libs_module_imports(module: str) -> set[str]:

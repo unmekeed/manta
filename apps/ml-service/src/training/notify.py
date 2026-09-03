@@ -1,10 +1,16 @@
-"""Telegram-уведомления о ходе обучения Win Probability.
+"""Telegram-сводки о ходе обучения Win Probability.
 
 Собирает краткую сводку из реестра моделей (production-версия, метрики
 на про-эталоне, разрыв датасета, последние кандидаты) и шлёт её в
 Telegram. Используется:
 - разово: python -m training.notify  (тест/cron);
 - из auto-train: notifier.on_retrain(...) после каждого переобучения.
+
+САМА ОТПРАВКА живёт в libs/manta_notify.py (спринт 191). Здесь остались
+только сводки, знающие про реестр моделей. Разделение понадобилось, когда
+кричать понадобилось и report-generator'у: тянуть в него ml-service ради
+одного POST в Telegram нельзя, а вторая копия отправки разъехалась бы с
+первой при первой же правке.
 
 Секреты — только из окружения, НЕ из кода/репозитория:
   TELEGRAM_BOT_TOKEN — токен бота (@BotFather);
@@ -16,73 +22,17 @@ from __future__ import annotations
 
 import html
 import logging
-import os
 
-import requests
+from manta_notify import TelegramNotifier as _Transport
 
 from registry import registry_from_env
 
 logger = logging.getLogger("notify")
 
 MODEL = "win_probability"
-API = "https://api.telegram.org/bot{token}/{method}"
 
 
-class TelegramNotifier:
-    def __init__(self, token: str | None = None, chat_id: str | None = None):
-        self.token = token or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.token)
-
-    def _call(self, method: str, **params):
-        resp = requests.post(API.format(token=self.token, method=method),
-                             json=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
-
-    def resolve_chat_id(self) -> str | None:
-        """Если chat_id не задан — взять последний чат из getUpdates
-        (пользователь должен был написать боту /start)."""
-        if self.chat_id:
-            return self.chat_id
-        try:
-            upd = self._call("getUpdates")
-            chats = [u["message"]["chat"]["id"] for u in upd.get("result", [])
-                     if "message" in u]
-            if chats:
-                self.chat_id = str(chats[-1])
-                logger.info("chat_id определён из getUpdates: %s", self.chat_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("не удалось получить chat_id из getUpdates")
-        return self.chat_id or None
-
-    def send(self, text: str) -> bool:
-        if not self.enabled:
-            logger.info("telegram отключён (нет TELEGRAM_BOT_TOKEN)")
-            return False
-        chat = self.resolve_chat_id()
-        if not chat:
-            logger.warning("нет chat_id — отправьте боту /start")
-            return False
-        try:
-            self._call("sendMessage", chat_id=chat, text=text,
-                       parse_mode="HTML", disable_web_page_preview=True)
-            return True
-        except Exception:  # noqa: BLE001
-            logger.warning("HTML-отправка не прошла, пробую без разметки")
-        try:  # fallback: без parse_mode, чтобы не потерять уведомление
-            plain = text.replace("<b>", "").replace("</b>", "") \
-                        .replace("<code>", "").replace("</code>", "")
-            self._call("sendMessage", chat_id=chat, text=html.unescape(plain),
-                       disable_web_page_preview=True)
-            return True
-        except Exception:  # noqa: BLE001
-            logger.exception("ошибка отправки в telegram")
-            return False
-
+class TelegramNotifier(_Transport):
     # -- сводки ----------------------------------------------------------------
 
     def summary(self, dataset_matches: int | None = None) -> str:

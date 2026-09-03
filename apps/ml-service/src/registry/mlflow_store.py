@@ -109,6 +109,17 @@ class MlflowRegistry:
         except KeyError:
             return None
 
+    def stage_version(self, name: str, stage: str = "production") -> str | None:
+        """Версия алиаса БЕЗ скачивания артефакта (спринт 191).
+
+        Тот же смысл, что у одноимённого метода S3-бэкенда: частая
+        проверка «модель не сменилась?» не должна стоить весов.
+        """
+        try:
+            return str(self._version_of(name, stage).version)
+        except KeyError:
+            return None
+
     def list_versions(self, name: str) -> list[str]:
         try:
             versions = self._client.search_model_versions(f"name='{name}'")

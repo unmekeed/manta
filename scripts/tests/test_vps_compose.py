@@ -252,6 +252,26 @@ def test_services_restart_by_themselves():
     assert not without, f"без политики перезапуска: {without}"
 
 
+def test_every_service_logs_to_the_journal():
+    """Логи обязаны пережить пересоздание контейнера (спринт 191).
+
+    Драйвер по умолчанию — json-file, и файл живёт РОВНО столько же,
+    сколько контейнер. Разбирая 29-часовой отказ генерации отчётов 2-3
+    сентября, мы остались без улик именно поэтому: деплой пересоздал
+    контейнеры, и логи тех суток исчезли вместе со старыми. Причину
+    самого отказа установить уже невозможно.
+
+    Проверяется КАЖДЫЙ сервис, а не только те, чьи логи кажутся
+    интересными: угадать заранее, чей лог понадобится при следующем
+    разборе, нельзя — в этот раз понадобился ml-service, о котором никто
+    не думал.
+    """
+    without = [name for name, svc in _load(VPS)["services"].items()
+               if (svc.get("logging") or {}).get("driver") != "journald"]
+    assert not without, (
+        f"логи не переживут пересоздание контейнера: {without}")
+
+
 def test_vps_apps_use_function_specific_postgres_users():
     cfg = merged_config()
     services = cfg["services"]

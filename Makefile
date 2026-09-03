@@ -78,13 +78,24 @@ test: pytest   ## Unit-тесты: питоновские наборы всех 
 # tests: у replay-parser он есть, но лежит там C++ (ctest, цель
 # parser-test). Пустой прогон pytest возвращает код 5, и цель падала бы
 # на сервисе, у которого питоновских тестов нет и не планируется.
-pytest: pytest-check ## Питоновские наборы всех сервисов
+#
+# Спринт 191: добавлены libs/ и scripts/. Первая же правка после 190-го
+# показала, что дыра была шире, чем казалось: цель обходила apps/*, а
+# тесты упаковки и наложения для VPS живут в scripts/tests и в обход
+# ходили точно так же. Чинить половину класса ошибок — значит оставить
+# себе вторую половину.
+pytest: pytest-check ## Питоновские наборы: сервисы, libs, scripts
 	@fail=""; \
 	for s in $$(ls -d apps/*/tests/test_*.py \
 	            | xargs -n1 dirname | xargs -n1 dirname | sort -u); do \
 		echo ">> pytest $$s"; \
 		(cd $$s && PYTHONPATH=src:$(CURDIR)/libs python3 -m pytest tests -q) \
 			|| fail="$$fail $$s"; \
+	done; \
+	for d in libs scripts; do \
+		echo ">> pytest $$d"; \
+		PYTHONPATH=$(CURDIR)/libs python3 -m pytest $$d/tests -q \
+			|| fail="$$fail $$d"; \
 	done; \
 	if [ -n "$$fail" ]; then \
 		echo; echo "красные наборы:$$fail"; exit 1; \

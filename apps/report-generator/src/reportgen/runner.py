@@ -26,7 +26,9 @@ from confluent_kafka import Consumer, Producer
 from prometheus_client import Counter, Histogram
 from wp_rates import RATE_FEATURES, rates_for_row, window_columns
 
-from . import retention
+from manta_notify import TelegramNotifier
+
+from . import health, retention
 from .builder import build_analysis, build_timeline
 from .gen import services_pb2, services_pb2_grpc
 
@@ -171,6 +173,16 @@ class ReportGenerator:
         # старта, дальше раз в сутки.
         self._retention_days = retention.configured_days()
         self._last_purge = -86400.0
+        # Сторож за производством отчётов (спринт 191, см. health.py).
+        self._watch = health.FailureWatch(
+            window=int(os.getenv("REPORTS_ALERT_WINDOW", "50")),
+            min_events=int(os.getenv("REPORTS_ALERT_MIN_EVENTS", "5")),
+            share=float(os.getenv("REPORTS_ALERT_SHARE", "0.5")))
+        self._notifier = TelegramNotifier()
+        # Набор недостающих фич, о котором уже кричали. Хранится, чтобы
+        # повторять сообщение при СМЕНЕ набора (продвинулась ещё одна
+        # модель), но не на каждом из сотен одинаковых отказов.
+        self._alerted_missing: tuple[str, ...] | None = None
 
     # -- источники данных -------------------------------------------------------
 
@@ -464,6 +476,65 @@ class ReportGenerator:
             with REPORT_DURATION.time():
                 self.generate(match_id, feature_version, env.get("trace_id"))
             REPORTS_GENERATED.inc()
-        except Exception:  # noqa: BLE001 — не блокируем партицию
+            self._record(True)
+        except Exception as exc:  # noqa: BLE001 — не блокируем партицию
             REPORTS_FAILED.inc()
             logger.exception("report generation failed for match %s", match_id)
+            self._on_failure(exc)
+
+    # -- сторож за производством ----------------------------------------------
+
+    def _record(self, ok: bool) -> None:
+        """Записать исход попытки и отправить сообщение НА ПЕРЕХОДЕ.
+
+        Считаются только состоявшиеся попытки: часы без единого матча не
+        дают ни удач, ни неудач, и сторож про них молчит по построению.
+        Это ровно то различение, без которого он превратился бы в
+        ежедневную ложную тревогу (урок спринта 163).
+        """
+        self._watch.record(ok)
+        verdict = self._watch.verdict()
+        if verdict == "broken":
+            logger.error("генерация отчётов сломана: неудач %d из %d "
+                         "последних попыток",
+                         self._watch.failures, len(self._watch.window))
+            self._notify(
+                f"🔴 <b>Manta</b>: генерация отчётов сломана — "
+                f"{self._watch.failures} неудач из "
+                f"{len(self._watch.window)} последних попыток.\n"
+                f"Матчи приходят, отчёты не производятся. "
+                f"Смотреть: <code>docker logs manta-report-generator-1</code>")
+        elif verdict == "recovered":
+            logger.info("генерация отчётов восстановилась")
+            self._alerted_missing = None
+            self._notify("✅ <b>Manta</b>: генерация отчётов восстановилась")
+
+    def _on_failure(self, exc: Exception) -> None:
+        """Неудача: общий счётчик плюс быстрый путь для рассинхрона фич.
+
+        Рассинхрон вынесен отдельно не ради красоты. Он отличается от
+        прочих поломок тем, что gRPC называет причину ПОИМЁННО, и ждать
+        накопления окна незачем: первая же такая ошибка — готовый
+        диагноз. Именно этот отказ 2 сентября прожил 29 часов.
+        """
+        missing = tuple(health.missing_features(str(exc)))
+        if missing and missing != self._alerted_missing:
+            self._alerted_missing = missing
+            logger.error("модель в production ждёт фич, которых мы не шлём: %s",
+                         ", ".join(missing))
+            self._notify(
+                "🔴 <b>Manta</b>: отчёты не генерируются — модель в "
+                "production ждёт фич, которых report-generator не шлёт:\n"
+                f"<code>{', '.join(missing)}</code>\n"
+                "Лечение: дописать их в WP_PASSTHROUGH_FEATURES и "
+                "пересобрать report-generator.")
+        self._record(False)
+
+    def _notify(self, text: str) -> None:
+        """Отправка не должна ронять петлю: Telegram — не путь данных."""
+        if not self._notifier.enabled:
+            return
+        try:
+            self._notifier.send(text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("уведомление не отправлено: %s", e)

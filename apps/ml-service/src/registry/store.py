@@ -150,6 +150,21 @@ class ModelRegistry:
         except KeyError:
             return None
 
+    def stage_version(self, name: str, stage: str = "production") -> str | None:
+        """Номер версии стейджа БЕЗ скачивания артефакта (спринт 191).
+
+        Нужен, чтобы ml-service мог часто спрашивать «модель не
+        сменилась?». Через `stage_metadata` тот же вопрос стоил бы
+        скачивания весов из MinIO на КАЖДУЮ проверку — то есть сервис
+        грузил бы хранилище тем больше, чем реже модель меняется.
+        """
+        try:
+            ptr = json.loads(self._b.get_bytes(f"{name}/stages/{stage}.json"))
+        except KeyError:
+            return None
+        version = ptr.get("version")
+        return str(version) if version else None
+
     def list_versions(self, name: str) -> list[str]:
         prefix = f"{name}/versions/"
         seen = sorted({k[len(prefix):].split("/")[0]

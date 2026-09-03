@@ -37,8 +37,22 @@ x-clickhouse-trainer-env: &clickhouse-trainer-env
   CLICKHOUSE_USER: manta_ch_trainer
   CLICKHOUSE_PASSWORD: "${MANTA_CH_PASS_TRAINER:?MANTA_CH_PASS_TRAINER is required}"
 
+# Логи контейнеров — в systemd-journal, а не в файл рядом с контейнером
+# (спринт 191). ЗАЧЕМ: json-file живёт РОВНО столько же, сколько сам
+# контейнер. Разбирая 29-часовой отказ генерации отчётов, мы остались без
+# улик именно поэтому: деплой пересоздал контейнеры, и логи тех суток
+# исчезли вместе со старыми. Журнал переживает пересоздание, и `docker
+# logs` с этим драйвером работает как прежде.
+#
+#     journalctl CONTAINER_NAME=manta-report-generator-1 --since -3d
+x-journal: &journal
+  driver: journald
+  options:
+    tag: "{{.Name}}"
+
 services:
   postgres:
+    logging: *journal
     ports: !override
       - "127.0.0.1:5432:5432"
     mem_limit: 1g
@@ -48,6 +62,7 @@ services:
       - mlflow-internal
 
   clickhouse:
+    logging: *journal
     ports: !override
       - "127.0.0.1:8123:8123"
       - "127.0.0.1:9000:9000"
@@ -68,6 +83,7 @@ services:
     restart: unless-stopped
 
   redis:
+    logging: *journal
     ports: !override
       - "127.0.0.1:6379:6379"
     mem_limit: 256m
@@ -79,6 +95,7 @@ services:
     restart: unless-stopped
 
   kafka:
+    logging: *journal
     ports: !override
       - "127.0.0.1:9092:9092"
     # JVM: самый прожорливый сосед после ClickHouse.
@@ -86,6 +103,7 @@ services:
     restart: unless-stopped
 
   minio:
+    logging: *journal
     ports: !override
       - "127.0.0.1:9500:9000"
       - "127.0.0.1:9501:9001"
@@ -95,6 +113,7 @@ services:
     restart: unless-stopped
 
   mlflow:
+    logging: *journal
     ports: !override
       - "127.0.0.1:9600:5000"
     mem_limit: 384m
@@ -103,6 +122,7 @@ services:
       - mlflow-internal
 
   api-gateway:
+    logging: *journal
     ports: !override
       - "127.0.0.1:8080:8080"
     mem_limit: 256m
@@ -124,6 +144,7 @@ services:
       - "${MANTA_KEYS_DIR:?MANTA_KEYS_DIR is required}/tls-key.pem:/run/manta-secrets/tls-key.pem:ro"
 
   data-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -132,6 +153,7 @@ services:
     restart: unless-stopped
 
   timeline-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -140,6 +162,7 @@ services:
     restart: unless-stopped
 
   pro-timeline-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -148,6 +171,7 @@ services:
     restart: unless-stopped
 
   league-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -156,6 +180,7 @@ services:
     restart: unless-stopped
 
   pro-replay-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -164,6 +189,7 @@ services:
     restart: unless-stopped
 
   stratz-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -172,6 +198,7 @@ services:
     restart: unless-stopped
 
   salt-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -180,6 +207,7 @@ services:
     restart: unless-stopped
 
   candidates-collector:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       POSTGRES_DSN: "postgresql://manta_collector_user:${MANTA_DB_PASS_COLLECTOR:?MANTA_DB_PASS_COLLECTOR is required}@postgres:5432/manta"
@@ -188,6 +216,7 @@ services:
     restart: unless-stopped
 
   report-generator:
+    logging: *journal
     environment:
       <<: *clickhouse-reader-env
       POSTGRES_DSN: "postgresql://manta_reports_user:${MANTA_DB_PASS_REPORTS:?MANTA_DB_PASS_REPORTS is required}@postgres:5432/manta"
@@ -196,6 +225,7 @@ services:
     restart: unless-stopped
 
   parser-svc:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       S3_ACCESS_KEY: manta_parser
@@ -203,6 +233,7 @@ services:
     restart: unless-stopped
 
   feature-extractor:
+    logging: *journal
     environment:
       <<: *clickhouse-writer-env
       S3_ACCESS_KEY: ""
@@ -210,6 +241,7 @@ services:
     restart: unless-stopped
 
   ml-service:
+    logging: *journal
     environment:
       <<: *clickhouse-reader-env
       S3_ACCESS_KEY: manta_model_reader
@@ -223,6 +255,7 @@ services:
       - mlflow-internal
 
   ml-autotrain:
+    logging: *journal
     environment:
       <<: *clickhouse-trainer-env
       S3_ACCESS_KEY: manta_model_writer
@@ -233,6 +266,7 @@ services:
       - mlflow-internal
 
   frontend:
+    logging: *journal
     ports: !override
       - "127.0.0.1:3000:80"
     mem_limit: 256m
@@ -242,6 +276,7 @@ services:
       - "${MANTA_KEYS_DIR:?MANTA_KEYS_DIR is required}/tls-cert.pem:/run/manta-secrets/tls-cert.pem:ro"
 
   prometheus:
+    logging: *journal
     ports: !override
       - "127.0.0.1:9090:9090"
     mem_limit: 384m
@@ -252,6 +287,7 @@ services:
       - prom_data:/prometheus
 
   grafana:
+    logging: *journal
     ports: !override
       - "127.0.0.1:3001:3000"
     mem_limit: 256m
