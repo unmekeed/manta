@@ -87,6 +87,24 @@ def full_row() -> dict:
         # заметит перестановки колонок.
         "fights_won_diff": 2, "fight_gold_diff": 1750,
         "fight_deaths_diff": -3, "since_fight_s": 95,
+        # Спринт 187: состав команд. Значения уникальны В ПРЕДЕЛАХ
+        # ВСЕГО вектора и потому неправдоподобно велики: настоящая
+        # разность состава лежит в пределах ±5. Эталон проверяет
+        # ПРОВОДКУ и ПОРЯДОК колонок, а одинаковые значения делают
+        # колонки взаимозаменяемыми — тест это прямо запрещает.
+        "melee_diff": 11,
+        "attr_str_diff": 12,
+        "attr_agi_diff": 13,
+        "attr_int_diff": 14,
+        "attr_all_diff": 15,
+        "role_carry_diff": 16,
+        "role_support_diff": 17,
+        "role_nuker_diff": 18,
+        "role_disabler_diff": 19,
+        "role_durable_diff": 20,
+        "role_escape_diff": 21,
+        "role_initiator_diff": 22,
+        "role_pusher_diff": 24,
         **_windows(900),
     }
 
@@ -106,7 +124,9 @@ def scenarios() -> list[dict]:
                 "hero_healing_diff", "camps_stacked_diff",
                 # Драки тоже приходят только с JSON-ответом (спринт 186).
                 "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
-                "since_fight_s"):
+                "since_fight_s",
+                # Состав тоже считается из JSON-ответа (спринт 187).
+                "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff", "attr_all_diff", "role_carry_diff", "role_support_diff", "role_nuker_diff", "role_disabler_diff", "role_durable_diff", "role_escape_diff", "role_initiator_diff", "role_pusher_diff"):
         replay_row[key] = None
 
     old_row = full_row()

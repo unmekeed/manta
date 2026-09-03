@@ -94,9 +94,22 @@ def test_no_feature_is_degenerate(golden):
     тоже вернёт нули, — в том числе с `return [0.0] * len(minutes)`.
     """
     _, _, expected = golden
+    # Фичи композиции (спринт 187) постоянны ПО ПРИРОДЕ: состав команд
+    # известен с нулевой минуты и не меняется. Это законное исключение, и
+    # объявлено оно явно — иначе пришлось бы либо ослабить проверку для
+    # всех, либо подгонять эталон под неё.
+    static = {n for n in expected
+              if n == "melee_diff" or n.startswith(("attr_", "role_"))}
     flat = {name: series[0] for name, series in expected.items()
-            if len({json.dumps(v) for v in series}) < 2}
+            if name not in static and len({json.dumps(v) for v in series}) < 2}
     assert not flat, f"фичи-константы в эталоне: {flat}"
+    # Но и у статических эталон обязан быть содержательным: если ВСЕ они
+    # нули, реализация `return {n: [0.0] * len(minutes)}` пройдёт
+    # сравнение, ничего не считая.
+    assert static, "фичи композиции пропали из эталона"
+    assert any(series[0] for name, series in expected.items()
+               if name in static), (
+        "все фичи композиции нулевые — эталон не отличит их от заглушки")
 
 
 def test_both_signs_are_present_in_the_golden(golden):

@@ -165,7 +165,9 @@ def test_runner_inserts_and_marks(monkeypatch):
     # стаки) в фикстуре нет, и это ПРОПУСК, а не «никто не фармил».
     # Спринт 186: +4 — драк в фикстуре нет, и это тоже
     # ПРОПУСК, а не «драк не случилось».
-    assert lines[0].count("nan") == 15
+    # Спринт 187: +13 — состава в фикстуре нет (герои её игроков
+    # не заданы), и это пропуск, а не «составы симметричны».
+    assert lines[0].count("nan") == 28
     assert "opendota-json@3" in lines[0]
     # PG: INSERT в CollectedMatches и CollectorCursor
     kinds = [k for k, _ in pg_store["sql"]]

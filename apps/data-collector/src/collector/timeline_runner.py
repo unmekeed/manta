@@ -52,12 +52,15 @@ MTF_COLUMNS = ["match_id", "game_time", "networth_diff", "networth_total",
                "hero_healing_diff", "camps_stacked_diff",
                # Спринт 186: драки как события (миграция 025)
                "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
-               "since_fight_s"]
+               "since_fight_s",
+               # Спринт 187: состав команд (миграция 026)
+               "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff", "attr_all_diff",
+               "role_carry_diff", "role_support_diff", "role_nuker_diff", "role_disabler_diff", "role_durable_diff", "role_escape_diff", "role_initiator_diff", "role_pusher_diff"]
 
 # Фичи трека F и волны 1, которых может не быть (битый JSON) — пишем nan.
 # Срез считается от конца: добавляя колонку в хвост MTF_COLUMNS, поправить
 # и это число, иначе новая фича не попадёт в заполнение nan-ами.
-F_TRACK_COLUMNS = MTF_COLUMNS[-23:]
+F_TRACK_COLUMNS = MTF_COLUMNS[-36:]
 
 DRAFT_COLUMNS = ["match_id", "patch", "tier", "radiant_win", "radiant_heroes",
                  "dire_heroes", "bans", "first_pick_team", "source"]

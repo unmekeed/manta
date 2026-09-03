@@ -703,13 +703,82 @@ def teamfight_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
             "fight_deaths_diff": deaths_s, "since_fight_s": since_s}
 
 
+# -- Композиция команд (спринт 187) -------------------------------------------
+#
+# ЗАЧЕМ. Модель не знает о героях НИЧЕГО. Драфт-приор (винрейты героев на
+# патче) был снят ревизией трека F в спринте 134 — измеримого выигрыша он
+# не дал, — а эмбеддинги требуют порядка 20 тысяч матчей, которых пока
+# нет.
+#
+# Свойства героев — средний путь, работающий на нынешнем объёме. Их
+# десяток вместо сотни с лишним имён, и они ОБОБЩАЮТСЯ: модель, узнавшая
+# что-то про составы из четырёх ближников, применит это и к герою,
+# которого видела трижды. Именно этого не умеют ни поимённые категории
+# (переобучение на редких), ни эмбеддинги (нечем учить).
+#
+# Фичи статические: состав известен с нулевой минуты и не меняется.
+# Записываются в каждую поминутную строку — так же, как patch и tier.
+ROLES = ("Carry", "Support", "Nuker", "Disabler", "Durable", "Escape",
+         "Initiator", "Pusher")
+ATTRS = ("str", "agi", "int", "all")
+
+
+def _hero_props(hero_id: int) -> dict:
+    npc = _HERO_BY_ID.get(int(hero_id or 0))
+    return _HEROES.get(npc or "", {}) if npc else {}
+
+
+def composition_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
+    """Состав команд как разности R−D: тип атаки, атрибуты, роли.
+
+    Разность, а не два счётчика на сторону: у нас все фичи витрины —
+    командные дифференциалы, и «три ближника против двух» модели важнее,
+    чем абсолютные числа.
+
+    Неизвестный герой (справочник отстал от патча) не обнуляет матч — он
+    просто не вносит вклада. Обратное решение выбрасывало бы весь матч
+    из-за одного героя, добавленного вчера.
+    """
+    players = m.get("players") or []
+    if len(players) != 10:
+        # Неполный состав — это не «поровну», а неизвестность. Нули здесь
+        # означали бы симметричный состав, которого никто не видел.
+        return {}
+    counts: dict[str, float] = {}
+    known = 0
+    for p in players:
+        props = _hero_props(p.get("hero_id"))
+        if not props:
+            continue
+        known += 1
+        sign = _sign(team_of(p.get("player_slot", 0)))
+        if props.get("attack_type") == "Melee":
+            counts["melee_diff"] = counts.get("melee_diff", 0.0) + sign
+        attr = props.get("primary_attr")
+        if attr in ATTRS:
+            key = f"attr_{attr}_diff"
+            counts[key] = counts.get(key, 0.0) + sign
+        for role in props.get("roles") or []:
+            if role in ROLES:
+                key = f"role_{role.lower()}_diff"
+                counts[key] = counts.get(key, 0.0) + sign
+    if not known:
+        return {}
+    # Все объявленные фичи отдаются всегда, даже нулевые: колонка,
+    # появляющаяся только когда в матче был Pusher, давала бы пропуск там,
+    # где на самом деле «пушеров поровну» — а это разные вещи.
+    names = (["melee_diff"] + [f"attr_{a}_diff" for a in ATTRS]
+             + [f"role_{r.lower()}_diff" for r in ROLES])
+    return {n: [counts.get(n, 0.0)] * len(minutes) for n in names}
+
+
 def all_minute_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     """Все поминутные фичи трека F одним вызовом."""
     out: dict[str, list[float]] = {}
     for fn in (objective_features, vision_features, vision_coverage,
                item_features, economy_reserve_features,
                neutral_level_features, minute_series_features,
-               teamfight_features):
+               teamfight_features, composition_features):
         try:
             out.update(fn(m, minutes))
         except Exception:  # noqa: BLE001 — сбой одной группы не рушит остальные

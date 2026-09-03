@@ -71,6 +71,22 @@ FEATURES = [
     "fight_gold_diff",    # золото, взятое В ДРАКАХ, R−D
     "fight_deaths_diff",  # смерти в драках R−D (знак буквальный)
     "since_fight_s",      # секунд с последней драки; НЕ зеркалится
+    # Спринт 187: состав команд по свойствам героев (миграция 026).
+    # Тринадцать разностей вместо 127 имён — обобщаются на редких героев,
+    # чего не умеют ни категории, ни эмбеддинги на нынешнем объёме.
+    "melee_diff",
+    "attr_str_diff",
+    "attr_agi_diff",
+    "attr_int_diff",
+    "attr_all_diff",
+    "role_carry_diff",
+    "role_support_diff",
+    "role_nuker_diff",
+    "role_disabler_diff",
+    "role_durable_diff",
+    "role_escape_diff",
+    "role_initiator_diff",
+    "role_pusher_diff",
     # G1 (спринт 131): производные — темп изменения метрики за окно,
     # единиц метрики в минуту. Дописаны В КОНЕЦ намеренно: артефакты
     # моделей хранят свой список фич, и старая модель (27 фич) обязана
@@ -127,7 +143,9 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  # СРЕДИ НИХ НЕТ намеренно: время с последней драки
                  # одинаково для обеих сторон, и смена знака превратила
                  # бы его в отрицательное время.
-                 "fights_won_diff", "fight_gold_diff", "fight_deaths_diff"}
+                 "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
+                 # Спринт 187: состав — тоже разности R−D.
+                 "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff", "attr_all_diff", "role_carry_diff", "role_support_diff", "role_nuker_diff", "role_disabler_diff", "role_durable_diff", "role_escape_diff", "role_initiator_diff", "role_pusher_diff"}
 
 # Производная разностной величины меняет знак вместе с ней: если при
 # зеркалировании networth_diff становится −networth_diff, то и «сколько
@@ -337,6 +355,8 @@ ROW_COLUMNS = [
     # Спринт 186 (миграция 025)
     "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
     "since_fight_s",
+    # Спринт 187 (миграция 026)
+    "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff", "attr_all_diff", "role_carry_diff", "role_support_diff", "role_nuker_diff", "role_disabler_diff", "role_durable_diff", "role_escape_diff", "role_initiator_diff", "role_pusher_diff",
     # Волна 1 (спринты 90, 91): их добавили в FEATURES и забыли здесь —
     # обучение падало IndexError на зеркальной аугментации.
     "vision_coverage_diff", "unspent_gold_diff", "buyback_availability",
@@ -455,6 +475,20 @@ def row_to_features(row: dict) -> list[float]:
         "fight_gold_diff": _f("fight_gold_diff"),
         "fight_deaths_diff": _f("fight_deaths_diff"),
         "since_fight_s": _f("since_fight_s"),
+        # Спринт 187: состав команд (миграция 026).
+        "melee_diff": _f("melee_diff"),
+        "attr_str_diff": _f("attr_str_diff"),
+        "attr_agi_diff": _f("attr_agi_diff"),
+        "attr_int_diff": _f("attr_int_diff"),
+        "attr_all_diff": _f("attr_all_diff"),
+        "role_carry_diff": _f("role_carry_diff"),
+        "role_support_diff": _f("role_support_diff"),
+        "role_nuker_diff": _f("role_nuker_diff"),
+        "role_disabler_diff": _f("role_disabler_diff"),
+        "role_durable_diff": _f("role_durable_diff"),
+        "role_escape_diff": _f("role_escape_diff"),
+        "role_initiator_diff": _f("role_initiator_diff"),
+        "role_pusher_diff": _f("role_pusher_diff"),
     }
     # G1: производные (арифметика — в libs/wp_rates.py, чтобы у
     # report-generator была ровно та же).

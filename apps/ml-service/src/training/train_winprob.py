@@ -126,6 +126,24 @@ MONOTONE.update({
     "fight_gold_diff": 0,
     "fight_deaths_diff": 0,
     "since_fight_s": 0,
+    # Спринт 187: состав команд. Ограничений нет и быть не может — «больше
+    # кэрри лучше» неверно в принципе: состав из пяти кэрри проигрывает
+    # линию и не имеет контроля. Смысл фич композиции как раз в том, что
+    # выгодность роли зависит от остального состава, и это модель должна
+    # выучить сама.
+    "melee_diff": 0,
+    "attr_str_diff": 0,
+    "attr_agi_diff": 0,
+    "attr_int_diff": 0,
+    "attr_all_diff": 0,
+    "role_carry_diff": 0,
+    "role_support_diff": 0,
+    "role_nuker_diff": 0,
+    "role_disabler_diff": 0,
+    "role_durable_diff": 0,
+    "role_escape_diff": 0,
+    "role_initiator_diff": 0,
+    "role_pusher_diff": 0,
 })
 
 # Базовые (ручные) параметры. Если training.tune нашёл лучшие и записал
