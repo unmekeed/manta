@@ -28,11 +28,16 @@ yaml = pytest.importorskip("yaml")
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "deployments" / "docker-compose.yml"
 BOOTSTRAP = ROOT / "scripts" / "vps-bootstrap.sh"
+MAKEFILE = ROOT / "Makefile"
 
 # Переменные, которые задают ПОВЕДЕНИЕ МАШИНЫ, а не стенда. Их разъезд
 # между хостом и контейнером не ломает ничего видимого.
 MACHINE_VARS = ("COLLECTOR_SHARD_ID", "COLLECTOR_SHARD_COUNT",
-                "OPENDOTA_API_KEY", "STRATZ_API_TOKEN")
+                "OPENDOTA_API_KEY", "STRATZ_API_TOKEN",
+                # Спринт 191: без токена сторожа молчат, а молчание
+                # неотличимо от благополучия — то же свойство, что у
+                # шарда, ради которого этот файл и заведён.
+                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
 
 def merged(env: dict) -> dict:
@@ -90,6 +95,30 @@ def test_bootstrap_loads_the_settings_before_starting_the_stack():
     body = m.group(0)
     assert "load_host_settings" in body, "настройки машины не загружаются"
     assert body.index("load_host_settings") < body.index("up -d"), \
+        "настройки загружаются после подъёма стека"
+
+
+def test_make_vps_up_loads_the_settings_too():
+    """И КОРОТКИЙ путь подъёма — тоже (спринт 191).
+
+    Тест выше проверял ровно одну дорогу к `up -d` — ту, что через
+    bootstrap. Рядом всё это время жила вторая, `make vps-up`, которой
+    пользуются каждый день, потому что она короче. Она файл настроек не
+    загружала, и `${TELEGRAM_BOT_TOKEN:-}` подставлялся пустым: сторожа
+    в контейнерах были выключены, а выглядело это как тишина в канале.
+
+    Проверять надо КАЖДЫЙ путь к `up -d`, а не тот, который вспомнили
+    при написании проверки: пользоваться будут самым коротким, а
+    проверен окажется самый заметный.
+    """
+    src = MAKEFILE.read_text(encoding="utf-8")
+    m = re.search(r"^vps-up:.*?(?=^\S|\Z)", src, re.M | re.S)
+    assert m, "цель vps-up не найдена"
+    body = m.group(0)
+    assert "MANTA_TRAIN_ENV" in body, (
+        "make vps-up поднимает стек, не загрузив настройки машины: "
+        "контейнеры получат умолчания, и это не будет видно нигде")
+    assert body.index("MANTA_TRAIN_ENV") < body.index("up -d"), \
         "настройки загружаются после подъёма стека"
 
 

@@ -315,7 +315,19 @@ backfill:      ## Пересчёт фич по сохранённому JSON, б
 vps-bootstrap: ## Развернуть Manta на чистом VPS: ARGS=--check
 	./scripts/vps-bootstrap.sh $(ARGS)
 
+# Настройки машины подставляются в compose ИЗ ОКРУЖЕНИЯ, поэтому файл
+# надо загрузить до вызова (спринт 191). Ровно это делает
+# vps-bootstrap.sh (load_host_settings), а короткий путь `make vps-up`
+# — не делал: шард, ключи API и токен Telegram доезжали до контейнеров
+# только когда стек поднимали ЧЕРЕЗ bootstrap.
+#
+# Отказа при этом нет и в логах ничего нет: `${TELEGRAM_BOT_TOKEN:-}`
+# честно подставляет пустую строку, а сервис честно считает уведомления
+# выключенными. То есть сторож молчит ровно так же, как молчал бы при
+# полном благополучии, — тот самый случай, ради которого весь этот
+# спринт и затевался.
 vps-up:        ## Поднять стек с наложением для VPS (порты на 127.0.0.1)
+	set -a; [ -f $(MANTA_TRAIN_ENV) ] && . $(MANTA_TRAIN_ENV); set +a; \
 	docker compose -f deployments/docker-compose.yml \
 		-f deployments/docker-compose.vps.yml --profile apps up -d
 
