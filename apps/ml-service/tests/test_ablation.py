@@ -347,3 +347,57 @@ def test_only_refuses_an_unknown_name():
         select_targets({"база_объекты": ["towers_diff"]}, "база_обьекты")
     assert "нет таких целей" in str(e.value)
     assert "база_объекты" in str(e.value), "надо подсказать, что есть"
+
+
+def test_every_feature_is_measurable():
+    """Каждая фича модели либо в группе, либо объявлена одиночкой.
+
+    ЗАЧЕМ. «Не попала в группу» и «измеряется отдельно» выглядят
+    одинаково — и то и другое есть отсутствие имени в GROUPS. Разница в
+    том, что первое означает забытую фичу.
+
+    Это не гипотетическая беда. Спринты 185–187 добавили двадцать две
+    фичи; вместе с треком F в модели набралось тридцать четыре
+    неизмеренных из шестидесяти трёх — половина. Каждая из них могла
+    остаться такой навсегда просто потому, что никто не заметил.
+    """
+    from training.ablation import GROUPS, UNGROUPED
+    from training.dataset import FEATURES
+
+    grouped = {f for names in GROUPS.values() for f in names}
+    orphans = sorted(set(FEATURES) - grouped - set(UNGROUPED))
+    assert not orphans, (
+        f"фичи, которые невозможно измерить семейством и не объявленные "
+        f"одиночками: {orphans}")
+
+
+def test_no_group_names_a_feature_the_model_lacks():
+    """И наоборот: в группах нет имён, которых нет в модели.
+
+    Забытая при удалении фичи строка не падает — ablation просто
+    измерил бы группу, часть которой не существует, и вердикт относился
+    бы неизвестно к чему.
+    """
+    from training.ablation import GROUPS, UNGROUPED
+    from training.dataset import FEATURES
+
+    known = set(FEATURES)
+    for group, names in GROUPS.items():
+        strangers = sorted(set(names) - known)
+        assert not strangers, f"{group}: нет таких фич — {strangers}"
+    assert not sorted(set(UNGROUPED) - known), "одиночка без фичи в модели"
+
+
+def test_the_new_waves_are_covered_by_families():
+    """Волны 185–187 измеряются семействами, а не поодиночке.
+
+    Двадцать две фичи по отдельности — двадцать два обучения и двадцать
+    два вердикта на шумной выборке. Семейство отвечает на вопрос, ради
+    которого волна и делалась: несёт ли сигнал ЗАМЫСЕЛ, а не отдельная
+    колонка.
+    """
+    from training.ablation import GROUPS
+
+    for family in ("S185_ряды_все", "S186_драки", "S187_состав_все"):
+        assert family in GROUPS, f"нет семейства {family}"
+        assert len(GROUPS[family]) >= 4, f"{family} подозрительно мало"

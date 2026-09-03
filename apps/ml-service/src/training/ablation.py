@@ -52,7 +52,7 @@ NaN. Фича, которой нет в данных, не «бесполезн�
 
 CLI:
     python -m training.ablation                # группы (быстро, ~11 обучений)
-    python -m training.ablation --each         # каждая фича (42 обучения)
+    python -m training.ablation --each         # каждая фича отдельно
     python -m training.ablation --min-coverage 0.05
     python -m training.ablation --json out.json
 """
@@ -94,6 +94,56 @@ GROUPS: dict[str, list[str]] = {
     "G1_производные_все": list(RATE_FEATURES),
     **{f"G1_окно_{w // 60}мин": [rate_name(m, w) for m in RATE_METRICS]
        for w in RATE_WINDOWS},
+    # Ревизия волн 185–187 (спринт 188). Двадцать две фичи добавлены и ни
+    # одна не измерена; вместе с треком F это тридцать четыре гипотезы из
+    # шестидесяти трёх колонок — половина модели.
+    #
+    # Деление на общую группу и подгруппы — то же, что у G1, и по той же
+    # причине: вопросов два. Общая отвечает «несёт ли семейство сигнал
+    # вообще», подгруппы — «какая его часть». Мерить скопом значило бы
+    # утопить сработавшее в несработавшем.
+    "S185_ряды_все": ["lh_diff", "dn_diff", "hero_damage_diff",
+                      "hero_healing_diff", "camps_stacked_diff"],
+    # Фарм и бой разделены намеренно: это ответы на разные вопросы.
+    # Добитки и стаки говорят, кто копит; урон и лечение — кто дерётся.
+    "S185_фарм": ["lh_diff", "dn_diff", "camps_stacked_diff"],
+    "S185_бой": ["hero_damage_diff", "hero_healing_diff"],
+    "S186_драки": ["fights_won_diff", "fight_gold_diff",
+                   "fight_deaths_diff", "since_fight_s"],
+    # Исход драк отдельно от их темпа: `since_fight_s` — единственная
+    # симметричная фича семейства, и она про ритм игры, а не про то, кто
+    # побеждает.
+    "S186_драки_исход": ["fights_won_diff", "fight_gold_diff",
+                         "fight_deaths_diff"],
+    "S186_драки_темп": ["since_fight_s"],
+    "S187_состав_все": ['melee_diff', 'attr_str_diff', 'attr_agi_diff', 'attr_int_diff', 'attr_all_diff', 'role_carry_diff', 'role_support_diff', 'role_nuker_diff', 'role_disabler_diff', 'role_durable_diff', 'role_escape_diff', 'role_initiator_diff', 'role_pusher_diff'],
+    # Роли отдельно от «физики» героя: роль — это утверждение о замысле
+    # состава, атрибут и тип атаки — о его механике. Сработать может
+    # что-то одно.
+    "S187_состав_роли": ['role_carry_diff', 'role_support_diff', 'role_nuker_diff', 'role_disabler_diff', 'role_durable_diff', 'role_escape_diff', 'role_initiator_diff', 'role_pusher_diff'],
+    "S187_состав_атрибуты": ['melee_diff', 'attr_str_diff', 'attr_agi_diff', 'attr_int_diff', 'attr_all_diff'],
+}
+
+# Фичи ВНЕ групп — измеряются поодиночке (`--each`), а не семейством.
+#
+# Список объявлен явно, потому что «не попала в группу» и «измеряется
+# отдельно» выглядят одинаково: и то и другое — отсутствие имени в
+# GROUPS. Разница в том, что первое означает забытую фичу, а такое уже
+# случилось — двадцать две фичи волн 185–187 могли добавиться и остаться
+# неизмеренными просто потому, что никто не заметил.
+#
+# Здесь лежат одиночки: у них нет семейства, с которым имело бы смысл
+# мерить их вместе.
+UNGROUPED = {
+    "game_time": "задаёт фазу игры; без неё модель теряет смысл",
+    "kills_diff": "база, измеряется отдельно",
+    "kills_total": "симметрична, служит нормировкой",
+    "position_advance": "территория из реплея — своего семейства нет",
+    "local_manpower_diff": "A14, перевес в точке контакта",
+    "spread_diff": "A14, собранность команды",
+    "buyback_availability": "волна 1, резерв на выкуп",
+    "unspent_gold_diff": "волна 1, золото в кармане",
+    "vision_coverage_diff": "волна 1, площадь обзора",
 }
 
 # Порог «фича неизмерима»: меньше этой доли непропущенных значений — данных
@@ -488,7 +538,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--each", action="store_true",
-                    help="каждая фича отдельно (22 обучения) вместо групп")
+                    help="каждая фича отдельно (по одному обучению на фичу)")
     ap.add_argument("--min-coverage", type=float, default=MIN_COVERAGE)
     ap.add_argument("--only", help=(
         "через запятую: имена групп (или фич при --each). Прогон по всем "
