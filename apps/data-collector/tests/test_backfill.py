@@ -14,8 +14,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from collector.backfill import Backfiller, fmt  # noqa: E402
-from collector.timeline_runner import (MTF_COLUMNS,  # noqa: E402
-                                       TimelineConfig)
+from collector.timeline_runner import (F_TRACK_COLUMNS,  # noqa: E402
+                                       MTF_COLUMNS, TimelineConfig)
 
 
 class FakeStore:
@@ -151,10 +151,21 @@ def test_match_absent_from_store_is_skipped():
     assert bf.stats["нет в хранилище"] == 1
 
 
+def _filled(mid, game_time):
+    """Строка, где заполнены ВСЕ колонки трека.
+
+    Со спринта 189 «уже заполнен» означает именно это, а не «одна
+    колонка-проба не пуста». Прежнее определение ломалось ровно тогда,
+    когда бэкфилл нужнее всего: волна добавляет колонки, старая проба
+    заполнена — и `--only-missing` пропускает каждый матч.
+    """
+    return _row(mid, game_time, **{c: "1" for c in F_TRACK_COLUMNS})
+
+
 def test_only_missing_skips_filled_matches():
     """Повторный прогон по всему хранилищу не должен переписывать то,
     что уже посчитано: 1100 лишних вставок ради нуля изменений."""
-    rows = [_row(901, 60, roshan_diff="1"), _row(901, 120, roshan_diff="1")]
+    rows = [_filled(901, 60), _filled(901, 120)]
     bf = FakeBackfiller({901: rows}, {901: _raw(901)})
     assert not bf.process(901, only_missing=True)
     assert bf.stats["уже заполнены"] == 1
@@ -232,3 +243,59 @@ def test_fmt_matches_runner(value, want):
     """Формат обязан совпадать с тем, чем пишет коллектор: одна и та же
     таблица, и расхождение вылезло бы как порча типа при вставке."""
     assert fmt(value) == want
+
+
+def test_a_new_wave_of_columns_is_not_skipped_as_filled():
+    """ГЛАВНОЕ: матч со СТАРЫМИ колонками не считается заполненным.
+
+    ЖИВОЙ СЛУЧАЙ 2026-09-03. Три волны подряд добавили двадцать две
+    колонки. `--only-missing` смотрел на одну пробу (`roshan_diff`) —
+    заполненную ещё треком F, — и отрапортовал «уже заполнены 2353»,
+    пропустив каждый матч. В витрине при этом драки и состав были пусты у
+    всех 2744.
+
+    Проверка смотрела на АРТЕФАКТ (одна колонка не пуста) вместо ЭФФЕКТА
+    (всё, что бэкфилл умеет, на месте) — та же форма, что с
+    `node_modules` в спринте 175 и с «файл записан» в 169.
+
+    Предупреждение об этом стояло в коде комментарием и не сработало:
+    комментарий читают, а умолчание применяют.
+    """
+    old_wave = F_TRACK_COLUMNS[0]
+    new_wave = F_TRACK_COLUMNS[-1]
+    assert old_wave != new_wave, "в треке одна колонка — тест бессмыслен"
+    rows = [_row(901, 60, **{old_wave: "1"}),
+            _row(901, 120, **{old_wave: "1"})]
+    bf = FakeBackfiller({901: rows}, {901: _raw(901)})
+    assert bf.process(901, only_missing=True), (
+        "матч пропущен как заполненный, хотя новые колонки пусты")
+    assert bf.stats.get("уже заполнены", 0) == 0
+
+
+def test_a_single_probe_can_still_be_asked_for_explicitly():
+    """Одна колонка-проба остаётся доступной явно.
+
+    Точечный вопрос «заполнить только тем, у кого нет вот этого» законен
+    — он просто перестал быть умолчанием.
+    """
+    probe = F_TRACK_COLUMNS[0]
+    rows = [_row(901, 60, **{probe: "1"})]
+    bf = FakeBackfiller({901: rows}, {901: _raw(901)})
+    assert not bf.process(901, only_missing=True, probe_column=probe)
+    assert bf.stats["уже заполнены"] == 1
+
+
+def test_the_cli_default_is_all_columns_not_one():
+    """Умолчание КОМАНДНОЙ СТРОКИ — все колонки, а не одна проба.
+
+    Поймано мутацией: проверки выше зовут `process` напрямую и потому
+    прошли бы на коде, где argparse возвращает старую пробу. А
+    запускают бэкфилл именно из командной строки — и именно оттуда
+    пришёл живой отказ 2026-09-03.
+    """
+    src = (pathlib.Path(__file__).resolve().parents[1] / "src" / "collector"
+           / "backfill.py").read_text(encoding="utf-8")
+    block = src.split('p.add_argument("--probe"', 1)[1].split(")", 1)[0]
+    assert "default=None" in block, (
+        "умолчание --probe снова одна колонка: после следующей волны "
+        "--only-missing молча пропустит весь датасет")

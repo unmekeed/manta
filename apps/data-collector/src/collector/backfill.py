@@ -52,9 +52,23 @@ from .timeline_runner import (DRAFT_COLUMNS, EVENT_COLUMNS, F_TRACK_COLUMNS,
 logger = logging.getLogger("collector.backfill")
 
 GAME_TIME = MTF_COLUMNS.index("game_time")
-# Колонка, по которой судим «сигналы у матча уже есть»: её заполняет та
-# же группа, что и остальные объективы, и она не бывает NaN у матча с
-# успешно разобранным JSON.
+
+# По каким колонкам судим «сигналы у матча уже есть».
+#
+# ПО ВСЕМ, которые бэкфилл умеет считать, а не по одной. Одна проба
+# ломается ровно тогда, когда бэкфилл нужнее всего: волна добавляет новые
+# колонки, старая проба заполнена — и `--only-missing` пропускает КАЖДЫЙ
+# матч, сообщая «уже заполнены». Именно это и случилось 2026-09-03 после
+# трёх волн подряд: 2353 матча пропущены, у 2744 драки и состав пустые.
+#
+# Предупреждение об этом стояло в коде комментарием («новая фича добавляет
+# НОВУЮ колонку, мерить надо по ней») и не сработало: комментарий читают,
+# а умолчание применяют. Поэтому теперь умолчание само право, а `--probe`
+# остался для точечных случаев.
+#
+# Цена: матч, у которого колонка законно пуста (драк не было), будет
+# пересчитываться каждый прогон. При 70 матчах в секунду это десятки
+# секунд на весь датасет — дешевле одного пропущенного бэкфилла.
 PROBE_COLUMN = "roshan_diff"
 
 
@@ -121,7 +135,7 @@ class Backfiller:
     # -- один матч ------------------------------------------------------------
 
     def process(self, match_id: int, only_missing: bool = False,
-                probe_column: str = PROBE_COLUMN) -> bool:
+                probe_column: str | None = None) -> bool:
         self.stats["матчей"] += 1
         rows = self._rows_of(match_id)
         if not rows:
@@ -130,8 +144,13 @@ class Backfiller:
             self.stats["нет в витрине"] += 1
             return False
         if only_missing:
-            probe = MTF_COLUMNS.index(probe_column)
-            if all(r[probe].lower() not in ("nan", "-nan", "") for r in rows):
+            # probe_column=None — умолчание: смотрим ВСЕ колонки трека,
+            # то есть проверяем ЭФФЕКТ («всё, что бэкфилл умеет, на
+            # месте»), а не артефакт («одна колонка не пуста»).
+            probes = ([MTF_COLUMNS.index(probe_column)] if probe_column
+                      else [MTF_COLUMNS.index(c) for c in F_TRACK_COLUMNS])
+            if all(r[i].lower() not in ("nan", "-nan", "")
+                   for r in rows for i in probes):
                 self.stats["уже заполнены"] += 1
                 return False
 
@@ -184,7 +203,7 @@ class Backfiller:
 
     def run(self, match_ids, only_missing: bool = False,
             limit: int | None = None,
-            probe_column: str = PROBE_COLUMN) -> None:
+            probe_column: str | None = None) -> None:
         t0 = time.monotonic()
         for i, mid in enumerate(match_ids, 1):
             if limit and i > limit:
@@ -213,12 +232,12 @@ def main() -> None:
     p.add_argument("--match-id", type=int, help="только этот матч")
     p.add_argument("--only-missing", action="store_true",
                    help="пропускать матчи, где колонка --probe уже заполнена")
-    # Новая фича добавляет НОВУЮ колонку, и «уже заполнено» надо мерить
-    # по ней, а не по roshan_diff: иначе --only-missing пропустит ровно
-    # те матчи, ради которых бэкфилл и запускается.
-    p.add_argument("--probe", default=PROBE_COLUMN,
+    # Умолчание — ВСЕ колонки трека (см. PROBE_COLUMN). Одна колонка
+    # задаётся явно, когда вопрос точечный: «заполнить только тем, у кого
+    # нет вот этого».
+    p.add_argument("--probe", default=None,
                    choices=[c for c in MTF_COLUMNS],
-                   help="колонка-индикатор для --only-missing")
+                   help="одна колонка-индикатор вместо всех колонок трека")
     p.add_argument("--dry-run", action="store_true",
                    help="считать, но ничего не писать")
     args = p.parse_args()
