@@ -388,3 +388,29 @@ def test_both_in_all_minute_features():
     feats = all_minute_features(m, [60, 120])
     assert "unspent_gold_diff" in feats and "buyback_availability" in feats
     assert len(feats["unspent_gold_diff"]) == 2
+
+
+# -- что снято ревизией 190 -----------------------------------------------------
+
+def test_teamfight_features_stay_removed():
+    """Драки (спринт 186) сняты ревизией и не возвращаются молча.
+
+    Четыре фичи — `fights_won_diff`, `fight_gold_diff`, `fight_deaths_diff`,
+    `since_fight_s` — измерены абляцией на 2355 матчах: все четыре внутри
+    ±0.0006 Brier, то есть неотличимы от шума. Их содержимое уже выражено
+    в `networth_diff` и `kills_diff`, которые модель и так видит.
+
+    Проверка держится здесь, а не на памяти, потому что поле `teamfights`
+    в ответе OpenDota никуда не делось и выглядит соблазнительно: вернуть
+    функцию проще, чем вспомнить, что её уже мерили.
+    """
+    import collector.signals as S
+
+    assert not hasattr(S, "teamfight_features"), (
+        "teamfight_features вернулась: эффект неотличим от шума "
+        "(абляция 190, |Δ| < 0.0006)")
+    m = _match(teamfights=[{"start": 60, "end": 90, "deaths": 2,
+                            "players": [{"deaths": 1, "gold_delta": 300}]}])
+    gone = [k for k in all_minute_features(m, [60, 120])
+            if k.startswith("fight") or k == "since_fight_s"]
+    assert not gone, f"фичи драк вернулись в витрину: {gone}"

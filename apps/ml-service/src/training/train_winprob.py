@@ -113,37 +113,13 @@ MONOTONE.update({name: 0 for name in RATE_FEATURES})
 # не работает» от «мы связали модель неверной гипотезой». Сначала
 # измерение, ограничения — после вердикта.
 MONOTONE.update({
-    "lh_diff": 0,
-    "dn_diff": 0,
     "hero_damage_diff": 0,
     "hero_healing_diff": 0,
-    "camps_stacked_diff": 0,
-    # Спринт 186: драки — тоже без ограничений. «Выиграл больше драк —
-    # выше шансы» звучит бесспорно, но выигранная драка ценой двух
-    # бэйбеков и потерянного мидлейна бывает шагом к поражению. Сначала
-    # измерение.
-    "fights_won_diff": 0,
-    "fight_gold_diff": 0,
-    "fight_deaths_diff": 0,
-    "since_fight_s": 0,
-    # Спринт 187: состав команд. Ограничений нет и быть не может — «больше
-    # кэрри лучше» неверно в принципе: состав из пяти кэрри проигрывает
-    # линию и не имеет контроля. Смысл фич композиции как раз в том, что
-    # выгодность роли зависит от остального состава, и это модель должна
-    # выучить сама.
     "melee_diff": 0,
     "attr_str_diff": 0,
     "attr_agi_diff": 0,
     "attr_int_diff": 0,
     "attr_all_diff": 0,
-    "role_carry_diff": 0,
-    "role_support_diff": 0,
-    "role_nuker_diff": 0,
-    "role_disabler_diff": 0,
-    "role_durable_diff": 0,
-    "role_escape_diff": 0,
-    "role_initiator_diff": 0,
-    "role_pusher_diff": 0,
 })
 
 # Базовые (ручные) параметры. Если training.tune нашёл лучшие и записал

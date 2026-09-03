@@ -56,37 +56,30 @@ FEATURES = [
     "runes_diff",         # подобрано рун R−D (F5)
     "neutral_tier_diff",  # сумма тиров нейтралок R−D (F6)
     "levels_diff",        # сумма уровней героев R−D (F6)
-    # Спринт 185: готовые поминутные ряды OpenDota (миграция 024).
-    # Самое дешёвое из невзятого: те же массивы, что gold_t, в том же
-    # ответе, за тот же вызов.
-    "lh_diff",            # добитки R−D: фарм против убийств
-    "dn_diff",            # денаи R−D: давление на линии
+    # Волны 185–187 ПОСЛЕ РЕВИЗИИ (спринт 190). Из двадцати двух фич
+    # осталось семь: абляция на 2752 матчах вынесла вердикты.
+    #
+    # Урон и лечение остались НЕ потому, что сработали, а потому что не
+    # измерены: покрытие 41% (hero_damage_t отдают не все разборы
+    # OpenDota), и абляция отказалась выносить вердикт. «Не измерено» и
+    # «бесполезно» — разные вещи, и удалять по первому основанию нельзя.
     "hero_damage_diff",   # урон ПО ГЕРОЯМ R−D: кто ведёт бой
     "hero_healing_diff",  # лечение R−D: цена размена
-    "camps_stacked_diff", # стаки лагерей R−D: работа саппорта
-    # Спринт 186: драки как СОБЫТИЯ с исходом (миграция 025). Не сумма
-    # убийств: пять смертей по карте за десять минут и пять смертей в
-    # одном замесе — разные игры.
-    "fights_won_diff",    # счёт выигранных драк R−D (меньше потерь = победа)
-    "fight_gold_diff",    # золото, взятое В ДРАКАХ, R−D
-    "fight_deaths_diff",  # смерти в драках R−D (знак буквальный)
-    "since_fight_s",      # секунд с последней драки; НЕ зеркалится
-    # Спринт 187: состав команд по свойствам героев (миграция 026).
-    # Тринадцать разностей вместо 127 имён — обобщаются на редких героев,
-    # чего не умеют ни категории, ни эмбеддинги на нынешнем объёме.
+    # Атрибуты и тип атаки — ЕДИНСТВЕННОЕ, что сработало из всех трёх
+    # волн: Δ +0.00255 при σ 0.00115, а на ранней фазе +0.00399, то есть
+    # помогают там, где модель слабее всего (Brier ранней 0.186 против
+    # 0.077 в середине).
+    #
+    # Роли (Carry, Support, …) удалены и заслуживают отдельной строки:
+    # они оказались не бесполезны, а ВРЕДНЫ — без них модель лучше на
+    # 0.00227, знак устойчив по фазам. Грубые ярлыки справочника («Carry»
+    # стоит у сорока с лишним героев) разбавляли сигнал вместо того,
+    # чтобы его нести.
     "melee_diff",
     "attr_str_diff",
     "attr_agi_diff",
     "attr_int_diff",
     "attr_all_diff",
-    "role_carry_diff",
-    "role_support_diff",
-    "role_nuker_diff",
-    "role_disabler_diff",
-    "role_durable_diff",
-    "role_escape_diff",
-    "role_initiator_diff",
-    "role_pusher_diff",
     # G1 (спринт 131): производные — темп изменения метрики за окно,
     # единиц метрики в минуту. Дописаны В КОНЕЦ намеренно: артефакты
     # моделей хранят свой список фич, и старая модель (27 фич) обязана
@@ -137,15 +130,10 @@ MIRROR_NEGATE = {"networth_diff", "xp_diff", "kills_diff", "position_advance",
                  # данных, и это не упало бы: аугментация просто выдала
                  # бы отражение, в котором пять фич смотрят не в ту
                  # сторону.
-                 "lh_diff", "dn_diff", "hero_damage_diff",
-                 "hero_healing_diff", "camps_stacked_diff",
-                 # Спринт 186: три разностные зеркалятся. `since_fight_s`
-                 # СРЕДИ НИХ НЕТ намеренно: время с последней драки
-                 # одинаково для обеих сторон, и смена знака превратила
-                 # бы его в отрицательное время.
-                 "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
-                 # Спринт 187: состав — тоже разности R−D.
-                 "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff", "attr_all_diff", "role_carry_diff", "role_support_diff", "role_nuker_diff", "role_disabler_diff", "role_durable_diff", "role_escape_diff", "role_initiator_diff", "role_pusher_diff"}
+                 "hero_damage_diff", "hero_healing_diff",
+                 # Состав — тоже разности R−D (спринт 187, после ревизии).
+                 "melee_diff", "attr_str_diff", "attr_agi_diff",
+                 "attr_int_diff", "attr_all_diff"}
 
 # Производная разностной величины меняет знак вместе с ней: если при
 # зеркалировании networth_diff становится −networth_diff, то и «сколько
@@ -350,13 +338,10 @@ ROW_COLUMNS = [
     "item_value_diff", "key_items_diff", "obs_wards_diff", "sen_wards_diff",
     "runes_diff", "neutral_tier_diff", "levels_diff",
     # Спринт 185 (миграция 024)
-    "lh_diff", "dn_diff", "hero_damage_diff", "hero_healing_diff",
-    "camps_stacked_diff",
-    # Спринт 186 (миграция 025)
-    "fights_won_diff", "fight_gold_diff", "fight_deaths_diff",
-    "since_fight_s",
-    # Спринт 187 (миграция 026)
-    "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff", "attr_all_diff", "role_carry_diff", "role_support_diff", "role_nuker_diff", "role_disabler_diff", "role_durable_diff", "role_escape_diff", "role_initiator_diff", "role_pusher_diff",
+    # Волны 185–187 после ревизии (спринт 190)
+    "hero_damage_diff", "hero_healing_diff",
+    "melee_diff", "attr_str_diff", "attr_agi_diff", "attr_int_diff",
+    "attr_all_diff",
     # Волна 1 (спринты 90, 91): их добавили в FEATURES и забыли здесь —
     # обучение падало IndexError на зеркальной аугментации.
     "vision_coverage_diff", "unspent_gold_diff", "buyback_availability",
@@ -463,32 +448,15 @@ def row_to_features(row: dict) -> list[float]:
         "runes_diff": _f("runes_diff"),
         "neutral_tier_diff": _f("neutral_tier_diff"),
         "levels_diff": _f("levels_diff"),
-        # Спринт 185: готовые ряды OpenDota (миграция 024). NaN у матчей,
+        # Волны 185–187 после ревизии (спринт 190). NaN у матчей,
         # разобранных раньше, и у пришедших реплейным путём.
-        "lh_diff": _f("lh_diff"),
-        "dn_diff": _f("dn_diff"),
         "hero_damage_diff": _f("hero_damage_diff"),
         "hero_healing_diff": _f("hero_healing_diff"),
-        "camps_stacked_diff": _f("camps_stacked_diff"),
-        # Спринт 186: драки (миграция 025).
-        "fights_won_diff": _f("fights_won_diff"),
-        "fight_gold_diff": _f("fight_gold_diff"),
-        "fight_deaths_diff": _f("fight_deaths_diff"),
-        "since_fight_s": _f("since_fight_s"),
-        # Спринт 187: состав команд (миграция 026).
         "melee_diff": _f("melee_diff"),
         "attr_str_diff": _f("attr_str_diff"),
         "attr_agi_diff": _f("attr_agi_diff"),
         "attr_int_diff": _f("attr_int_diff"),
         "attr_all_diff": _f("attr_all_diff"),
-        "role_carry_diff": _f("role_carry_diff"),
-        "role_support_diff": _f("role_support_diff"),
-        "role_nuker_diff": _f("role_nuker_diff"),
-        "role_disabler_diff": _f("role_disabler_diff"),
-        "role_durable_diff": _f("role_durable_diff"),
-        "role_escape_diff": _f("role_escape_diff"),
-        "role_initiator_diff": _f("role_initiator_diff"),
-        "role_pusher_diff": _f("role_pusher_diff"),
     }
     # G1: производные (арифметика — в libs/wp_rates.py, чтобы у
     # report-generator была ровно та же).

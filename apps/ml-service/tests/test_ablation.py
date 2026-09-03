@@ -388,16 +388,34 @@ def test_no_group_names_a_feature_the_model_lacks():
     assert not sorted(set(UNGROUPED) - known), "одиночка без фичи в модели"
 
 
-def test_the_new_waves_are_covered_by_families():
-    """Волны 185–187 измеряются семействами, а не поодиночке.
+def test_what_survived_the_revision_is_still_measurable():
+    """Пережившие ревизию фичи волн 185–187 остаются в семействах.
 
-    Двадцать две фичи по отдельности — двадцать два обучения и двадцать
-    два вердикта на шумной выборке. Семейство отвечает на вопрос, ради
-    которого волна и делалась: несёт ли сигнал ЗАМЫСЕЛ, а не отдельная
-    колонка.
+    Ревизия (спринт 190) убрала семь семейств вместе с их фичами, но два
+    остались, и по разным причинам: у `S185_бой` покрытия не хватило для
+    вердикта, `S187_состав_атрибуты` признано полезным. Оба надо будет
+    перемерить на большем датасете — а для этого они обязаны оставаться
+    измеримыми.
+    """
+    from training.ablation import GROUPS
+    from training.dataset import FEATURES
+
+    for family in ("S185_бой", "S187_состав_атрибуты"):
+        assert family in GROUPS, f"нет семейства {family}"
+        for name in GROUPS[family]:
+            assert name in FEATURES, f"{family} называет удалённую фичу {name}"
+
+
+def test_the_removed_families_are_gone():
+    """Удалённые семейства не остались висеть.
+
+    Семейство, чьи фичи удалены из модели, измерять нечем: прогон по нему
+    падал бы или, хуже, молча мерил бы пустоту.
     """
     from training.ablation import GROUPS
 
-    for family in ("S185_ряды_все", "S186_драки", "S187_состав_все"):
-        assert family in GROUPS, f"нет семейства {family}"
-        assert len(GROUPS[family]) >= 4, f"{family} подозрительно мало"
+    for family in ("S185_ряды_все", "S185_фарм", "S186_драки",
+                   "S186_драки_исход", "S186_драки_темп",
+                   "S187_состав_все", "S187_состав_роли"):
+        assert family not in GROUPS, (
+            f"{family} удалено ревизией, но осталось в GROUPS")

@@ -11,7 +11,7 @@ MANTA_TRAIN_ENV ?= $(HOME)/manta-train.env
 # protobuf 3.20 и gevent, которым нечего делать рядом с коллекторами.
 GC_VENV ?= $(HOME)/.manta-gc-venv
 
-.PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test build clean
+.PHONY: up down ps topics migrate migrate-pg migrate-ch doctor lint test pytest build clean
 .PHONY: recover stop
 .PHONY: ranks-seed ranks-fill ranks-report ranks-probe ranks-harvest ranks-scan
 .PHONY: candidates-queue candidates-sql-test dedup-sql-test sql-test wp-rates-sql-test pytest-check
@@ -57,10 +57,38 @@ lint:          ## Статический анализ Go-сервисов (gofmt
 		echo ">> vet $$s"; (cd $$s && go vet ./...) || exit 1; \
 	done
 
-test:          ## Unit-тесты
+test: pytest   ## Unit-тесты: питоновские наборы всех сервисов и Go
 	@for s in $(GO_SERVICES); do \
 		echo ">> test $$s"; (cd $$s && go test ./...) || exit 1; \
 	done
+
+# ЗАЧЕМ ЭТА ЦЕЛЬ. До спринта 190 `make test` гонял только Go, а
+# питоновские наборы запускались поштучно — тот сервис, по которому шёл
+# спринт. Из-за этого test_wp_features_sync в report-generator горел
+# красным со спринта 84, был замечен, снабжён комментарием «дописывать
+# сюда» — и всё равно забыт на волнах 185-187: двадцать две новые фичи
+# опять не доехали до Predict, и увидели это только на ревизии.
+# Тест-сторож бесполезен, если его никто не запускает, а комментарий
+# читают те, кто и так помнит. Поэтому набор ходит по ВСЕМ apps/*.
+#
+# Наборы, которым нужна живая БД, помечены skip и отваливаются сами.
+# Цикл не останавливается на первом красном: знать надо про все.
+#
+# Сервис берётся по наличию tests/test_*.py, а не по наличию каталога
+# tests: у replay-parser он есть, но лежит там C++ (ctest, цель
+# parser-test). Пустой прогон pytest возвращает код 5, и цель падала бы
+# на сервисе, у которого питоновских тестов нет и не планируется.
+pytest: pytest-check ## Питоновские наборы всех сервисов
+	@fail=""; \
+	for s in $$(ls -d apps/*/tests/test_*.py \
+	            | xargs -n1 dirname | xargs -n1 dirname | sort -u); do \
+		echo ">> pytest $$s"; \
+		(cd $$s && PYTHONPATH=src:$(CURDIR)/libs python3 -m pytest tests -q) \
+			|| fail="$$fail $$s"; \
+	done; \
+	if [ -n "$$fail" ]; then \
+		echo; echo "красные наборы:$$fail"; exit 1; \
+	fi
 
 build:         ## Сборка бинарей
 	@for s in $(GO_SERVICES); do \

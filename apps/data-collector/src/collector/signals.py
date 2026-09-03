@@ -569,12 +569,19 @@ def neutral_level_features(m: dict, minutes: list[int]
 #   hero_healing_t лечение: цена размена в драках.
 #   camps_stacked_t стаки лагерей — работа саппорта, которой нет ни в
 #          одной другой фиче.
+# Спринт 190: из пяти рядов остались два. Абляция на 2752 матчах
+# показала, что добитки, денаи и стаки лагерей не двигают метрику
+# (Δ +0.00031 при пороге практической значимости 0.001) — правило
+# ML-PLAN исполнено буквально: не давшая улучшения фича удаляется, а не
+# откладывается.
+#
+# Урон и лечение остались: у них покрытие 41% (hero_damage_t отдают не
+# все разборы OpenDota), и абляция ОТКАЗАЛАСЬ выносить вердикт — сигнал
+# лишь в 1299 матчах из нужных 2000. «Не измерено» и «бесполезно» —
+# разные вещи, и удалять по первому основанию нельзя.
 MINUTE_SERIES = {
-    "lh_t": "lh_diff",
-    "dn_t": "dn_diff",
     "hero_damage_t": "hero_damage_diff",
     "hero_healing_t": "hero_healing_diff",
-    "camps_stacked_t": "camps_stacked_diff",
 }
 
 
@@ -620,89 +627,6 @@ def minute_series_features(m: dict, minutes: list[int]
     return out
 
 
-def teamfight_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
-    """Драки: кто их выигрывает (спринт 186).
-
-    ЗАЧЕМ ОТДЕЛЬНО ОТ УБИЙСТВ И УРОНА. У модели уже есть `kills_diff`
-    (все убийства за матч) и `hero_damage_diff` (весь урон). Драка — это
-    не сумма, а СОБЫТИЕ с исходом: пять смертей, размазанные по карте за
-    десять минут, и пять смертей в одном замесе — разные игры. Первое
-    означает, что кого-то ловят поодиночке; второе — что команда
-    проиграла бой и следующие полминуты у неё нет ни одного героя на
-    карте.
-
-    ЧЕТЫРЕ ФИЧИ.
-
-      fights_won_diff  накопительный счёт выигранных драк. Выиграла та
-                       сторона, что потеряла МЕНЬШЕ героев; равные потери
-                       не засчитываются никому — это размен, а не победа.
-      fight_gold_diff  накопительная разница золота, взятого В ДРАКАХ.
-                       Отделяет «выиграли бой» от «выиграли бой выгодно».
-      fight_deaths_diff смерти в драках, буквально Radiant − Dire. Знак
-                       БУКВАЛЬНЫЙ, как у всех наших разностей: больше —
-                       значит Radiant теряет больше. Удобный знак («выгода
-                       Radiant») был бы исключением из правила, а
-                       исключение здесь стоит дороже неудобства.
-      since_fight_s    секунд с конца последней ЗАВЕРШЁННОЙ драки. Темп
-                       игры: минута после замеса и минута тишины на
-                       тридцатой — разные состояния при одинаковой
-                       экономике.
-
-    Считаются только ЗАВЕРШЁННЫЕ к моменту t драки (`end <= t`). У
-    идущей прямо сейчас исхода ещё нет, а данные по игрокам API отдаёт за
-    всю драку целиком — учесть её частично нельзя, и учитывать целиком
-    значило бы подглядывать в будущее.
-    """
-    fights = m.get("teamfights") or []
-    if not fights:
-        # Драк не было вовсе — или матч разобран старой версией парсера.
-        # Отличить одно от другого нельзя, поэтому фичи не отдаём: ноль
-        # означал бы «драк не случилось», а это утверждение о матче.
-        return {}
-
-    # Сторона игрока берётся из `match.players` по индексу: массив
-    # `teamfights[].players` идёт в том же порядке. Полагаться на «первые
-    # пять — Radiant» нельзя, порядок задан данными, а не соглашением.
-    signs = [_sign(team_of(p.get("player_slot", 0)))
-             for p in m.get("players") or []]
-    if len(signs) < 2:
-        return {}
-
-    events = []
-    for f in fights:
-        end = f.get("end")
-        if end is None:
-            continue
-        won = gold = deaths = 0.0
-        per_side = {1: 0.0, -1: 0.0}
-        for i, pl in enumerate(f.get("players") or []):
-            if i >= len(signs):
-                break
-            sign = signs[i]
-            d = float(pl.get("deaths") or 0)
-            deaths += sign * d
-            gold += sign * float(pl.get("gold_delta") or 0)
-            per_side[sign] = per_side.get(sign, 0.0) + d
-        if per_side[1] != per_side[-1]:
-            # Победила сторона с МЕНЬШИМИ потерями.
-            won = 1.0 if per_side[1] < per_side[-1] else -1.0
-        events.append((int(end), won, gold, deaths))
-    events.sort()
-
-    won_s, gold_s, deaths_s, since_s = [], [], [], []
-    for t in minutes:
-        done = [e for e in events if e[0] <= t]
-        won_s.append(sum(e[1] for e in done))
-        gold_s.append(sum(e[2] for e in done))
-        deaths_s.append(sum(e[3] for e in done))
-        # До первой драки «времени с прошлой» не существует. Ноль здесь
-        # означал бы «драка только что кончилась» — самое неверное из
-        # возможных, а game_time у модели и так есть.
-        since_s.append(float(t - done[-1][0]) if done else float("nan"))
-    return {"fights_won_diff": won_s, "fight_gold_diff": gold_s,
-            "fight_deaths_diff": deaths_s, "since_fight_s": since_s}
-
-
 # -- Композиция команд (спринт 187) -------------------------------------------
 #
 # ЗАЧЕМ. Модель не знает о героях НИЧЕГО. Драфт-приор (винрейты героев на
@@ -718,8 +642,21 @@ def teamfight_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
 #
 # Фичи статические: состав известен с нулевой минуты и не меняется.
 # Записываются в каждую поминутную строку — так же, как patch и tier.
-ROLES = ("Carry", "Support", "Nuker", "Disabler", "Durable", "Escape",
-         "Initiator", "Pusher")
+# Спринт 190: РОЛИ УДАЛЕНЫ, атрибуты остались.
+#
+# Абляция вынесла редкий вердикт: роли не бесполезны, а ВРЕДНЫ. Без них
+# модель лучше на 0.00227, и знак устойчив по фазам (на поздней −0.00360).
+# Объяснение правдоподобное: роли из справочника OpenDota — грубые ярлыки,
+# «Carry» стоит у сорока с лишним героев, и они разбавляют сигнал вместо
+# того, чтобы его нести.
+#
+# Атрибуты и тип атаки, наоборот, сработали: Δ +0.00255 при σ 0.00115, а
+# на ранней фазе +0.00399 — то есть помогают именно там, где модель слабее
+# всего (Brier ранней фазы 0.186 против 0.077 в середине).
+#
+# Мерь я состав ОДНИМ семейством, вывод был бы «герои не нужны»: сумма
+# полезных атрибутов и вредных ролей дала −0.00030, почти ноль. Разделение
+# на подгруппы и решило дело.
 ATTRS = ("str", "agi", "int", "all")
 
 
@@ -729,7 +666,7 @@ def _hero_props(hero_id: int) -> dict:
 
 
 def composition_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
-    """Состав команд как разности R−D: тип атаки, атрибуты, роли.
+    """Состав команд как разности R−D: тип атаки и атрибуты.
 
     Разность, а не два счётчика на сторону: у нас все фичи витрины —
     командные дифференциалы, и «три ближника против двух» модели важнее,
@@ -758,17 +695,12 @@ def composition_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
         if attr in ATTRS:
             key = f"attr_{attr}_diff"
             counts[key] = counts.get(key, 0.0) + sign
-        for role in props.get("roles") or []:
-            if role in ROLES:
-                key = f"role_{role.lower()}_diff"
-                counts[key] = counts.get(key, 0.0) + sign
     if not known:
         return {}
     # Все объявленные фичи отдаются всегда, даже нулевые: колонка,
     # появляющаяся только когда в матче был Pusher, давала бы пропуск там,
     # где на самом деле «пушеров поровну» — а это разные вещи.
-    names = (["melee_diff"] + [f"attr_{a}_diff" for a in ATTRS]
-             + [f"role_{r.lower()}_diff" for r in ROLES])
+    names = ["melee_diff"] + [f"attr_{a}_diff" for a in ATTRS]
     return {n: [counts.get(n, 0.0)] * len(minutes) for n in names}
 
 
@@ -778,7 +710,7 @@ def all_minute_features(m: dict, minutes: list[int]) -> dict[str, list[float]]:
     for fn in (objective_features, vision_features, vision_coverage,
                item_features, economy_reserve_features,
                neutral_level_features, minute_series_features,
-               teamfight_features, composition_features):
+               composition_features):
         try:
             out.update(fn(m, minutes))
         except Exception:  # noqa: BLE001 — сбой одной группы не рушит остальные
