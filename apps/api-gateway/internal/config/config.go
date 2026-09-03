@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,15 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	RateLimitRPS    int
 	RateLimitBurst  int
+
+	// Публичный слой для сайта (спринт 192). Пустой адрес — слушателя
+	// НЕТ вовсе: на машине разработчика и в тестах публичный API поднимать
+	// незачем, а «поднят по умолчанию» означало бы, что забытая настройка
+	// открывает наружу больше, чем собирались.
+	PublicListenAddr     string
+	PublicCORSOrigins    []string
+	PublicRateLimitRPS   int
+	PublicRateLimitBurst int
 
 	S3Endpoint  string
 	S3AccessKey string
@@ -46,6 +56,13 @@ func Load() Config {
 		ShutdownTimeout: getDuration("GATEWAY_SHUTDOWN_TIMEOUT", 10*time.Second),
 		RateLimitRPS:    getInt("GATEWAY_RATE_LIMIT_RPS", 20),
 		RateLimitBurst:  getInt("GATEWAY_RATE_LIMIT_BURST", 40),
+
+		PublicListenAddr:  getEnv("PUBLIC_API_LISTEN_ADDR", ""),
+		PublicCORSOrigins: splitList(getEnv("PUBLIC_API_CORS_ORIGINS", "")),
+		// Публичный лимит ниже внутреннего: снаружи ходит неизвестно кто,
+		// и один клиент не должен занимать пул соединений к базе.
+		PublicRateLimitRPS:   getInt("PUBLIC_API_RATE_LIMIT_RPS", 10),
+		PublicRateLimitBurst: getInt("PUBLIC_API_RATE_LIMIT_BURST", 20),
 
 		S3Endpoint:  getEnv("S3_ENDPOINT", "localhost:9500"),
 		S3AccessKey: getEnv("S3_ACCESS_KEY", "dota"),
@@ -109,4 +126,18 @@ func getDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// splitList разбирает список через запятую (домены CORS).
+// Пустая строка даёт nil, а не срез с одним пустым элементом: пустой
+// элемент в списке разрешённых источников — это разрешение источнику с
+// пустым именем, то есть тихая дыра.
+func splitList(v string) []string {
+	out := []string{}
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

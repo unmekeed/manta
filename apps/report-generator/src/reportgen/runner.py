@@ -28,7 +28,7 @@ from wp_rates import RATE_FEATURES, rates_for_row, window_columns
 
 from manta_notify import TelegramNotifier
 
-from . import health, retention
+from . import health, retention, summary
 from .builder import build_analysis, build_timeline
 from .gen import services_pb2, services_pb2_grpc
 
@@ -281,7 +281,7 @@ class ReportGenerator:
     def _player_rows(self, match_id: int) -> list[dict]:
         return self._ch_select(
             "SELECT player_id, team, hero, player_name, player_hash,"
-            "       won, gpm, xpm,"
+            "       won, gpm, xpm, duration_s,"
             "       lh_at_5, dn_at_5, lh_at_10, dn_at_10, lane,"
             "       lane_nw_diff_at_10, gold_share"
             "  FROM PlayerMatchFeatures FINAL"
@@ -380,6 +380,21 @@ class ReportGenerator:
                    generated_at = NOW()""",
             (match_id, json.dumps(analysis, ensure_ascii=False),
              json.dumps(timeline), model_version, feature_version))
+
+        # Карточка для списка матчей (спринт 192). Пишется здесь, а не
+        # собирается шлюзом на чтении: всё нужное уже прочитано ради
+        # отчёта, а список матчей — самый горячий запрос сайта.
+        #
+        # Сбой карточки НЕ отменяет отчёт: разбор — главный продукт, а
+        # карточка производна от него и восстанавливается бэкфиллом.
+        # Обратный порядок приоритетов означал бы, что мелкая беда со
+        # вспомогательной таблицей стоит пользователю всего разбора.
+        try:
+            self.db.execute(summary.UPSERT_SQL,
+                            summary.build_summary(match_id, rows, players,
+                                                  analysis))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("карточка матча %s не записана: %s", match_id, e)
 
         payload = {
             "match_id": match_id,

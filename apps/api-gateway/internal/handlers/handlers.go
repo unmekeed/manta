@@ -2,9 +2,13 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +35,12 @@ type problem struct {
 	Title  string `json:"title"`
 	Status int    `json:"status"`
 	Detail string `json:"detail,omitempty"`
+	// TraceID дублирует заголовок X-Trace-Id в ТЕЛЕ (спринт 192).
+	// Заголовок доходит до человека не всегда: скриншот ошибки,
+	// пересланное в поддержку сообщение, лог фронтенда — везде остаётся
+	// только тело. Идентификатор, по которому запрос ищется в наших
+	// логах, обязан лежать там же, где текст ошибки.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -43,6 +53,69 @@ func writeProblem(w http.ResponseWriter, status int, typ, title, detail string) 
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(problem{Type: typ, Title: title, Status: status, Detail: detail})
+}
+
+// writeProblemCtx — то же, но с trace_id из контекста запроса.
+func writeProblemCtx(w http.ResponseWriter, r *http.Request, status int,
+	typ, title, detail string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(problem{
+		Type: typ, Title: title, Status: status, Detail: detail,
+		TraceID: traceIDOf(r),
+	})
+}
+
+func traceIDOf(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	id, _ := r.Context().Value(middleware.TraceIDKey).(string)
+	return id
+}
+
+// publicMaxAge — сколько публичному GET разрешено лежать в кэше.
+//
+// Минута, а не час: список пополняется несколько раз в час, а отчёт
+// перегенерируется при смене версии модели. Долгий кэш показывал бы
+// вчерашнюю выдачу как сегодняшнюю — то есть врал бы тихо.
+const publicMaxAge = 60
+
+// writePublicJSON отдаёт публичный GET с ETag и Cache-Control.
+//
+// ETag считается ПО ТЕЛУ, а не по времени генерации. Тело — ровно то, что
+// увидит клиент, и совпадение тел означает, что перекачивать нечего.
+// Метка по времени соврала бы в обе стороны: при перегенерации без
+// изменений заставила бы качать заново, а при изменении внутри той же
+// секунды отдала бы 304 на изменившийся ответ.
+func writePublicJSON(w http.ResponseWriter, r *http.Request, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		writeProblemCtx(w, r, http.StatusInternalServerError, "internal-error",
+			"Failed to encode response", err.Error())
+		return
+	}
+	writePublicBytes(w, r, body)
+}
+
+// writePublicBytes — то же для уже готового JSON (отчёты хранятся в базе
+// как JSONB и отдаются как есть; перекладывать их через map ради ETag
+// значило бы разбирать и собирать заново сотни килобайт на каждый
+// запрос).
+func writePublicBytes(w http.ResponseWriter, r *http.Request, body []byte) {
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(publicMaxAge))
+	for _, candidate := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		if c := strings.TrimSpace(candidate); c != "" && c == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // Healthz — liveness-проба: процесс жив (Гл. 11.8.2).
@@ -179,14 +252,14 @@ func (h *Handlers) reportColumn(w http.ResponseWriter, r *http.Request,
 		`SELECT `+column+`::text FROM MatchReports WHERE match_id = $1`,
 		matchID).Scan(&body)
 	if err != nil {
-		writeProblem(w, http.StatusNotFound, "report-not-found",
+		writeProblemCtx(w, r, http.StatusNotFound, "report-not-found",
 			"Report is not generated yet",
 			fmt.Sprintf("match %s: no report; загрузите реплей или дождитесь обработки", matchID))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
+	// Разбор и таймлайн — публичные GET, и они самые тяжёлые в API:
+	// сотни килобайт на матч. Их кэширование экономит больше всего.
+	writePublicBytes(w, r, body)
 }
 
 // GetMatchTimeline — GET /api/v1/matches/{matchId}/timeline (схема Timeline):
@@ -203,39 +276,3 @@ func (h *Handlers) GetMatchAnalysis(w http.ResponseWriter, r *http.Request) {
 
 // ListMatches — GET /api/v1/matches: последние матчи с готовыми отчётами
 // (для главной страницы фронтенда). Лёгкая проекция MatchReports.
-func (h *Handlers) ListMatches(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	rows, err := h.DB.Query(ctx, `
-		SELECT match_id,
-		       analysis->'win_probability'->>'final_radiant',
-		       analysis->>'narrative',
-		       COALESCE(analysis->>'report_version', ''),
-		       generated_at
-		  FROM MatchReports ORDER BY generated_at DESC LIMIT 50`)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError,
-			"internal-error", "Failed to list matches", err.Error())
-		return
-	}
-	defer rows.Close()
-
-	type item struct {
-		MatchID       int64     `json:"match_id"`
-		FinalRadiant  string    `json:"final_radiant_wp"`
-		Narrative     string    `json:"narrative"`
-		ReportVersion string    `json:"report_version"`
-		GeneratedAt   time.Time `json:"generated_at"`
-	}
-	items := []item{}
-	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.MatchID, &it.FinalRadiant, &it.Narrative,
-			&it.ReportVersion, &it.GeneratedAt); err != nil {
-			continue
-		}
-		items = append(items, it)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"matches": items})
-}

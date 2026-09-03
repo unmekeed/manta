@@ -217,6 +217,11 @@ services:
       dockerfile: apps/api-gateway/Dockerfile
     ports:
       - "8080:8080"
+      # Публичный слой для сайта (спринт 192). Здесь порт открыт как и
+      # все прочие — это базовый файл для домашней машины за NAT.
+      # Наложение docker-compose.vps.yml прибивает его к 127.0.0.1, а
+      # наружу выводит только nginx с сертификатом.
+      - "8081:8081"
     environment: &app-env
       KAFKA_BROKERS: kafka:29092
       POSTGRES_DSN: postgresql://dota:${MANTA_DB_PASSWORD:-dota_dev_password}@postgres:5432/manta
@@ -227,6 +232,14 @@ services:
       CLICKHOUSE_DB: manta
       CLICKHOUSE_USER: dota
       CLICKHOUSE_PASSWORD: ${MANTA_DB_PASSWORD:-dota_dev_password}
+      # Публичный API: пустой адрес — слушателя нет вовсе. Значение
+      # задаётся здесь, а не в наложении, чтобы стенд и VPS поднимали
+      # ОДИН И ТОТ ЖЕ контур и расхождение обнаруживалось дома.
+      PUBLIC_API_LISTEN_ADDR: "${PUBLIC_API_LISTEN_ADDR:-:8081}"
+      # Список доменов, которым разрешён браузерный доступ. Пусто —
+      # запрет всем (а не разрешение всем): забытая переменная не должна
+      # открывать API наружу.
+      PUBLIC_API_CORS_ORIGINS: "${PUBLIC_API_CORS_ORIGINS:-}"
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }

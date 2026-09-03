@@ -76,6 +76,58 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Job' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/matches:
+    get:
+      tags: [Matches]
+      summary: Список разобранных матчей (карточки для сайта)
+      description: >
+        Листание по match_id, а НЕ по дате отчёта: дата меняется при
+        перегенерации (новая версия модели), и курсор по ней давал бы
+        дубли и пропуски. `next_cursor` пуст, когда страниц больше нет.
+      operationId: listMatches
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: match_id последнего матча предыдущей страницы
+          schema: { type: string }
+        - name: patch
+          in: query
+          schema: { type: integer }
+        - name: tier
+          in: query
+          schema: { type: string }
+        - name: query
+          in: query
+          description: >
+            Номер матча (строка из цифр) либо имя героя. Поиск по герою не
+            зависит от стороны и нечувствителен к регистру, пробелам и
+            дефисам. Поиск по игрокам не поддерживается: ники в витрине
+            псевдонимизированы (Гл. 9.7).
+          schema: { type: string }
+      responses:
+        '200':
+          description: Страница карточек
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matches, next_cursor]
+                properties:
+                  matches:
+                    type: array
+                    items: { $ref: '#/components/schemas/MatchCard' }
+                  next_cursor: { type: string }
+        '304':
+          description: Не изменилось с момента, указанного в If-None-Match
+        '400': { $ref: '#/components/responses/BadRequest' }
   /api/v1/matches/{matchId}/analysis:
     get:
       tags: [Matches]
@@ -235,6 +287,37 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
   schemas:
+    MatchCard:
+      type: object
+      required: [match_id, radiant_win, winner, kills_radiant, kills_dire,
+                 duration_s, patch, tier, radiant_heroes, dire_heroes,
+                 final_radiant_wp, generated_at]
+      properties:
+        match_id: { type: integer, format: int64 }
+        radiant_win: { type: boolean }
+        winner: { type: string, enum: [radiant, dire] }
+        kills_radiant: { type: integer }
+        kills_dire: { type: integer }
+        duration_s: { type: integer }
+        patch: { type: integer }
+        tier: { type: string }
+        radiant_heroes:
+          type: array
+          items: { type: string, description: 'npc_dota_hero_*' }
+        dire_heroes:
+          type: array
+          items: { type: string }
+        final_radiant_wp:
+          type: number
+          nullable: true
+          description: >
+            null означает «модель не считала», а не «пятьдесят на
+            пятьдесят». Различать обязательно: половина — это утверждение
+            о равной позиции, а не признание незнания.
+        generated_at:
+          type: string
+          format: date-time
+          description: Время генерации отчёта, UTC ISO 8601
     Problem:
       type: object
       properties:

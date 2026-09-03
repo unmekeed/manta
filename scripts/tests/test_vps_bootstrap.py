@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "vps-bootstrap.sh"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _var(name: str) -> str:
@@ -616,10 +617,25 @@ PG_BUSY = FREE + [
     'LISTEN 0 244 127.0.0.1:5432 0.0.0.0:* users:(("postgres",pid=900,fd=6))']
 
 
+def expected_port_count() -> int:
+    """Сколько портов проверка обязана назвать — СЧИТАЯ ИХ ИЗ НАЛОЖЕНИЯ.
+
+    Раньше здесь стояло число 13, вписанное руками, и первый же новый
+    порт (публичный API, спринт 192) уронил тест по ложной причине:
+    проверка отработала верно, а устарело утверждение о ней. Число,
+    которое надо не забыть поправить, — это дефект той же формы, что
+    рукописный список таблиц; здесь оно выводится из того же файла, из
+    которого его берёт и сам bootstrap.
+    """
+    text = (ROOT / "deployments" / "docker-compose.vps.yml").read_text(
+        encoding="utf-8")
+    return len(set(re.findall(r'"127\.0\.0\.1:(\d+):', text)))
+
+
 def test_free_ports_pass(tmp_path):
     rc, out = run_check_ports(tmp_path, FREE)
     assert rc == 0, out
-    assert "13" in out, out
+    assert str(expected_port_count()) in out, out
 
 
 def test_busy_port_stops_before_anything_starts(tmp_path):

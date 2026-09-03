@@ -125,6 +125,11 @@ services:
     logging: *journal
     ports: !override
       - "127.0.0.1:8080:8080"
+      # Публичный слой (спринт 192) тоже на loopback: наружу его выводит
+      # nginx с сертификатом Let's Encrypt, а не docker. Прямая
+      # публикация означала бы HTTP без шифрования и мимо общего
+      # rate limit прокси.
+      - "127.0.0.1:8081:8081"
     mem_limit: 256m
     restart: unless-stopped
     environment:

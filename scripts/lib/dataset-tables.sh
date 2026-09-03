@@ -79,7 +79,7 @@ companion_tables() {
 # Game Coordinator, и отдаёт он их порядка 200–400 в сутки на аккаунт
 # (спринт 171). Не перенести таблицу — значит выбросить недели добычи и
 # заново потратить бюджет на то, что уже добыто.
-PG_TABLES=(collectedmatches matchreports playerranks
+PG_TABLES=(collectedmatches matchreports matchsummaries playerranks
            replaycandidates parkedreplays replaysalts)
 
 # Пропускается осознанно, по трём разным причинам:
@@ -251,6 +251,17 @@ pg_merge_sql() {
             # порядок слияния слепков произволен.
             printf 'ON CONFLICT (match_id) DO UPDATE SET %s WHERE EXCLUDED.generated_at > matchreports.generated_at' \
                    "$(_set_all matchreports "$2" match_id)"
+            ;;
+        matchsummaries)
+            # Карточка производна от отчёта и живёт по тому же правилу:
+            # побеждает более свежая. Переносится она вместе с отчётом
+            # НЕ ради экономии — пересчитать карточку дёшево, — а чтобы
+            # список матчей не расходился с содержимым базы. Оставь её в
+            # пропущенных, и машина показывала бы в списке только свои
+            # матчи, имея на руках чужие отчёты: пробел, видимый лишь
+            # тому, кто сверит два счётчика.
+            printf 'ON CONFLICT (match_id) DO UPDATE SET %s WHERE EXCLUDED.generated_at > matchsummaries.generated_at' \
+                   "$(_set_all matchsummaries "$2" match_id)"
             ;;
         playerranks)
             printf 'ON CONFLICT (account_id) DO UPDATE SET %s' "$(_set_ranks "$2")"

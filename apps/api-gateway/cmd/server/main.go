@@ -154,11 +154,49 @@ func main() {
 		}
 	}()
 
+	// Публичный слой для сайта (спринт 192): отдельный слушатель, на
+	// котором зарегистрированы ТОЛЬКО пять разрешённых маршрутов.
+	// Пустой адрес — слушателя нет: на стенде публичный API не нужен, а
+	// «поднят по умолчанию» означало бы, что забытая настройка открывает
+	// наружу больше, чем собирались.
+	var publicSrv *http.Server
+	if cfg.PublicListenAddr != "" {
+		if len(cfg.PublicCORSOrigins) == 0 {
+			// Не отказ: API останется доступен серверным клиентам, но
+			// браузер к нему не пустит никого. Сказать об этом надо
+			// громко — иначе «сайт не работает» будут искать в сайте.
+			logger.Warn("public_cors_empty",
+				"detail", "PUBLIC_API_CORS_ORIGINS пуст — браузеры получат отказ CORS")
+		}
+		publicSrv = &http.Server{
+			Addr: cfg.PublicListenAddr,
+			Handler: router.NewPublic(h, logger, cfg.PublicRateLimitRPS,
+				cfg.PublicRateLimitBurst, cfg.PublicCORSOrigins),
+		}
+		go func() {
+			logger.Info("public_listening", "addr", cfg.PublicListenAddr,
+				"origins", cfg.PublicCORSOrigins)
+			// TLS здесь НЕ терминируется: публичный слой стоит за nginx с
+			// сертификатом Let's Encrypt. Слушатель прибит к loopback, и
+			// открывает его наружу только прокси.
+			if err := publicSrv.ListenAndServe(); err != nil &&
+				!errors.Is(err, http.ErrServerClosed) {
+				logger.Error("public_server_failed", "error", err)
+				stop()
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	logger.Info("shutting_down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown_error", "error", err)
+	}
+	if publicSrv != nil {
+		if err := publicSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("public_shutdown_error", "error", err)
+		}
 	}
 }
