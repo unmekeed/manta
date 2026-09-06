@@ -11,6 +11,12 @@ WORKDIR /app
 COPY apps/report-generator/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY apps/report-generator/src/ src/
+# Инструменты обслуживания (бэкфилл карточек) — в образ, а не только в
+# репозиторий: их зависимости (psycopg, requests) стоят здесь, а на хосте
+# их нет. Без этой строки инструмент лежит там, где его нечем запустить,
+# и запускать его приходится через docker cp — то есть руками и мимо
+# воспроизводимости.
+COPY apps/report-generator/tools/ tools/
 COPY libs/ libs/
 ENV PYTHONPATH=/app/src:/app/libs
 USER nobody
