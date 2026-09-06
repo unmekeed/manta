@@ -275,6 +275,38 @@ else
     [ "$ch_missing" -eq 0 ] && ok "CH-миграции: журнал полон"
 fi
 
+echo "== Тома: смонтирован — не значит, что в него пишут"
+# ЖИВОЙ ОТКАЗ 3 сентября 2026. Том kafka_data был смонтирован в
+# /var/lib/kafka/data, а образ писал в /tmp/kafka-logs: KAFKA_LOG_DIRS
+# никто не задал. Пересоздание контейнера стёрло ВСЕ топики, продюсеры
+# трое суток писали в никуда молча.
+#
+# Проверка НАМЕРЕННО тупая: смотрит, что каталог тома не пуст. Она ничего
+# не знает про образы и потому работает на любом — в отличие от статической
+# проверки в scripts/tests/test_volumes_are_actually_used.py, которая
+# знает только про переменные окружения. Пустой том живой системы значит
+# ровно одно: данные лежат не там, где мы думаем, и переживут ровно до
+# следующего `up -d`.
+if ! command -v docker >/dev/null; then
+    warn "тома не проверены: docker недоступен"
+else
+    vols=$(docker volume ls -q --filter name=manta_ 2>/dev/null)
+    if [ -z "$vols" ]; then
+        warn "именованных томов manta_* не найдено"
+    else
+        for v in $vols; do
+            mp=$(docker volume inspect "$v" --format '{{.Mountpoint}}' 2>/dev/null)
+            if [ -z "$mp" ] || [ ! -d "$mp" ]; then
+                warn "$v: каталог тома недоступен ($mp)"
+            elif [ -z "$(ls -A "$mp" 2>/dev/null)" ]; then
+                fail "$v ПУСТ — сервис пишет мимо тома, данные не переживут пересоздание контейнера"
+            else
+                ok "$v непустой"
+            fi
+        done
+    fi
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
     printf '\033[32m>> ЗДОРОВ\033[0m (warn: %d)\n' "$warns"

@@ -142,6 +142,22 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # ГДЕ KAFKA ХРАНИТ ДАННЫЕ. Без этой строки образ apache/kafka пишет
+      # в /tmp/kafka-logs — то есть в записываемый слой контейнера, — а
+      # смонтированный ниже том стоит пустым.
+      #
+      # Живой отказ 3 сентября 2026: переход на journald пересоздал все
+      # контейнеры, Kafka поднялась с чистым каталогом, и ВСЕ СЕМЬ
+      # прикладных топиков исчезли. Автосоздание выключено (строкой
+      # выше — намеренно), поэтому продюсеры трое суток писали в
+      # никуда МОЛЧА: ни ошибки, ни лога. Обнаружилось по свежести
+      # ReplayEvents, а не по отказу.
+      #
+      # Проверено на живой машине: meta.properties лежал в
+      # /tmp/kafka-logs, а /var/lib/kafka/data был пуст с даты сборки
+      # образа. То есть сохранности не было НИКОГДА — просто до сентября
+      # контейнер не пересоздавали.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
