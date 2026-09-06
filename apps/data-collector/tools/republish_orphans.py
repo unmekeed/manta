@@ -41,7 +41,7 @@ from confluent_kafka import Producer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from collector.runner import TOPIC, build_envelope  # noqa: E402
-from collector.sources import MatchRef  # noqa: E402
+from collector.sources import MatchRef, replay_source_tiers  # noqa: E402
 
 # Кандидаты: реплей числится за нами. Сироты отбираются дальше, по
 # отсутствию строк в витрине, — одним запросом это не сделать, базы разные.
@@ -59,10 +59,28 @@ SELECT DISTINCT match_id FROM manta.ReplayEvents
 """
 
 # Уровень матча (tier) не хранится в CollectedMatches, а подставлять его
-# наугад нельзя: tier задаёт вес матча при обучении, и ошибка была бы
-# тихой — модель молча училась бы на неверно взвешенных данных.
-# Единственный честный источник — витрина, куда его записал тот путь,
-# который матч и собрал.
+# наугад нельзя: tier делит датасет на обучение и про-эталон, и ошибка
+# была бы тихой — модель молча училась бы на неверно размеченных данных.
+#
+# Источников ДВА, и порядок между ними важен (спринт 195a).
+#
+# ПЕРВЫЙ — витрина. Она есть у матча, который до реплея успел приехать
+# JSON-путём (has_replay дописывается к уже существующей строке). Её
+# значение приоритетно не потому, что точнее, а потому, что оно УЖЕ
+# ЛЕЖИТ в обучающих данных: витрина — ReplacingMergeTree по
+# (match_id, game_time), и событие с другим tier переписало бы строку
+# задним числом.
+#
+# ВТОРОЙ — имя источника. У каждого реплейного источника tier это
+# константа класса `TIER`, и в MatchRef попадает ровно она, так что имя
+# определяет уровень однозначно. Это не догадка, а то же самое значение,
+# взятое из того же места.
+#
+# Первый прогон на живых данных показал, ЗАЧЕМ нужен второй: из 510 сирот
+# 361 не имели строки в витрине — и не могли иметь. Витрину реплейного
+# матча пишет feature-extractor, то есть ровно тот шаг, который у сироты
+# и не состоялся. Опираться только на витрину значило восстановить
+# четверть потерянного и посчитать это успехом.
 TIER_SQL = """
 SELECT match_id, any(tier) AS tier, any(patch) AS patch
   FROM manta.MatchTimelineFeatures
@@ -98,6 +116,28 @@ def ch_tiers(match_ids: list[int]) -> dict[int, tuple[str, int]]:
     return {int(r["match_id"]): (str(r.get("tier") or ""),
                                  int(r.get("patch") or 0))
             for r in ch_rows(TIER_SQL, match_ids)}
+
+
+def resolve_tier(match_id: int, source_name: str,
+                 mart: dict[int, tuple[str, int]],
+                 by_source: dict[str, str]) -> tuple[str, int] | None:
+    """(tier, patch) для матча — или None, если честно взять неоткуда.
+
+    Витрина вперёд имени источника: её значение уже лежит в обучающих
+    данных, и переписывать его задним числом мы не станем.
+
+    PATCH=0 У ВТОРОГО ИСТОЧНИКА — это не потеря и не заглушка. Ноль по
+    контракту MatchRef означает «патч неизвестен», и обучение с ним уже
+    умеет обращаться: вес по возрасту патча считается только для
+    известных, неизвестный не штрафуется (`training/dataset.py`).
+    Подставить сюда «наверное, последний» значило бы соврать в поле,
+    которое влияет на веса, — ровно та ошибка, от которой уровень и
+    защищается.
+    """
+    if match_id in mart:
+        return mart[match_id]
+    tier = by_source.get((source_name or "").strip())
+    return (tier, 0) if tier else None
 
 
 def s3_client():
@@ -141,6 +181,7 @@ def main() -> int:
         return 0
 
     tiers = ch_tiers([r[0] for r in orphans])
+    by_source = replay_source_tiers()
     s3 = s3_client()
     failures: list[str] = []
 
@@ -151,13 +192,15 @@ def main() -> int:
     producer = Producer({"bootstrap.servers":
                          os.getenv("KAFKA_BROKERS", "127.0.0.1:9092")})
     sent = gone = unknown_tier = 0
+    unknown_sources: set[str] = set()
     for match_id, source_name, replay_url in orphans:
-        if match_id not in tiers:
-            # Витрина про этот матч ничего не знает, значит уровень
-            # взять неоткуда. Публиковать с выдуманным tier значит
-            # подмешать в обучение неверно взвешенный матч — тихо и
-            # необратимо. Лучше не тронуть и сказать об этом.
+        known = resolve_tier(match_id, source_name, tiers, by_source)
+        if known is None:
+            # Ни витрины, ни знакомого источника. Незнакомое имя роняет
+            # матч в пропуск НАМЕРЕННО: новый источник — это повод
+            # дописать его TIER в код, а не повод угадать уровень здесь.
             unknown_tier += 1
+            unknown_sources.add(source_name or "<пусто>")
             continue
         loc = parse_url(replay_url)
         if loc is None:
@@ -174,7 +217,7 @@ def main() -> int:
                 print(f"  переотправил бы {match_id} ({replay_url})")
             sent += 1
             continue
-        tier, patch = tiers[match_id]
+        tier, patch = known
         env = build_envelope(
             MatchRef(match_id=match_id, replay_url=replay_url, tier=tier,
                      source_cursor=str(match_id), patch=patch),
@@ -194,6 +237,12 @@ def main() -> int:
           + f": {sent}")
     print(f"пропущено (реплея в S3 уже нет): {gone}")
     print(f"пропущено (уровень матча неизвестен): {unknown_tier}")
+    if unknown_sources:
+        # Имена печатаются, потому что пропуск здесь ЧИНИТСЯ: у источника
+        # нет TIER в коде. Без имён это число — просто повод пожать
+        # плечами.
+        print("  источники без объявленного TIER: "
+              + ", ".join(sorted(unknown_sources)))
     return 0
 
 

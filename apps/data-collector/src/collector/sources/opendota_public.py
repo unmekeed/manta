@@ -31,6 +31,7 @@ logger = logging.getLogger("collector.opendota_public")
 
 class OpenDotaPublicSource:
     name = "opendota_public"
+    TIER = "Premium"
 
     def __init__(self, base_url: str = "https://api.opendota.com/api",
                  limit_per_cycle: int = 5, min_rank: int = 80,
@@ -126,7 +127,7 @@ class OpenDotaPublicSource:
             yield MatchRef(
                 match_id=match_id,
                 replay_url=replay_url,
-                tier="Premium",  # высокоранговый ранкед (Гл. 4.2 tier-схема)
+                tier=self.TIER,
                 source_cursor=str(match_id),
                 patch=int(detail.get("patch") or 0),
             )

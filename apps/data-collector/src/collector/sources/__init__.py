@@ -47,6 +47,33 @@ class MatchRef:
     patch: int = 0           # id патча OpenDota; 0 — неизвестен (A9)
 
 
+def replay_source_tiers() -> dict[str, str]:
+    """`source_name` → уровень матча для источников реплейного пути.
+
+    ЗАЧЕМ ЭТО ЕСТЬ (спринт 195a). `CollectedMatches` хранит имя источника,
+    но не уровень, а уровень нужен всякому, кто восстанавливает событие по
+    уже собранному матчу — сегодня это `tools/republish_orphans.py`.
+
+    Восстановление это ЧЕСТНОЕ, а не догадка: у каждого реплейного
+    источника уровень — константа класса `TIER`, и в `MatchRef` попадает
+    ровно она. Имя источника поэтому определяет уровень однозначно, и
+    здесь берётся то же самое значение, а не второй его список.
+
+    Импорт внутри функции, а не наверху модуля: источники импортируют
+    `MatchRef` отсюда, и импорт на уровне модуля замкнул бы круг.
+    """
+    from .candidates import CandidateSource
+    from .fixture import FixtureSource
+    from .opendota import OpenDotaSource
+    from .opendota_public import OpenDotaPublicSource
+    from .parked import ParkedSource
+    from .salts import SaltSource
+
+    return {cls.name: cls.TIER for cls in (
+        CandidateSource, FixtureSource, OpenDotaSource,
+        OpenDotaPublicSource, ParkedSource, SaltSource)}
+
+
 def with_api_key(params: dict | None, api_key: str | None) -> dict:
     """Домешать OPENDOTA_API_KEY в query-параметры (снимает суточный лимит
     анонимного тарифа — см. docs/ROADMAP.md, D-раздел «rate limit»)."""

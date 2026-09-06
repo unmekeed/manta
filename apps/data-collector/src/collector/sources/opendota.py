@@ -92,6 +92,7 @@ def decompress(data: bytes, match_id: int) -> bytes:
 
 class OpenDotaSource:
     name = "opendota"
+    TIER = "Professional"
 
     def __init__(self, base_url: str = "https://api.opendota.com/api",
                  limit_per_cycle: int = 3, timeout: float = 30.0,
@@ -134,7 +135,7 @@ class OpenDotaSource:
             yield MatchRef(
                 match_id=match_id,
                 replay_url=replay_url,
-                tier="Professional",
+                tier=self.TIER,
                 source_cursor=str(match_id),
                 patch=int((detail or {}).get("patch") or 0),
             )

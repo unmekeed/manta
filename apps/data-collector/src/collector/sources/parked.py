@@ -37,6 +37,8 @@ class ParkedSource:
 
     name = "parked"
 
+    TIER = "Professional"
+
     def __init__(self, store, *, limit_per_cycle: int = 5,
                  timeout: float = 30.0, api_key: str | None = None,
                  shard: Shard | None = None) -> None:
@@ -62,7 +64,7 @@ class ParkedSource:
             yield MatchRef(
                 match_id=match_id,
                 replay_url=replay_url,
-                tier="Professional",
+                tier=self.TIER,
                 # Курсор ставим равным match_id, чтобы Collector мог его
                 # записать не задумываясь. Читать его отсюда никто не
                 # будет: fetch_new его не смотрит.

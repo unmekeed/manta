@@ -52,6 +52,7 @@ IMMORTAL_MIN_RANK = 80
 
 class CandidateSource:
     name = "candidates"
+    TIER = "Pub"
 
     def __init__(self, queue: CandidateQueue, limit_per_cycle: int = 20,
                  base_url: str = "https://api.opendota.com/api",
@@ -181,7 +182,7 @@ class CandidateSource:
             yield MatchRef(
                 match_id=cand.match_id,
                 replay_url=replay_url,
-                tier="Pub",
+                tier=self.TIER,
                 source_cursor=str(cand.match_id),
                 patch=int((detail or {}).get("patch") or 0),
             )

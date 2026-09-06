@@ -42,6 +42,8 @@ class SaltSource:
 
     name = "salts"
 
+    TIER = "Pub"
+
     def __init__(self, store, *, limit_per_cycle: int = 5,
                  timeout: float = 30.0, api_key: str | None = None,
                  shard: Shard | None = None) -> None:
@@ -69,7 +71,7 @@ class SaltSource:
             yield MatchRef(
                 match_id=match_id,
                 replay_url=url,
-                tier="Pub",
+                tier=self.TIER,
                 # Курсор равен match_id, чтобы Collector записал его не
                 # задумываясь. Читать его отсюда никто не будет.
                 source_cursor=str(match_id),

@@ -9,13 +9,14 @@ from . import MatchRef
 
 class FixtureSource:
     name = "fixture"
+    TIER = "Pub"
 
     def __init__(self, matches: list[MatchRef] | None = None) -> None:
         self._matches = matches if matches is not None else [
             MatchRef(
                 match_id=8000000001 + i,
                 replay_url=f"fixture://replays/{8000000001 + i}.dem",
-                tier="Pub",
+                tier=self.TIER,
                 source_cursor=str(8000000001 + i),
             )
             for i in range(3)
