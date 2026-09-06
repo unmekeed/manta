@@ -515,6 +515,24 @@ def build_analysis(match_id: int, winner: str, players: list[dict],
         # rule-based ΔWP-бейзлайн (без Safety Index и классов, кроме
         # critical_death).
         "partial": True,
+        # ЧТО В ЭТОМ ОТЧЁТЕ ВООБЩЕ ЕСТЬ (спринт 195).
+        #
+        # `partial` истинно ВСЕГДА и потому не несёт информации. А с
+        # приходом отчётов по JSON-матчам разница стала существенной: у
+        # них нет поигрокового разреза (PlayerMatchFeatures пишет только
+        # реплейный путь), нет позиций, нет событий убийств. Пустой блок
+        # игроков без пометки читается как сломанный отчёт, а не как
+        # «этих данных для такого матча не бывает».
+        #
+        # Флаг на КАЖДЫЙ раздел, а не одно слово «источник»: разделы
+        # отваливаются независимо — у матча может не быть карт, но быть
+        # игроки (старые реплеи до спринта 110).
+        "available": {
+            "players": bool(players),
+            "positions": bool(positions),
+            "kills": bool(kills),
+            "heatmaps": heatmaps_available(heatmaps),
+        },
         "report_version": REPORT_VERSION,
         "model_version": model_version,
         # Тепловые карты (спринт 110). heatmaps_available отделяет

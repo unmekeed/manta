@@ -359,6 +359,22 @@ components:
       properties:
         match_id: { type: integer, format: int64 }
         status: { type: string }
+        available:
+          type: object
+          description: >
+            Какие разделы разбора вообще существуют у этого матча.
+            Матчи, приехавшие по JSON-пути (без реплея), не имеют
+            поигрокового разреза, позиций, событий убийств и тепловых
+            карт — их взять неоткуда. Пустой блок БЕЗ этой пометки
+            читается как сломанный отчёт, а не как «таких данных для
+            такого матча не бывает». Флаг на каждый раздел, а не одно
+            слово «источник»: разделы отваливаются независимо.
+          required: [players, positions, kills, heatmaps]
+          properties:
+            players: { type: boolean }
+            positions: { type: boolean }
+            kills: { type: boolean }
+            heatmaps: { type: boolean }
         win_probability:
           type: object
           properties:

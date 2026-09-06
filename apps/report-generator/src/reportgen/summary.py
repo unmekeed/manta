@@ -25,12 +25,25 @@ DIRE_TEAM = 3
 
 
 def build_summary(match_id: int, rows: list[dict], players: list[dict],
-                  analysis: dict) -> dict:
+                  analysis: dict, draft: dict | None = None) -> dict:
     """Карточка матча из того, что уже прочитано ради отчёта.
 
     `rows` — поминутная витрина (последняя строка несёт исход, патч и
     уровень), `players` — PlayerMatchFeatures, `analysis` — готовый
-    разбор (из него берётся только финальная WP).
+    разбор (из него берётся только финальная WP), `draft` — строка
+    MatchDraft, если она есть.
+
+    ЗАЧЕМ ДВА ИСТОЧНИКА СОСТАВОВ (спринт 195). PlayerMatchFeatures пишет
+    только feature-extractor, то есть реплейный путь. У JSON-матча этой
+    таблицы нет вовсе, и до 195-го его карточка вышла бы с пустыми
+    составами — то есть выглядела бы как матч, в котором никто не играл.
+    MatchDraft же заполняется обоими путями, и герои в нём те же самые.
+
+    Приоритет у PlayerMatchFeatures: там состав привязан к игрокам, и
+    сторона известна по коду Valve. Драфт — запасной источник, и берётся
+    он ЦЕЛИКОМ или никак: смешивать половину состава из одного источника
+    с половиной из другого значит однажды получить шесть героев на
+    стороне и не заметить этого.
     """
     last = rows[-1]
     radiant, dire = [], []
@@ -39,6 +52,10 @@ def build_summary(match_id: int, rows: list[dict], players: list[dict],
         if not hero:
             continue
         (radiant if int(p.get("team", 0)) == RADIANT_TEAM else dire).append(hero)
+
+    if not radiant and not dire and draft:
+        radiant = [str(h) for h in (draft.get("radiant_heroes") or []) if h]
+        dire = [str(h) for h in (draft.get("dire_heroes") or []) if h]
 
     return {
         "match_id": int(match_id),

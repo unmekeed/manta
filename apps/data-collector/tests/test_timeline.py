@@ -812,3 +812,163 @@ def test_catalog_refresh_forgets_dead_leagues():
         [{"leagueid": 10, "tier": "premium"}] if path == "leagues" else [])
     src._catalog_leagues()
     assert src._dead_leagues == set()
+
+
+# -- отчёты по JSON-матчам (спринт 195) ----------------------------------------
+#
+# ЖИВОЙ РАСКЛАД. Отчётов в базе 520 при 3091 собранном матче: события
+# features.calculated публиковал только реплейный путь, и JSON-матчи
+# существовали исключительно ради датасета. На сайте это список, в
+# котором пользователь своего матча не найдёт.
+#
+# Решение прежнего спринта («полноценный отчёт не собрать») было верным по
+# факту и неверным по выводу: карточка и таймлайн собираются полностью,
+# не собирается только поигроковый разрез.
+
+
+class _FakeProducer:
+    """confluent_kafka.Producer: on_delivery обязателен, flush → int."""
+
+    def __init__(self):
+        self.sent = []
+        self.stuck = 0
+        self.fail = None
+
+    def produce(self, topic, key, value, on_delivery=None):
+        self.sent.append((topic, key, value))
+        if on_delivery is not None:
+            on_delivery(self.fail, None)
+
+    def flush(self, timeout=None):
+        return self.stuck
+
+
+def _collector_with_producer():
+    from collector import timeline_runner
+
+    coll = timeline_runner.TimelineCollector.__new__(
+        timeline_runner.TimelineCollector)
+    coll._producer = _FakeProducer()
+    coll._source = type("S", (), {"name": "opendota_timeline"})()
+    return coll
+
+
+def _match(mid=42, rows=3):
+    return type("TM", (), {"match_id": mid, "rows": [{}] * rows})()
+
+
+def test_the_json_path_announces_that_features_are_ready():
+    """ГЛАВНОЕ: JSON-матч сообщает о готовности фич.
+
+    Без этого события report-generator про матч не узнаёт, и отчёта не
+    будет — сколько бы данных ни лежало в витрине.
+    """
+    coll = _collector_with_producer()
+    coll._announce(_match())
+
+    assert len(coll._producer.sent) == 1
+    topic, key, value = coll._producer.sent[0]
+    assert topic == "features.calculated"
+    assert key == b"match_id:42"
+
+
+def test_the_event_says_there_are_no_player_rows():
+    """Событие честно сообщает, что поигрокового разреза нет.
+
+    `player_rows: 0` — не забывчивость, а факт: PlayerMatchFeatures пишет
+    только feature-extractor. По этому нулю потребитель и понимает, что
+    отчёт будет частичным.
+    """
+    import json
+
+    coll = _collector_with_producer()
+    coll._announce(_match(rows=37))
+    env = json.loads(coll._producer.sent[0][2])
+
+    assert env["payload"]["match_id"] == 42
+    assert env["payload"]["player_rows"] == 0
+    assert env["payload"]["timeline_rows"] == 37
+    assert env["event_type"] == "features.calculated"
+
+
+def test_a_failed_announcement_does_not_undo_the_collection():
+    """Недоставка здесь НЕ откатывает сбор — в отличие от реплейного пути.
+
+    Там (спринт 194) терялся единственный след: событие исчезало, матч
+    помечался собранным, вернуться было неоткуда. Здесь главный продукт —
+    строки витрины, и они уже записаны; потерянное событие стоит лишь
+    отсутствующего отчёта, а отчёт восстановим из витрины в любой момент.
+
+    Поэтому `_announce` не бросает и не возвращает отказ: он кричит в лог.
+    Откатывать дорогую работу из-за дешёвой потери — плохой размен.
+    """
+    coll = _collector_with_producer()
+    coll._producer.stuck = 1
+    coll._announce(_match())          # не должно бросить
+
+    coll2 = _collector_with_producer()
+    coll2._producer.fail = "UNKNOWN_TOPIC_OR_PART"
+    coll2._announce(_match())
+
+
+def test_the_collect_loop_actually_announces(monkeypatch):
+    """Оповещение ВЫЗЫВАЕТСЯ из цикла сбора, а не просто существует.
+
+    ПОЙМАНО МУТАЦИЕЙ: удаление строки `self._announce(tm)` из
+    `collect_once` не роняло ни одного теста — все они звали `_announce`
+    напрямую. Написанная, но не подключённая функция — это код, который
+    никогда не выполнится, и заметить такое можно только руками.
+
+    Та же форма ловилась в спринте 185 у `all_minute_features`: проверять
+    надо ПРОВОДКУ, а не только поведение куска.
+    """
+    from collector import timeline_runner
+    from collector.sources.opendota_timeline import TimelineMatch
+
+    class FakeCur:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def execute(self, q, params=None): pass
+        def fetchone(self): return None
+
+    class FakeDB:
+        closed = False
+        def cursor(self): return FakeCur()
+        def close(self): pass
+
+    monkeypatch.setattr(timeline_runner.psycopg, "connect",
+                        lambda dsn, autocommit: FakeDB())
+
+    class R:
+        def raise_for_status(self): pass
+
+    monkeypatch.setattr(timeline_runner.requests, "post",
+                        lambda *a, **kw: R())
+
+    class OneShotSource:
+        name = "opendota_timeline"
+        def fetch_new(self, skip=None):
+            rows = timeline_rows(_parsed_match(mid=42, minutes=3))
+            yield TimelineMatch(match_id=42, tier="Premium", rows=rows,
+                                source_cursor="42")
+
+    coll = timeline_runner.TimelineCollector(
+        timeline_runner.TimelineConfig(), OneShotSource())
+    coll._producer = _FakeProducer()
+
+    assert coll.collect_once() == 1
+    assert coll._producer.sent, (
+        "цикл сбора не оповестил о готовности фич — отчёта по этому "
+        "матчу не будет, сколько бы данных ни лежало в витрине")
+    assert coll._producer.sent[0][1] == b"match_id:42"
+
+
+def test_without_kafka_the_collection_still_works():
+    """Пустой KAFKA_BROKERS — сбор работает, просто без отчётов.
+
+    Стенд без Kafka обязан оставаться рабочим: иначе разработка требует
+    поднимать брокер ради данных, которым он не нужен.
+    """
+    coll = _collector_with_producer()
+    coll._producer = None
+    coll._announce(_match())          # не должно бросить

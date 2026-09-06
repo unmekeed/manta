@@ -287,6 +287,23 @@ class ReportGenerator:
             "  FROM PlayerMatchFeatures FINAL"
             " WHERE match_id = {match_id:UInt64} ORDER BY player_id", match_id)
 
+    def _draft_row(self, match_id: int) -> dict | None:
+        """Составы из MatchDraft — запасной источник героев (спринт 195).
+
+        Нужен только JSON-матчам: PlayerMatchFeatures пишет
+        feature-extractor, то есть реплейный путь, и у матча, приехавшего
+        по JSON, поигрокового разреза нет вовсе. MatchDraft же заполняют
+        оба пути.
+
+        Запрос делается ТОЛЬКО когда игроков нет: у реплейного матча это
+        был бы лишний поход в ClickHouse на каждом отчёте ради данных,
+        которые уже на руках.
+        """
+        rows = self._ch_select(
+            "SELECT radiant_heroes, dire_heroes FROM MatchDraft FINAL"
+            " WHERE match_id = {match_id:UInt64} LIMIT 1", match_id)
+        return rows[0] if rows else None
+
     def _early_combat(self, match_id: int) -> dict[str, dict]:
         """hero → {dealt, taken, kills, deaths} за лейнинг-окно (фичи
         Laning-модели; тот же расчёт, что COMBAT_QUERY трейнера)."""
@@ -390,9 +407,13 @@ class ReportGenerator:
         # Обратный порядок приоритетов означал бы, что мелкая беда со
         # вспомогательной таблицей стоит пользователю всего разбора.
         try:
+            # Драфт спрашиваем только у матчей без поигрокового разреза:
+            # у реплейных он уже есть в players, и лишний запрос стоил бы
+            # похода в ClickHouse на каждом отчёте.
+            draft = None if players else self._draft_row(match_id)
             self.db.execute(summary.UPSERT_SQL,
                             summary.build_summary(match_id, rows, players,
-                                                  analysis))
+                                                  analysis, draft))
         except Exception as e:  # noqa: BLE001
             logger.warning("карточка матча %s не записана: %s", match_id, e)
 

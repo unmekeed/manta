@@ -5,22 +5,42 @@
 ClickHouse и помечает матч в CollectedMatches (общий дедуп с реплей-путём:
 один матч никогда не въезжает дважды, каким бы путём ни пришёл).
 
-События features.calculated НЕ публикуются: у JSON-матчей нет ReplayEvents/
-позиций, полноценный отчёт по ним не собрать — они существуют ради датасета
-Win Probability, который читает витрину напрямую.
+События features.calculated ПУБЛИКУЮТСЯ (спринт 195), и это изменение
+прежнего решения. Раньше здесь стояло: «у JSON-матчей нет ReplayEvents и
+позиций, полноценный отчёт по ним не собрать». Верно — но вывод из этого
+был сделан неверный.
+
+Отчётов в базе оказалось 520 при 3091 собранном матче: разбор получал
+только реплейный путь, а JSON-матчи существовали исключительно ради
+датасета. Для сайта это значит список, в котором пользователь своего
+матча не найдёт.
+
+ЧТО У JSON-МАТЧА ЕСТЬ: WP-кривая, счёт, длительность, патч, уровень,
+драфт (MatchDraft заполняется этим же путём). Этого хватает и на карточку
+списка, и на страницу таймлайна.
+
+ЧЕГО НЕТ: поигрокового разреза (PlayerMatchFeatures пишет только
+feature-extractor), тепловых карт, позиций, событий убийств — то есть
+разбора ошибок и impact. Отчёт помечается как частичный, и потребитель
+обязан РАЗЛИЧАТЬ «данных нет» и «данные нулевые»: пустой блок игроков без
+пометки прочтётся как сломанный отчёт.
 
 Вставка в ClickHouse — TabSeparated: текстовые nan корректно парсятся в
 Float64 (JSONEachRow с null для не-Nullable колонки не прошёл бы).
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import psycopg
 import requests
+from confluent_kafka import Producer
 
 from .rawstore import RawMatchStore
 from .signals import draft_row, event_rows
@@ -67,6 +87,40 @@ EVENT_COLUMNS = ["match_id", "game_time", "kind", "team", "player_slot",
                  "subtype", "x", "y"]
 
 
+# Куда сообщать, что фичи матча готовы. Тот же топик, что у
+# feature-extractor: потребитель (report-generator) не должен знать, каким
+# путём приехал матч — иначе у него завелись бы две ветки на одно событие.
+FEATURES_TOPIC = "features.calculated"
+PRODUCER_NAME = "timeline-collector@1.0.0"
+PUBLISH_TIMEOUT_S = 10.0
+
+
+def build_features_envelope(match_id: int, feature_version: str,
+                            timeline_rows: int) -> dict:
+    """Конверт события по схеме Гл. 2.3.3.
+
+    `player_rows: 0` — не забывчивость, а факт: поигрокового разреза у
+    JSON-матча нет (его пишет только feature-extractor). Потребитель по
+    этому нулю и понимает, что отчёт будет частичным.
+    """
+    return {
+        "event_id": str(uuid.uuid4()),
+        "event_type": FEATURES_TOPIC,
+        "schema_version": "1.0.0",
+        "trace_id": uuid.uuid4().hex,
+        "occurred_at": datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"),
+        "producer": PRODUCER_NAME,
+        "partition_key": f"match_id:{match_id}",
+        "payload": {
+            "match_id": match_id,
+            "feature_version": feature_version,
+            "player_rows": 0,
+            "timeline_rows": timeline_rows,
+        },
+    }
+
+
 @dataclass
 class TimelineConfig:
     postgres_dsn: str = field(default_factory=lambda: os.getenv(
@@ -90,6 +144,11 @@ class TimelineCollector:
         # Хранилище сырого JSON (трек F): выключается RAW_MATCH_STORE=0,
         # недоступный S3 не мешает сбору — только предупреждение.
         self._raw_store = RawMatchStore.from_env()
+        # Продюсер отключается пустым KAFKA_BROKERS: на стенде без Kafka
+        # сбор обязан работать, просто без отчётов.
+        brokers = os.getenv("KAFKA_BROKERS", "").strip()
+        self._producer = Producer({"bootstrap.servers": brokers}) if brokers \
+            else None
 
     def close(self) -> None:
         self._db.close()
@@ -243,7 +302,49 @@ class TimelineCollector:
                               avg_rank=getattr(tm, "avg_rank", 0))
             self._store_signals(tm)
             self._mark_collected(tm.match_id, tm.source_cursor)
+            self._announce(tm)
             processed += 1
             logger.info("таймлайн матча %d: %d строк (tier=%s)",
                         tm.match_id, len(tm.rows), tm.tier)
         return processed
+
+    def _announce(self, tm) -> None:
+        """Сказать конвейеру, что фичи матча готовы (спринт 195).
+
+        ПОЧЕМУ НЕДОСТАВКА ЗДЕСЬ НЕ ОТМЕНЯЕТ СБОР — в отличие от
+        реплейного пути, где непроверенная публикация стоила трёх суток
+        (спринт 194). Там терялся ЕДИНСТВЕННЫЙ след: событие исчезало,
+        матч помечался собранным, и вернуться к нему было неоткуда.
+
+        Здесь главный продукт — строки витрины, и они уже записаны.
+        Потерянное событие стоит лишь отсутствующего отчёта, а отчёт
+        восстанавливается из витрины в любой момент. Поэтому матч
+        остаётся собранным, а недоставка кричит в лог: чинить её надо,
+        но откатывать сбор ради неё — значит переделывать дорогую работу
+        из-за дешёвой потери.
+        """
+        if self._producer is None:
+            return
+        failures: list[str] = []
+
+        def on_delivery(err, _msg):
+            if err is not None:
+                failures.append(str(err))
+
+        env = build_features_envelope(tm.match_id, _feature_version(self._source),
+                                      len(tm.rows))
+        try:
+            self._producer.produce(FEATURES_TOPIC,
+                                   key=env["partition_key"].encode(),
+                                   value=json.dumps(env).encode(),
+                                   on_delivery=on_delivery)
+            remaining = self._producer.flush(PUBLISH_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — Kafka недоступна
+            remaining, failures = 1, [str(exc)]
+        if remaining or failures:
+            logger.error(
+                "матч %d: событие %s НЕ доставлено (в очереди %s, причина: "
+                "%s) — строки витрины записаны, но отчёт не будет собран. "
+                "Проверь топики: make topics",
+                tm.match_id, FEATURES_TOPIC, remaining,
+                "; ".join(failures) or "таймаут")

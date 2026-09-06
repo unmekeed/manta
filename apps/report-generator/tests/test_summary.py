@@ -162,3 +162,69 @@ def test_every_column_of_the_table_is_filled():
     named = {p.split(")")[0] for p in UPSERT_SQL.split("%(")[1:]}
     assert named == set(card), (
         f"UPSERT ждёт {sorted(named)}, карточка даёт {sorted(card)}")
+
+
+# -- JSON-матч: составы из драфта (спринт 195) ---------------------------------
+#
+# ЖИВОЙ РАСКЛАД. Отчётов в базе 520 при 3091 собранном матче: разбор
+# получал только реплейный путь. JSON-матчи существовали ради датасета, и
+# на сайте пользователь своего матча не нашёл бы.
+#
+# Публиковать по ним отчёт можно, но у JSON-матча НЕТ PlayerMatchFeatures
+# (её пишет только feature-extractor). Значит составы надо брать из
+# MatchDraft — единственной таблицы, которую заполняют оба пути.
+
+# Герои драфта НАМЕРЕННО не совпадают с героями из players(): иначе
+# подмена источника ничего не меняет в результате, и мутация «брать драфт
+# всегда» проходит незамеченной. Поймано мутацией на первом же прогоне —
+# фикстура была устроена так, что скрывала проверяемое свойство.
+DRAFT = {"radiant_heroes": [f"npc_dota_hero_draft_r{i}" for i in range(5)],
+         "dire_heroes": [f"npc_dota_hero_draft_d{i}" for i in range(5)]}
+
+
+def test_without_player_rows_the_heroes_come_from_the_draft():
+    """ГЛАВНОЕ: у JSON-матча составы берутся из драфта, а не пустеют.
+
+    Пустые составы в карточке выглядят как матч, в котором никто не
+    играл, — и отличить это от настоящего пробела нельзя.
+    """
+    card = build_summary(42, ROWS, [], ANALYSIS, DRAFT)
+    assert card["radiant_heroes"] == DRAFT["radiant_heroes"]
+    assert card["dire_heroes"] == DRAFT["dire_heroes"]
+
+
+def test_player_rows_win_over_the_draft():
+    """Там, где есть поигроковый разрез, он и используется.
+
+    В нём сторона известна по коду Valve и привязана к игроку, а драфт —
+    это два массива без такой привязки. Приоритет наоборот означал бы
+    терять точность у реплейных матчей ради удобства кода.
+    """
+    card = build_summary(42, ROWS, players(), ANALYSIS, DRAFT)
+    assert card["radiant_heroes"] == [f"npc_dota_hero_r{i}" for i in range(5)]
+    assert card["dire_heroes"] == [f"npc_dota_hero_d{i}" for i in range(5)]
+    assert not any("draft" in h for h in card["radiant_heroes"]), (
+        "составы взяты из драфта при живом поигроковом разрезе")
+
+
+def test_no_players_and_no_draft_leaves_the_rosters_empty():
+    """Нет ни того, ни другого — составы пусты, и это честно.
+
+    Выдумывать героев неоткуда. Пустой список здесь означает «мы не
+    знаем», и карточка всё равно полезна: счёт, длительность, патч и
+    исход на месте.
+    """
+    card = build_summary(42, ROWS, [], ANALYSIS, None)
+    assert card["radiant_heroes"] == [] and card["dire_heroes"] == []
+
+
+def test_a_half_empty_draft_is_taken_as_is_not_mixed():
+    """Драфт берётся целиком, а не по половинке от каждого источника.
+
+    Смешение дало бы состав из шести героев на стороне, и заметить это
+    было бы нечем: обе половины по отдельности выглядят правдоподобно.
+    """
+    half = {"radiant_heroes": DRAFT["radiant_heroes"], "dire_heroes": []}
+    card = build_summary(42, ROWS, [], ANALYSIS, half)
+    assert len(card["radiant_heroes"]) == 5
+    assert card["dire_heroes"] == []
