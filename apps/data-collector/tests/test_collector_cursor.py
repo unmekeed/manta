@@ -70,13 +70,46 @@ def make_collector(source, collected=()):
         c.cursor = ref.source_cursor
     c._mark_collected = mark
 
+    # Заглушки повторяют НАСТОЯЩИЙ интерфейс, а не удобный (спринт 194).
+    # Заглушка, которая проще боевого клиента, проверяет несуществующую
+    # систему: ровно так тест сторожа в 193-м был зелёным три месяца,
+    # потому что его заглушка не красила вывод.
     class FakeS3:
-        def put_object(self, *a, **kw): pass
+        """MinIO: put_object кладёт, stat_object бросает, если ключа нет."""
+
+        def __init__(self):
+            self.objects = set()
+
+        def put_object(self, bucket, key, *a, **kw):
+            self.objects.add(key)
+
+        def stat_object(self, bucket, key):
+            if key not in self.objects:
+                raise RuntimeError("NoSuchKey")
+            return object()
+
     c._s3 = FakeS3()
 
     class FakeProducer:
-        def produce(self, topic, key, value): c.published.append(key)
-        def flush(self, t): pass
+        """confluent_kafka.Producer: on_delivery обязателен, flush → int.
+
+        `flush` возвращает число сообщений, ОСТАВШИХСЯ в очереди. Ноль
+        значит «всё доставлено»; заглушка, возвращавшая None, делала
+        проверку доставки бессмысленной.
+        """
+
+        def __init__(self):
+            self.fail = None       # текст ошибки доставки или None
+            self.stuck = 0         # сколько сообщений «зависнет» в очереди
+
+        def produce(self, topic, key, value, on_delivery=None):
+            c.published.append(key)
+            if on_delivery is not None:
+                on_delivery(self.fail, None)
+
+        def flush(self, timeout=None):
+            return self.stuck
+
     c._producer = FakeProducer()
 
     class Cfg:
@@ -166,3 +199,88 @@ def test_failed_match_never_marked_collected(exc):
         c.collect_once()
     assert 600 not in c._collected
     assert c.published == []
+
+
+# -- подтверждённая публикация (спринт 194) ------------------------------------
+#
+# ЖИВОЙ ОТКАЗ 3-6 сентября 2026. Топики Kafka исчезли, и коллектор трое
+# суток качал реплеи, клал их в S3, ПОМЕЧАЛ МАТЧИ СОБРАННЫМИ — а события
+# пропадали. Ни ошибки, ни строчки в логе: `flush()` возвращает число
+# оставшихся в очереди сообщений, и этот возврат никто не смотрел.
+#
+# Матч, помеченный собранным, больше не берётся никогда, поэтому трое
+# суток реплеев выпали из обработки насовсем. Здесь проверяется, что
+# недоставка — это НЕуспех.
+
+
+def test_undelivered_event_does_not_mark_the_match_collected():
+    """ГЛАВНОЕ: не доставили — значит не собрали.
+
+    Пометка и сдвиг курсора живут в одной транзакции, поэтому непомеченный
+    матч вернётся следующим циклом сам. Обратное поведение (пометить и
+    идти дальше) теряет матч навсегда и выглядит при этом как успех.
+    """
+    src = FakeSource([100])
+    c = make_collector(src)
+    c._producer.stuck = 1          # брокер не подтвердил запись
+
+    assert c.collect_once() == 0, "матч засчитан при недоставленном событии"
+    assert 100 not in c._collected, "матч помечен собранным без публикации"
+    assert c.cursor is None, "курсор сдвинут мимо непубликованного матча"
+
+
+def test_delivery_error_is_also_a_failure():
+    """Ошибка доставки от брокера — не успех, даже если очередь пуста.
+
+    Два разных признака: `flush` говорит «сколько осталось», колбэк —
+    «что пошло не так с отправленным». Проверять только первый значит
+    пропустить сообщение, которое брокер ОТВЕРГ.
+    """
+    src = FakeSource([100])
+    c = make_collector(src)
+    c._producer.fail = "UNKNOWN_TOPIC_OR_PART"
+
+    assert c.collect_once() == 0
+    assert 100 not in c._collected
+
+
+def test_the_match_returns_on_the_next_cycle():
+    """Непомеченный матч берётся снова, когда брокер ожил.
+
+    Без этого «не помечать» означало бы просто терять матч тише.
+    """
+    src = FakeSource([100])
+    c = make_collector(src)
+    c._producer.stuck = 1
+    assert c.collect_once() == 0
+
+    c._producer.stuck = 0          # Kafka вернулась
+    assert c.collect_once() == 1
+    assert 100 in c._collected
+
+
+def test_a_stored_replay_is_not_downloaded_twice():
+    """Повторный заход не качает файл заново — он уже в хранилище.
+
+    Реплей весит 60-90 МиБ. Без этой ветки каждая неудача доставки
+    стоила бы ещё одной такой закачки, и починка Kafka на час означала бы
+    гигабайты лишнего трафика.
+    """
+    src = FakeSource([100])
+    c = make_collector(src)
+    c._producer.stuck = 1
+    c.collect_once()
+    assert src.downloads == [100], "первый заход обязан скачать"
+
+    c._producer.stuck = 0
+    assert c.collect_once() == 1
+    assert src.downloads == [100], "реплей скачан повторно, хотя лежал в S3"
+    assert 100 in c._collected
+
+
+def test_successful_delivery_still_marks_the_match():
+    """Обратная сторона: исправная доставка ничего не ломает."""
+    src = FakeSource([100, 101])
+    c = make_collector(src)
+    assert c.collect_once() == 2
+    assert c._collected == {100, 101}

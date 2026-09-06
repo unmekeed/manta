@@ -38,6 +38,7 @@ type Envelope struct {
 
 type matchDownloaded struct {
 	JobID     string `json:"job_id"`
+	MatchID   int64  `json:"match_id"` // читается ради различения дубликата
 	ReplayURL string `json:"replay_url"`
 	Source    string `json:"source"`
 	Tier      string `json:"tier"`  // Premium | Professional | ... (Гл. 4.2)
@@ -105,7 +106,24 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 		"trace_id", env.TraceID)
 	res, err := c.pipe.Run(ctx, msg.ReplayURL)
 	if err != nil {
-		c.log.Error("parse failed", "job_id", msg.JobID, "err", err)
+		// Реплея нет в хранилище — два РАЗНЫХ случая, и их нельзя
+		// путать (спринт 194).
+		//
+		// Разобранный реплей удаляется из S3, а доставка у нас
+		// at-least-once по контракту. Значит повторное событие того же
+		// матча законно приходит к пустому месту. Раньше это давало
+		// ERROR и уход в DLQ — то есть ровно то же, что настоящая
+		// потеря реплея, которую надо спасать. Одинаковый вид у нормы и
+		// у беды приучает пропускать обе.
+		if c.pipe.IsMissingObject(err) && c.pipe.AlreadyParsed(ctx, msg.MatchID) {
+			c.log.Info("duplicate event: реплей уже разобран и удалён",
+				"match_id", msg.MatchID, "job_id", msg.JobID,
+				"trace_id", env.TraceID)
+			duplicates.Inc()
+			return
+		}
+		c.log.Error("parse failed", "job_id", msg.JobID,
+			"match_id", msg.MatchID, "err", err)
 		c.toDLQ(ctx, rec, env.TraceID, err.Error())
 		return
 	}

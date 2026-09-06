@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -417,4 +419,29 @@ func (p *Pipeline) loadJSONL(ctx context.Context, table, path string,
 	}
 	p.log.Info("clickhouse insert done", "table", table, "rows", rows)
 	return rows, nil
+}
+
+// IsMissingObject — отсутствует ли объект в S3 (спринт 194).
+//
+// Проверяется КОДОМ ОШИБКИ MinIO, а не текстом сообщения. Текст —
+// собственность чужой библиотеки: он меняется между версиями молча, и
+// разбор по подстроке однажды перестанет находить, не сломав ни одной
+// сборки. Код `NoSuchKey` — часть протокола S3.
+func (p *Pipeline) IsMissingObject(err error) bool {
+	if err == nil {
+		return false
+	}
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		return resp.Code == "NoSuchKey" || resp.StatusCode == http.StatusNotFound
+	}
+	return false
+}
+
+// AlreadyParsed — есть ли у матча события в витрине.
+func (p *Pipeline) AlreadyParsed(ctx context.Context, matchID int64) bool {
+	if p.ch == nil {
+		return false
+	}
+	return p.ch.AlreadyParsed(ctx, matchID)
 }

@@ -28,6 +28,10 @@ logger = logging.getLogger("collector")
 
 PRODUCER_NAME = "data-collector@0.1.0"
 TOPIC = "match.downloaded"
+# Сколько ждать подтверждения записи от брокера. Десять секунд —
+# с запасом для здоровой Kafka и достаточно мало, чтобы цикл не
+# вставал намертво при недоступном брокере.
+PUBLISH_TIMEOUT_S = 10.0
 
 # Сколько раз подряд повторять матч, упавший с ВРЕМЕННОЙ ошибкой, прежде
 # чем сдвинуть курсор через него. Очередь важнее одного матча: при
@@ -303,6 +307,21 @@ class Collector:
                 self._advance_cursor(ref)
                 continue
 
+            # Файл мог остаться от прошлой попытки, у которой не
+            # доставилось событие (см. _publish). Тогда качать нечего:
+            # публикуем и помечаем собранным. Без этой ветки каждая
+            # неудача доставки стоила бы ещё 60-90 МиБ трафика за файл,
+            # который уже лежит у нас.
+            object_key = f"{self._source.name}/{ref.match_id}.dem"
+            if self._already_in_s3(object_key):
+                replay_url = f"s3://{self._cfg.s3_bucket}/{object_key}"
+                logger.info("match %s: реплей уже в хранилище — публикую "
+                            "без повторной закачки", ref.match_id)
+                if self._publish(ref, replay_url):
+                    self._mark_collected(ref, replay_url)
+                    processed += 1
+                continue
+
             # Сбой одного матча (503 реплей-сервера, битый bz2, сеть) не
             # должен ронять весь цикл (Гл. 2.4.2): логируем и идём дальше.
             try:
@@ -363,23 +382,94 @@ class Collector:
                         ref.match_id, exc, n, MAX_TRANSIENT_RETRIES)
                 continue
             self._transient_fails.pop(ref.match_id, None)
-            object_key = f"{self._source.name}/{ref.match_id}.dem"
             self._s3.put_object(self._cfg.s3_bucket, object_key,
                                 io.BytesIO(data), len(data),
                                 content_type="application/octet-stream")
             replay_url = f"s3://{self._cfg.s3_bucket}/{object_key}"
 
-            env = build_envelope(ref, replay_url, self._source.name)
-            self._producer.produce(
-                TOPIC,
-                key=env["partition_key"].encode(),
-                value=json.dumps(env).encode())
-            self._producer.flush(10)
+            # Матч считается собранным ТОЛЬКО после подтверждённой
+            # доставки события. См. _publish: непроверенная публикация
+            # стоила проекту трёх суток простоя.
+            if not self._publish(ref, replay_url):
+                continue
 
             self._mark_collected(ref, replay_url)
             processed += 1
             logger.info("collected match_id=%s -> %s", ref.match_id, replay_url)
         return processed
+
+    def _publish(self, ref: MatchRef, replay_url: str) -> bool:
+        """Опубликовать match.downloaded и УБЕДИТЬСЯ, что доставлено.
+
+        ЖИВОЙ ОТКАЗ 3-6 сентября 2026. Здесь стояло:
+
+            self._producer.produce(...)
+            self._producer.flush(10)
+            self._mark_collected(...)
+
+        `flush` возвращает число сообщений, ОСТАВШИХСЯ в очереди, и этот
+        возврат никто не смотрел; колбэка доставки не было вовсе. Когда
+        топики Kafka исчезли, каждый матч скачивался, клался в S3,
+        помечался собранным — и его событие пропадало. Ни ошибки, ни
+        строчки в логе. Матч, помеченный собранным, больше не берётся
+        никогда, поэтому трое суток реплеев выпали из обработки насовсем.
+
+        Теперь недоставка — это НЕуспех: матч не помечается, курсор не
+        двигается (они в одной транзакции), и следующий цикл возьмёт его
+        снова. Повторная закачка при этом не нужна — файл уже в S3, см.
+        `_already_in_s3`.
+
+        Возврат: True — брокер подтвердил запись.
+        """
+        failures: list[str] = []
+
+        def on_delivery(err, _msg):
+            # Колбэк вызывается из flush(); ошибка доставки иначе
+            # видна только по возвращаемому числу, без причины.
+            if err is not None:
+                failures.append(str(err))
+
+        env = build_envelope(ref, replay_url, self._source.name)
+        try:
+            self._producer.produce(
+                TOPIC,
+                key=env["partition_key"].encode(),
+                value=json.dumps(env).encode(),
+                on_delivery=on_delivery)
+        except BufferError as exc:
+            # Очередь продюсера переполнена: брокер не принимает быстрее,
+            # чем мы производим. Это не потеря — матч вернётся циклом.
+            logger.error("match %s: очередь продюсера полна (%s) — "
+                         "матч не помечен собранным, вернусь к нему",
+                         ref.match_id, exc)
+            return False
+
+        remaining = self._producer.flush(PUBLISH_TIMEOUT_S)
+        if remaining or failures:
+            logger.error(
+                "match %s: событие %s НЕ доставлено (в очереди %d, "
+                "причина: %s) — матч не помечен собранным, вернусь к нему. "
+                "Если это повторяется, проверь топики: make topics",
+                ref.match_id, TOPIC, remaining,
+                "; ".join(failures) or "таймаут")
+            return False
+        return True
+
+    def _already_in_s3(self, object_key: str) -> bool:
+        """Лежит ли реплей в хранилище с прошлой попытки.
+
+        Нужно ровно для одного случая: событие не доставилось, матч не
+        помечен собранным и вернулся следующим циклом. Качать его второй
+        раз незачем — это 60-90 МиБ трафика за файл, который уже у нас.
+
+        Ошибку хранилища трактуем как «нет»: лишняя закачка дешевле, чем
+        событие, ссылающееся на объект, которого не существует.
+        """
+        try:
+            self._s3.stat_object(self._cfg.s3_bucket, object_key)
+            return True
+        except Exception:  # noqa: BLE001 — MinIO различает NoSuchKey и сбой
+            return False
 
     def close(self) -> None:
         self._db.close()
