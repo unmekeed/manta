@@ -6,8 +6,12 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable, Protocol
+
+logger = logging.getLogger("collector.sources")
 
 
 class PermanentDownloadError(Exception):
@@ -143,6 +147,114 @@ class SourceSplit:
 
     def accepts(self, match_id: int) -> bool:
         return self.count == 1 or (match_id // 10) % self.count == self.split_id
+
+
+class PartnerSplit:
+    """Доля потока, которая ВОЗВРАЩАЕТСЯ, когда напарник перестаёт собирать.
+
+    ЖИВОЙ ОТКАЗ 6–7 сентября 2026. `SourceSplit` делил поток публичных
+    матчей между OpenDota и STRATZ, а включалось деление по ФАКТУ НАЛИЧИЯ
+    `STRATZ_API_TOKEN`. Токен протух: STRATZ получал 403 каждый цикл
+    сутки подряд, контейнер при этом стоял `Up`, и половина кандидатов не
+    собиралась НИКЕМ. Со стороны всё выглядело здоровым — второй источник
+    честно отрабатывал свою половину и жаловаться ему было не на что.
+
+    Проверялось присутствие настройки, а не пригодность источника. Ровно
+    та же форма, что у тома, смонтированного не туда: объявление приняли
+    за факт.
+
+    ПО ЧЕМУ СУДИМ. По собранным матчам напарника, а не по его процессу,
+    логам или расходу квоты. Расход не годится совсем: STRATZ потратил 52
+    вызова в сутки, ни один из которых ничем не кончился, — счётчик
+    попыток выглядит как жизнь. `CollectedMatches` же хранит РЕЗУЛЬТАТ, и
+    вопрос «принёс ли напарник хоть один матч» отвечает на то, что нас
+    действительно волнует.
+
+    Мы намеренно НЕ разбираемся, ПОЧЕМУ напарник молчит. Протух токен,
+    кончилась квота, некому отдавать кандидатов — для потока это одно и
+    то же: доля простаивает. Диагноз ставит человек по логам, а решение
+    «забрать долю» не должно его дожидаться.
+
+    ПОЧЕМУ ЗАБИРАЕМ МЕДЛЕННО, А ОТДАЁМ СРАЗУ. Условие одно — возраст
+    последнего матча напарника больше окна, — и оно даёт оба свойства
+    само: чтобы забрать, нужно окно тишины; чтобы вернуть, достаточно
+    одного собранного напарником матча. Обратная асимметрия была бы
+    опасна: пока оба берут всё, они пишут в витрину одни и те же матчи, а
+    она ReplacingMergeTree — строка STRATZ затирает строку OpenDota
+    вместе с фичами трека F.
+
+    ХОЛОДНЫЙ СТАРТ. Расширение требует не только молчания напарника, но и
+    СВОЕЙ работы: у пустой базы не собрал никто, и без второго условия
+    оба источника разом решили бы, что они одни, — и подрались бы ровно
+    так, как деление и должно предотвращать.
+    """
+
+    def __init__(self, mine: "SourceSplit", my_name: str, partner_name: str,
+                 last_collected, window_s: float = 21600.0,
+                 refresh_s: float = 300.0, clock=None) -> None:
+        self._mine = mine
+        self._me = my_name
+        self._partner = partner_name
+        self._probe = last_collected
+        self._window = window_s
+        self._refresh = refresh_s
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._solo = False
+        self._checked_at: float | None = None
+
+    # Своя доля видна снаружи так же, как у SourceSplit: это ЗАМЕНА, а не
+    # обёртка сбоку. Читающий «какая у источника доля» не должен знать,
+    # умеет ли она забирать чужую.
+    @property
+    def split_id(self) -> int:
+        return self._mine.split_id
+
+    @property
+    def count(self) -> int:
+        return self._mine.count
+
+    def accepts(self, match_id: int) -> bool:
+        if self._alone():
+            return True
+        return self._mine.accepts(match_id)
+
+    def _alone(self) -> bool:
+        """Забрал ли я долю напарника; ответ кэшируется на refresh_s.
+
+        Кэш обязателен: `accepts` вызывается на КАЖДОГО кандидата, а за
+        ответом стоит поход в базу. Без кэша проверка живости стоила бы
+        дороже самого сбора.
+        """
+        now = self._clock().timestamp()
+        if self._checked_at is not None and now - self._checked_at < self._refresh:
+            return self._solo
+        self._checked_at = now
+        was = self._solo
+        self._solo = self._decide()
+        if self._solo != was:
+            logger.warning(
+                "доля источника %s %s: последний собранный им матч старше "
+                "%.0f ч", self._partner,
+                "ЗАБРАНА" if self._solo else "возвращена", self._window / 3600)
+        return self._solo
+
+    def _decide(self) -> bool:
+        try:
+            partner_last = self._probe(self._partner)
+            my_last = self._probe(self._me)
+        except Exception as exc:  # noqa: BLE001 — база молчит
+            # Не знаем — значит не меняем расклад. Расширение по ошибке
+            # чтения означало бы, что недоступная база разводит источники
+            # драться за одни и те же матчи.
+            logger.warning("живость напарника %s не проверена: %s",
+                           self._partner, exc)
+            return self._solo
+        now = self._clock()
+        partner_silent = (partner_last is None
+                          or (now - partner_last).total_seconds() > self._window)
+        i_work = (my_last is not None
+                  and (now - my_last).total_seconds() <= self._window)
+        return partner_silent and i_work
 
 
 class Source(Protocol):

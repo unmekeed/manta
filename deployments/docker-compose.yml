@@ -24,7 +24,12 @@ x-collector-env:
       OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
       OPENDOTA_BURST_SLEEP_S: "${OPENDOTA_BURST_SLEEP_S:-90}"
       OPENDOTA_DELAY_S: "${OPENDOTA_DELAY_S:-1.1}"
-      OPENDOTA_GLOBAL_LIMIT: "${OPENDOTA_GLOBAL_LIMIT:-1900}"
+      # ПУСТО по умолчанию, и это существенно (спринт 196). Подставь
+      # сюда 1900 — и переменная в контейнере задана ВСЕГДА, а
+      # `budget.daily_limit()` уважает явно заданное значение выше
+      # любой формулы. Потолок навсегда остался бы бесплатным
+      # тарифом, а расчёт из месячного бюджета — мёртвым кодом.
+      OPENDOTA_GLOBAL_LIMIT: "${OPENDOTA_GLOBAL_LIMIT:-}"
       OPENDOTA_LIMIT: "${OPENDOTA_LIMIT:-3}"
       OPENDOTA_MIN_PATCH: "${OPENDOTA_MIN_PATCH:-}"
       # Платный тариф (спринт 183): месячный потолок вызовов и цена
@@ -36,6 +41,9 @@ x-collector-env:
       # Возврат к припаркованным реплеям (спринт 153): сколько брать за
       # прогон. Источник `parked` запускается вручную, но переменную
       # читает точка входа, а она общая для всех коллекторов.
+      # Сколько часов молчания напарника означает, что его долю
+      # потока пора забрать (спринт 196).
+      PARTNER_SILENCE_H: "${PARTNER_SILENCE_H:-6}"
       PARKED_LIMIT: "${PARKED_LIMIT:-5}"
       # Скачивание по солям, добытым у GC (спринты 179, 181): сколько
       # реплеев брать за прогон. Восемь в час согласовано с добычей —
@@ -292,7 +300,12 @@ services:
       <<: [*app-env, *collector-env]
       COLLECTOR_SOURCE: opendota-timeline
       COLLECTOR_INTERVAL_SECONDS: "${TIMELINE_INTERVAL:-1800}"
-      TIMELINE_LIMIT: "${TIMELINE_LIMIT:-10}"
+      # Спринт 196: потолок за цикл больше НЕ работает тормозом.
+      # Десятка при цикле в 1800 секунд давала 480 матчей в сутки —
+      # предел, о котором не говорила ни одна настройка, и упирались
+      # мы в него, а не в деньги. Тормоз должен быть один и назван:
+      # объявленный месячный потолок (budget.daily_limit).
+      TIMELINE_LIMIT: "${TIMELINE_LIMIT:-70}"
       # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
       # стартовавший, остальные упали бы с «Address already in use».
       METRICS_PORT: "9108"
@@ -315,7 +328,7 @@ services:
       <<: [*app-env, *collector-env]
       COLLECTOR_SOURCE: opendota-timeline-pro
       COLLECTOR_INTERVAL_SECONDS: "${PRO_TIMELINE_INTERVAL:-3600}"
-      TIMELINE_LIMIT: "${PRO_TIMELINE_LIMIT:-5}"
+      TIMELINE_LIMIT: "${PRO_TIMELINE_LIMIT:-100}"
       # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
       # стартовавший, остальные упали бы с «Address already in use».
       METRICS_PORT: "9110"
@@ -336,7 +349,7 @@ services:
       <<: [*app-env, *collector-env]
       COLLECTOR_SOURCE: opendota-league
       COLLECTOR_INTERVAL_SECONDS: "${LEAGUE_INTERVAL:-3600}"
-      TIMELINE_LIMIT: "${LEAGUE_LIMIT:-6}"
+      TIMELINE_LIMIT: "${LEAGUE_LIMIT:-100}"
       # Порт метрик У КАЖДОГО СВОЙ. Общее значение занял бы первый
       # стартовавший, остальные упали бы с «Address already in use».
       METRICS_PORT: "9117"

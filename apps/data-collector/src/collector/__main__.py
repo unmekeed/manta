@@ -28,7 +28,7 @@ RATE_LIMITED = Counter("opendota_rate_limited_total",
 # не минутным всплеском. Не ноль: заголовок отдаёт остаток на момент
 # ответа, и у самой границы оба лимита срабатывают вперемешку.
 BURST_DAY_MARGIN = 50
-from .sources import Shard, SourceSplit
+from .sources import PartnerSplit, Shard, SourceSplit
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
 from .sources.opendota_public import OpenDotaPublicSource
@@ -145,8 +145,52 @@ def _detail_split(name: str) -> SourceSplit:
     if (name.endswith("-pro") or name == "opendota-league"
             or not os.getenv("STRATZ_API_TOKEN")):
         return SourceSplit()
-    return SourceSplit(split_id=1 if name.startswith("stratz") else 0,
-                       count=2)
+    mine = SourceSplit(split_id=1 if name.startswith("stratz") else 0, count=2)
+    partner = LISTING_PARTNERS[name]
+    # Наличие токена больше НЕ означает работоспособности (спринт 196):
+    # доля напарника держится за ним, только пока он приносит матчи.
+    return PartnerSplit(
+        mine, my_name=COLLECTED_AS[name], partner_name=COLLECTED_AS[partner],
+        last_collected=_last_collected,
+        window_s=float(os.getenv("PARTNER_SILENCE_H", "6")) * 3600)
+
+
+# Источники, делящие ОДИН листинг: кто чью долю может забрать.
+LISTING_PARTNERS = {
+    "opendota-timeline": "stratz-timeline",
+    "stratz-timeline": "opendota-timeline",
+}
+
+# Имя процесса → имя, под которым источник ПИШЕТ в CollectedMatches.
+#
+# Два имени у одного источника — не украшение, а ловушка. Процесс зовётся
+# `opendota-timeline` (через дефис: так он задан в compose, в SHARES и в
+# ApiBudget), а в CollectedMatches кладёт `opendota_timeline` (через
+# подчёркивание: это `source.name`). Спроси живость по дефисному имени —
+# и запрос НИЧЕГО не найдёт: напарник вечно выглядит мёртвым, доля
+# забирается всегда, а деление, ради которого всё затевалось, молча
+# перестаёт существовать. Соответствие стережёт тест.
+COLLECTED_AS = {
+    "opendota-timeline": "opendota_timeline",
+    "stratz-timeline": "stratz_timeline",
+}
+
+
+def _last_collected(source_name: str):
+    """Когда источник в последний раз ПРИНЁС матч; None — никогда.
+
+    Отдельное короткое подключение, а не общее с коллектором: запрос
+    делается раз в несколько минут, и тянуть ради него соединение через
+    полпрограммы дороже, чем открыть своё.
+    """
+    import psycopg
+
+    dsn = os.getenv("POSTGRES_DSN",
+                    "postgresql://dota:dota_dev_password@localhost:5432/manta")
+    with psycopg.connect(dsn, connect_timeout=10) as db:
+        row = db.execute("SELECT max(collected_at) FROM CollectedMatches"
+                         " WHERE source_name = %s", (source_name,)).fetchone()
+    return row[0] if row else None
 
 
 def blamed_on_stratz(response, source: str) -> bool:
