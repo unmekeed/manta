@@ -117,15 +117,24 @@ def test_the_per_cycle_limit_is_not_the_hidden_brake(service):
     """
     source = JSON_SERVICES[service]
     share = budget.shares_for(budget.ceiling_for_target())[source]
-    afford = share / budget.CALLS_PER_MATCH        # матчей в сутки по деньгам
 
     limit, interval = knobs(service)
-    capacity = limit * (86400 / interval)          # матчей в сутки по циклам
+    # Считаем в ОСМОТРАХ, а не в матчах, потому что упирается именно в них.
+    # Ранг известен только после `/matches/{id}`, поэтому вызов тратится и
+    # на кандидата, которого мы отвергнем; за цикл источник осматривает
+    # `detail_budget`, а он по умолчанию вдвое больше лимита матчей
+    # (`opendota_timeline.py`: `detail_budget or 2 * limit_per_cycle`).
+    #
+    # Сравнение в матчах прошло бы почти при любых числах и потому ничего
+    # не стерегло бы: лимит матчей за цикл почти всегда больше, чем матчей
+    # получается. Первая редакция этого теста именно так и была написана.
+    inspections = 2 * limit * (86400 / interval)
 
-    assert capacity >= afford, (
-        f"{service}: по бюджету доступно {afford:.0f} матчей в сутки, а "
-        f"циклы дают {capacity:.0f} ({limit} за цикл раз в {interval}с). "
-        f"Приток упрётся в число из compose, а не в объявленный бюджет")
+    assert inspections >= share, (
+        f"{service}: доля позволяет {share} осмотров в сутки, а циклы дают "
+        f"{inspections:.0f} ({limit} матчей за цикл → {2 * limit} осмотров, "
+        f"раз в {interval}с). Приток упрётся в число из compose, а не в "
+        f"объявленный бюджет")
 
 
 def test_the_free_tier_shares_are_unchanged():
