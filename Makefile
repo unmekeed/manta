@@ -201,6 +201,9 @@ ml-status:     ## Статус обучения: production-версия, раз
 ml-ablation:   ## Ablation фич WP: какая заслужила место (ARGS="--each")
 	./scripts/in-image.sh ml-write -m training.ablation $(ARGS)
 
+ml-anchor:     ## Выбрать якорь храповика среди версий реестра: ARGS=--apply
+	./scripts/in-image.sh ml-write -m training.anchor $(ARGS)
+
 wp-rates-sql-test: pytest-check ## Проверить окна производных (G1) на живом ClickHouse
 	cd apps/ml-service && MANTA_TEST_CH=1 \
 	PYTHONPATH=src:$(CURDIR)/libs python3 -m pytest tests/test_rates_sql.py -v

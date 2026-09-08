@@ -332,16 +332,36 @@ def test_the_gate_is_actually_handed_the_anchor(monkeypatch, tmp_path):
     assert "v0" in reg.resolved, "артефакт якоря не скачан"
 
 
-def test_the_first_promoted_version_becomes_the_anchor(monkeypatch, tmp_path):
-    """Якорь заводится сам на первой же продвинутой версии.
+def test_the_very_first_version_becomes_the_anchor(monkeypatch, tmp_path):
+    """На чистом реестре якорь заводится сам.
 
-    Иначе храповик начал бы работать неизвестно с какого дня: пока
-    указателя нет, сравнивать не с чем, а завести его вручную некому.
+    Выбирать не из чего: версия одна. Не завести его вовсе значило бы
+    оставить храповик выключенным навсегда на новой установке.
     """
-    reg = FakeReg(stages={"production": "v9"}, blobs={"v9": b"prod"})
+    reg = FakeReg()
     push(monkeypatch, tmp_path, reg)
     stages = [s for _, s in reg.promoted]
     assert ratchet.CHAMPION_STAGE in stages, reg.promoted
+
+
+def test_an_anchorless_registry_with_history_does_not_self_anchor(monkeypatch,
+                                                                  tmp_path):
+    """ГЛАВНОЕ (209): при живой истории якорь НЕ ставится автоматически.
+
+    Раньше он вставал на первой продвинутой версии — а ею по построению
+    оказывается ХУДШАЯ из виденных: планка встала бы ровно там, куда
+    съехал прод, и храповик держал бы деградацию вместо того, чтобы её
+    остановить. Замер 08.09.2026: 0.1581 → 0.1572 → 0.1599 → 0.1594 →
+    0.1617, и якорь достался бы последнему числу.
+
+    Выбор якоря при живой истории — решение (`training.anchor`), а не
+    побочный эффект промоушена.
+    """
+    reg = FakeReg(stages={"production": "v9"}, blobs={"v9": b"prod"})
+    push(monkeypatch, tmp_path, reg)
+    assert ratchet.CHAMPION_STAGE not in [s for _, s in reg.promoted], (
+        "якорь встал на подвернувшейся версии, а не на выбранной")
+    assert "production" in [s for _, s in reg.promoted], "модель не продвинута"
 
 
 def test_a_promotion_that_did_not_beat_the_anchor_leaves_it_alone(monkeypatch,
