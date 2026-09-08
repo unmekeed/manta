@@ -1,7 +1,8 @@
-"""Сквозной прогон конвейера (спринт 203).
+"""Сквозной прогон конвейера (спринт 203; проводка проверена в 206).
 
-Проверки статические: сам прогон требует живого стека. Стережётся то, что
-легко решить наоборот и что определяет, будет ли от проверки польза.
+Часть проверок статическая: сам прогон требует живого стека. Стережётся
+то, что легко решить наоборот и что определяет, будет ли от проверки
+польза.
 
 ГЛАВНОЕ РЕШЕНИЕ — НЕ СИНТЕТИЧЕСКИЙ МАТЧ. Выдуманный match_id проще, но
 его строки витрины попадают в обучающую выборку. Уборка после себя
@@ -9,7 +10,22 @@
 в датасете МОЛЧА — то есть завёл бы ровно ту беду, от которой этот проект
 лечится весь сентябрь. Настоящий матч ничем не рискует: отчёты
 перегенерируемы по построению (спринт 195).
+
+ЧТО ЗДЕСЬ ЕЩЁ И ПОЧЕМУ ОНО НЕ СТАТИЧЕСКОЕ. Первая редакция прогона звала
+продюсера через `docker exec` БЕЗ `-i`, то есть не отдавала контейнеру
+стандартный ввод: продюсер читал EOF сразу, публиковал пустоту и выходил
+с нулём. Проверка печатала «событие опубликовано», ждала таймаут и
+сообщала «отчёт не появился» — при полностью исправном конвейере.
+
+Ни один статический тест этого не ловил и поймать не мог: в тексте были
+и продюсер, и топик, и сравнение отметок. Ловится оно только запуском —
+поэтому ниже прогон исполняется целиком на подставных `docker` и `curl`,
+где подставной `docker` ВОСПРОИЗВОДИТ настоящее поведение: без `-i`
+стандартный ввод процессу не достаётся.
 """
+import os
+import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -126,3 +142,145 @@ def test_the_failure_names_where_to_look():
     assert "manta-report-generator-1" in src, "не назван лог генератора"
     assert "manta-ml-service-1" in src, (
         "не названа частая причина — модель, а не конвейер")
+
+
+# -- прогон целиком на подставном окружении ------------------------------------
+#
+# Подставной `docker` повторяет ЕДИНСТВЕННОЕ поведение настоящего, которое
+# здесь имеет значение: без `-i` контейнеру не отдаётся стандартный ввод.
+# Заглушка, устроенная удобнее оригинала, проверяет несуществующую систему
+# — правило, которое этот проект уже оплатил трижды.
+
+FAKE_DOCKER = r"""#!/usr/bin/env bash
+set -u
+STATE="$MANTA_FAKE_STATE"
+args=("$@")
+
+# Настоящий docker отдаёт процессу stdin ТОЛЬКО при -i. Без него продюсер
+# читает EOF сразу и публикует пустоту, возвращая ноль.
+interactive=0
+for a in "${args[@]}"; do [ "$a" = "-i" ] && interactive=1; done
+
+tool=""
+for a in "${args[@]}"; do
+    case "$a" in */kafka-*.sh) tool="${a##*/}";; esac
+done
+
+produced() { cat "$STATE/produced" 2>/dev/null || echo 0; }
+
+case "$tool" in
+kafka-topics.sh)
+    echo features.calculated; echo match.downloaded; exit 0;;
+kafka-get-offsets.sh)
+    # Конец топика растёт ровно на число опубликованных сообщений.
+    echo "features.calculated:0:$((10 + $(produced)))"
+    echo "features.calculated:1:7"
+    exit 0;;
+kafka-console-producer.sh)
+    got=""
+    [ "$interactive" = 1 ] && got="$(cat)"
+    if [ -n "$got" ] && [ -z "${MANTA_FAKE_SWALLOW:-}" ]; then
+        printf '%s\n' "$got" >> "$STATE/messages"
+        echo $(( $(produced) + 1 )) > "$STATE/produced"
+    fi
+    exit 0;;
+esac
+
+# psql: SQL — последний аргумент.
+sql="${args[$(( ${#args[@]} - 1 ))]}"
+case "$sql" in
+*available*) echo true;;
+*)  # Отметка отчёта сдвигается ровно тогда, когда событие опубликовано:
+    # конвейер здесь исправен, и вся разница — в том, доехало ли событие.
+    printf '2026-09-08T05:00:%02d.000000\n' "$(produced)";;
+esac
+"""
+
+FAKE_CURL = """#!/usr/bin/env bash
+cat >/dev/null
+echo 8888888888
+"""
+
+
+def run_smoke(tmp_path, swallow=False, timeout_s=60):
+    """Прогнать scripts/smoke.sh на подставных docker и curl."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
+        p = bin_dir / name
+        p.write_text(body, encoding="utf-8")
+        p.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["MANTA_FAKE_STATE"] = str(state)
+    # Файла нет — прогон не подхватит боевых настроек машины.
+    env["MANTA_TRAIN_ENV"] = str(tmp_path / "нет-такого.env")
+    if swallow:
+        env["MANTA_FAKE_SWALLOW"] = "1"
+
+    started = time.monotonic()
+    r = subprocess.run(["bash", str(SMOKE), "--timeout", str(timeout_s)],
+                       capture_output=True, text=True, env=env,
+                       timeout=timeout_s + 60)
+    return r, time.monotonic() - started, state
+
+
+def test_the_run_passes_when_the_pipeline_works(tmp_path):
+    """Страховка от «зелено, потому что ничего не проверяется».
+
+    Тест ниже требует ОТКАЗА, и он проходил бы при вечно падающем
+    прогоне. Значит, сперва надо убедиться, что на исправном конвейере
+    прогон доходит до конца.
+    """
+    r, _, state = run_smoke(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "КОНВЕЙЕР ЖИВ" in r.stdout, r.stdout
+    assert (state / "messages").exists(), (
+        "продюсер не получил стандартный ввод — сообщение не опубликовано")
+    assert '"match_id":8888888888' in (state / "messages").read_text(
+        encoding="utf-8")
+
+
+def test_an_unpublished_event_is_named_at_once_not_waited_out(tmp_path):
+    """ГЛАВНОЕ: непопадание в топик — отдельный диагноз, а не таймаут.
+
+    Ровно этот отказ случился на живой машине: продюсер звался без `-i`,
+    не публиковал ничего и выходил с нулём. Прогон печатал «событие
+    опубликовано», ждал пять минут и сообщал «отчёт не появился» — при
+    исправном конвейере, нулевом лаге и генераторе, производившем в те же
+    минуты отчёты по другим матчам. Диагноз уводил в сторону тем вернее,
+    чем внимательнее его читали.
+
+    Проверяется и ЧТО сказано, и КОГДА: вердикт, выданный по истечении
+    таймаута, стоит читателю тех же минут ожидания и той же неверной
+    догадки.
+    """
+    r, elapsed, state = run_smoke(tmp_path, swallow=True, timeout_s=60)
+    assert r.returncode != 0, r.stdout
+    assert "конец топика" in r.stdout, (
+        f"отказ не назвал непопадание в топик:\n{r.stdout}")
+    assert "отчёт не появился" not in r.stdout, (
+        "прогон свалился в общий таймаут вместо диагноза о публикации")
+    assert elapsed < 30, (
+        f"диагноз выдан через {elapsed:.0f}с — прогон досидел до таймаута "
+        f"вместо того, чтобы остановиться сразу")
+    assert not (state / "messages").exists()
+
+
+def test_the_producer_is_the_only_call_given_stdin(tmp_path):
+    """`-i` стоит там, где читают ввод, и не стоит там, где не читают.
+
+    Проверка не текстовая: подставной docker сообщает, чем его звали, и
+    утверждение читается с той стороны, с какой его увидит Kafka.
+    """
+    src = code()
+    piped = [ln for ln in src.splitlines() if "| $KAFKA" in ln]
+    assert piped, "в прогоне не нашлось ни одной команды, читающей stdin"
+    for ln in piped:
+        assert "$KAFKA_IN/" in ln, (
+            f"команде отдают ввод через форму без -i: {ln.strip()}")
+    assert "KAFKA_IN=\"docker exec -i " in src, (
+        "форма для читающих stdin команд определена без -i")
