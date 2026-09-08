@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -126,6 +127,29 @@ SELECT source, sum(calls) FROM ApiBudget
 // collectedRow — приток источника за сутки.
 type collectedRow struct{ Matches, WithReplay int64 }
 
+// canonicalSource — одно имя источника из двух его написаний.
+//
+// ЖИВОЙ ДЕФЕКТ 08.09.2026, увиденный на первой же работающей странице.
+// `CollectedMatches.source_name` пишет `opendota_timeline`, а
+// `ApiBudget.source` — `opendota-timeline`: это ОДИН источник, но
+// объединение двух таблиц давало две строки, и в каждой половина правды.
+//
+// Строка «opendota-timeline: 0 матчей, 60 вызовов» при этом читается
+// ровно как «источник жжёт бюджет впустую» — сигнатура аварии STRATZ,
+// ради которой страница и делалась. Ложная тревога в инструменте,
+// которому положено верить, хуже отсутствия инструмента.
+//
+// Ловушка была ИЗВЕСТНА: в спринте 196 она описана в `COLLECTED_AS`
+// (collector/__main__.py) и закрыта тестом — на стороне Python. Здесь в
+// неё шагнули заново, потому что урок жил в другом языке.
+//
+// `gc-salts` при этом остаётся отдельной строкой, и правильно: это
+// скрипт добычи солей, а не коллектор `salts`. Механическая замена
+// дефиса на подчёркивание их не сливает — и не должна.
+func canonicalSource(name string) string {
+	return strings.ReplaceAll(name, "-", "_")
+}
+
 // mergeSources сводит перечень источников со счётчиками суток.
 //
 // ГЛАВНОЕ СВОЙСТВО: источник из перечня попадает в ответ ВСЕГДА, даже
@@ -141,13 +165,34 @@ type collectedRow struct{ Matches, WithReplay int64 }
 // тем, что было вчера.
 func mergeSources(roster []string, collected map[string]collectedRow,
 	spent map[string]int64) []adminSource {
-	out := make([]adminSource, 0, len(roster))
+	merged := map[string]*adminSource{}
+	order := []string{}
+	add := func(name string) *adminSource {
+		key := canonicalSource(name)
+		if s, ok := merged[key]; ok {
+			return s
+		}
+		merged[key] = &adminSource{Source: key}
+		order = append(order, key)
+		return merged[key]
+	}
 	for _, name := range roster {
-		c := collected[name]
-		out = append(out, adminSource{
-			Source: name, Matches: c.Matches,
-			WithReplay: c.WithReplay, Calls: spent[name],
-		})
+		add(name)
+	}
+	// Счётчики раскладываются по КАНОНИЧЕСКОМУ имени, а не по тому, под
+	// которым пришли: иначе половина чисел осталась бы в строке, которой
+	// больше нет.
+	for name, c := range collected {
+		s := add(name)
+		s.Matches += c.Matches
+		s.WithReplay += c.WithReplay
+	}
+	for name, calls := range spent {
+		add(name).Calls += calls
+	}
+	out := make([]adminSource, 0, len(order))
+	for _, key := range order {
+		out = append(out, *merged[key])
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Matches != out[j].Matches {

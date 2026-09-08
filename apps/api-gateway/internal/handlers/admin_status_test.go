@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -151,5 +152,94 @@ func TestUnknownLatestIsNullNotZeroTime(t *testing.T) {
 	}
 	if !contains(string(body), `"latest":null`) {
 		t.Fatalf("неизвестное время сериализовано не как null: %s", body)
+	}
+}
+
+// -- два написания одного источника (спринт 198e) ------------------------------
+
+// Живой перечень с машины 08.09.2026 — ровно то, что вернул UNION двух
+// таблиц. Фикстура намеренно НЕ придумана: прежние тесты брали имена в
+// одном написании, и потому задвоение через них проходило насквозь.
+// «Вход должен быть боевым» — правило проекта, применённое к себе.
+var liveRoster = []string{
+	"opendota_public", "salts", "opendota", "stratz_timeline",
+	"opendota_timeline", "gc-salts", "opendota-league", "opendota-public",
+	"opendota-timeline", "opendota-timeline-pro", "opendota_league",
+	"opendota_timeline_pro", "stratz-timeline",
+}
+
+func TestOneSourcePerRowDespiteTwoSpellings(t *testing.T) {
+	// ГЛАВНОЕ. CollectedMatches пишет `opendota_timeline`, ApiBudget —
+	// `opendota-timeline`. Это ОДИН источник; две строки означают, что в
+	// каждой половина правды.
+	got := mergeSources(liveRoster,
+		map[string]collectedRow{
+			"opendota_timeline": {Matches: 5},
+			"opendota_public":   {Matches: 36, WithReplay: 36},
+			"stratz_timeline":   {Matches: 9},
+		},
+		map[string]int64{
+			"opendota-timeline": 60,
+			"opendota-public":   7,
+			"stratz-timeline":   29,
+			"gc-salts":          8,
+		})
+
+	seen := map[string]int{}
+	for _, s := range got {
+		seen[s.Source]++
+		if strings.Contains(s.Source, "-") {
+			t.Errorf("в ответе осталось дефисное имя %q — два написания "+
+				"одного источника доехали до страницы как разные", s.Source)
+		}
+	}
+	for name, n := range seen {
+		if n > 1 {
+			t.Errorf("источник %q встречается %d раза", name, n)
+		}
+	}
+
+	m := bySource(got)
+	// Обе половины правды обязаны сойтись в одной строке. Иначе строка
+	// «0 матчей, 60 вызовов» читается как «жжёт бюджет впустую» — то есть
+	// как сигнатура аварии STRATZ, ради которой страница и делалась.
+	if s := m["opendota_timeline"]; s.Matches != 5 || s.Calls != 60 {
+		t.Errorf("opendota_timeline: %+v, ждали 5 матчей и 60 вызовов", s)
+	}
+	if s := m["stratz_timeline"]; s.Matches != 9 || s.Calls != 29 {
+		t.Errorf("stratz_timeline: %+v, ждали 9 матчей и 29 вызовов", s)
+	}
+	if s := m["opendota_public"]; s.Matches != 36 || s.WithReplay != 36 ||
+		s.Calls != 7 {
+		t.Errorf("opendota_public: %+v", s)
+	}
+}
+
+func TestSaltsAndGcSaltsStayApart(t *testing.T) {
+	// `gc-salts` — скрипт добычи солей, а не коллектор `salts`. Замена
+	// дефиса на подчёркивание их не сливает, и сливать не должна: у них
+	// разная работа, и объединённая строка спрятала бы, что соли добывает
+	// одно, а матчи собирает другое.
+	got := mergeSources([]string{"salts", "gc-salts"},
+		map[string]collectedRow{"salts": {Matches: 32, WithReplay: 32}},
+		map[string]int64{"gc-salts": 8})
+	m := bySource(got)
+	if len(got) != 2 {
+		t.Fatalf("ждали две отдельные строки, получили %+v", got)
+	}
+	if m["salts"].Matches != 32 || m["gc_salts"].Calls != 8 {
+		t.Errorf("счётчики перепутаны: %+v", got)
+	}
+}
+
+func TestCountersLandOnTheCanonicalNameEvenWithoutARoster(t *testing.T) {
+	// Перечень строится за неделю, а счётчики — за сутки, и это разные
+	// окна: свежий источник может дать матчи, ещё не попав в перечень.
+	// Потеряй мы его счётчики — приток был бы занижен молча.
+	got := mergeSources(nil,
+		map[string]collectedRow{"новый_источник": {Matches: 3}},
+		map[string]int64{"новый-источник": 11})
+	if len(got) != 1 || got[0].Matches != 3 || got[0].Calls != 11 {
+		t.Fatalf("счётчики без перечня потеряны: %+v", got)
 	}
 }
