@@ -303,6 +303,9 @@ stop:          ## Остановить хостовые процессы (кон
 daily-report:  ## Снимок doctor+collect-report+ml-audit в MANTA_REPORT_DIR (30 дней)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/daily-report.sh
 
+smoke:         ## Прогнать матч сквозь конвейер и дождаться отчёта: ARGS="--timeout 300"
+	./scripts/smoke.sh $(ARGS)
+
 tier-audit:    ## Сверить ярлык tier с наблюдаемым рангом: ARGS="--days 30"
 	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs \
 		python3 tools/tier_audit.py $(ARGS)
