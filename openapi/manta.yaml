@@ -162,6 +162,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Timeline' }
   /api/v1/players/{playerId}/profile:
+    # ЗАПЛАНИРОВАН, но шлюзом НЕ ОТДАЁТСЯ: спрос на профиль игрока: витрина есть, REST-маршрута ещё нет.
+    # Пометка не украшение: без неё документ обещает
+    # маршрут, по которому напишут клиента и получат 404.
+    x-manta-status: planned
     get:
       tags: [Players]
       summary: Профиль игрока
@@ -179,6 +183,10 @@ paths:
               schema: { $ref: '#/components/schemas/PlayerProfile' }
         '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/players/{playerId}/training-plan:
+    # ЗАПЛАНИРОВАН, но шлюзом НЕ ОТДАЁТСЯ: план тренировок: сервис Coach живёт по gRPC, наружу не выведен.
+    # Пометка не украшение: без неё документ обещает
+    # маршрут, по которому напишут клиента и получат 404.
+    x-manta-status: planned
     get:
       tags: [Players]
       summary: Персональный план тренировок (Premium)
@@ -212,6 +220,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DraftRecommendation' }
   /api/v1/similarity/search:
+    # ЗАПЛАНИРОВАН, но шлюзом НЕ ОТДАЁТСЯ: поиск похожих: сервис Similarity живёт по gRPC, наружу не выведен.
+    # Пометка не украшение: без неё документ обещает
+    # маршрут, по которому напишут клиента и получат 404.
+    x-manta-status: planned
     post:
       tags: [Similarity]
       summary: Поиск похожих матчей/игроков
@@ -227,7 +239,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SimilarityResult' }
-  /api/v1/meta/heroes:
+  /api/v1/heroes:
     get:
       tags: [Meta]
       summary: Мета героев (винрейты, популярность)
