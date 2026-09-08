@@ -131,6 +131,27 @@ def test_a_rollback_to_the_anchor_is_allowed(monkeypatch, capsys):
     assert reg.stages["production"] == "good"
 
 
+def test_one_version_gets_one_line(monkeypatch, capsys):
+    """Одна версия — одна строка, сколько бы ролей она ни совмещала.
+
+    Списки пересекаются сплошь и рядом: ставим якорь, откатываемся на
+    production, якорь совпал с продом. С повтором вывод читается как «две
+    разные версии с одинаковым номером» — ровно та беда, что в спринте
+    198e задваивала источники на странице состояния.
+
+    Тест дописан ПОСЛЕ живого прогона: фикстура отката (тест выше) этот
+    случай задевала, но смотрела только на стейджи, и задвоение прошло
+    мимо неё. Проверять надо и то, что инструмент ПОКАЗЫВАЕТ, — по этому
+    выводу принимают решение.
+    """
+    _, out, _ = run(monkeypatch, capsys, ["good", "--apply"],
+                    {"production": "bad", "champion": "good"})
+    lines = [l for l in out.splitlines() if "good" in l and l.startswith("  ")]
+    assert len(lines) == 1, f"версия напечатана {len(lines)} раза:\n{out}"
+    assert "← ставим" in lines[0] and "← якорь" in lines[0], (
+        "совмещённые роли потерялись при склейке строк")
+
+
 def test_a_proven_improvement_raises_the_bar(monkeypatch, capsys):
     """Версия лучше якоря поднимает планку — по тому же правилу, что гейт."""
     rc, out, reg = run(monkeypatch, capsys, ["good", "--apply"],

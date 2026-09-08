@@ -70,7 +70,16 @@ def main() -> int:
 
     prod = stage_version(reg, MODEL_NAME, "production")
     champ = stage_version(reg, MODEL_NAME, CHAMPION_STAGE)
-    wanted = [v for v in (args.version, prod, champ) if v]
+    # Одна версия — одна строка. Списки пересекаются сплошь и рядом:
+    # ставим якорь, откатываемся на production, якорь совпал с продом. С
+    # повтором вывод читается как «две разные версии с одинаковым
+    # номером» — ровно та беда, что в спринте 198e задваивала источники
+    # на странице состояния, и ровно так же выглядит безобидно.
+    wanted, seen = [], set()
+    for v in (args.version, prod, champ):
+        if v and v not in seen:
+            seen.add(v)
+            wanted.append(v)
     scored = {v: (b, p) for v, b, p in evaluate(reg, wanted, X, y, groups)}
     if args.version not in scored:
         logger.error("версия %s не прочиталась из реестра", args.version)
