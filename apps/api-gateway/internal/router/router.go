@@ -55,6 +55,11 @@ func New(h *handlers.Handlers, a *auth.Authenticator, logger *slog.Logger,
 		guarded(auth.RoleAdmin, h.ErasePlayerData))
 	api.Handle("POST /api/v1/auth/token",
 		guarded(auth.RoleAdmin, h.IssueToken))
+	// Состояние сбора для админской страницы (спринт 198). Роль admin —
+	// вторая преграда; первая в том, что в PublicRoutes этого пути нет и
+	// публичный mux о нём не знает вовсе.
+	api.Handle("GET /api/v1/admin/status",
+		guarded(auth.RoleAdmin, h.AdminStatus))
 
 	// Auth идёт ДО RateLimit: невалидный токен отбивается раньше, чем
 	// расходуется бюджет лимитера.

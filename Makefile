@@ -303,6 +303,9 @@ stop:          ## Остановить хостовые процессы (кон
 daily-report:  ## Снимок doctor+collect-report+ml-audit в MANTA_REPORT_DIR (30 дней)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/daily-report.sh
 
+tailscale:     ## Частный доступ к метрикам и API без домена: ARGS=--check
+	./scripts/tailscale-setup.sh $(ARGS)
+
 doctor:        ## Health-check конвейера по ДАННЫМ (топики, лаг, свежесть, квота)
 	./scripts/doctor.sh
 

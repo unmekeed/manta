@@ -160,3 +160,35 @@ func requestWithOrigin(t *testing.T, h http.Handler, origin string) *httptest.Re
 	h.ServeHTTP(rec, req)
 	return rec
 }
+
+// -- админская страница состояния (спринт 198) ---------------------------------
+
+func TestAdminStatusIsNotReachableFromOutside(t *testing.T) {
+	// Список `wantPublic` выше и так требует РОВНО пяти маршрутов, и
+	// шестой уронил бы его. Эта проверка существует отдельно, потому что
+	// говорит другое: не «маршрутов пять», а «вот этот конкретный путь
+	// наружу не смотрит».
+	//
+	// Разница практическая. Когда через год кто-то решит добавить шестой
+	// публичный маршрут, он поправит `wantPublic` — это законное действие,
+	// и оно не должно тихо открыть заодно админскую страницу состояния
+	// сбора, расхода денег и живости источников.
+	const admin = "GET /api/v1/admin/status"
+	for pattern := range PublicRoutes(&handlers.Handlers{}) {
+		if pattern == admin {
+			t.Fatal("админская страница состояния объявлена публичной")
+		}
+	}
+
+	mux := http.NewServeMux()
+	for pattern, h := range PublicRoutes(&handlers.Handlers{}) {
+		mux.HandleFunc(pattern, h)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/status", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("публичный mux ответил на админский путь %d, а не 404",
+			rec.Code)
+	}
+}
