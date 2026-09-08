@@ -87,8 +87,10 @@ const adminRosterDays = 7
 
 // Три отдельных запроса вместо одного с JOIN — намеренно. Решение
 // «источник, ничего не собравший, всё равно показывается нулём» живёт
-// НЕ в SQL, а в mergeSources ниже: без живой базы SQL не проверить, а
-// это ровно то свойство, ради которого страница и делается.
+// НЕ в SQL, а в mergeSources ниже, и потому проверяется без базы. Сам
+// SQL проверяется отдельно и по-настоящему: PREPARE на схеме из
+// настоящих миграций (scripts/tests/test_sql_prepares.py).
+
 // $1 используется ДВАЖДЫ, и обе подстановки обязаны быть одного типа.
 //
 // Первая редакция писала `($1 || ' days')::interval` в одной половине и
@@ -96,15 +98,20 @@ const adminRosterDays = 7
 // из даты — int, и pgx не смог угодить обоим. Отказ пришёл только на
 // живой базе, первым же запросом: «cannot find encode plan».
 //
-// `$1 * INTERVAL '1 day'` берёт целое и снимает разнобой. Заодно это
-// честнее: число дней и есть число, а не строка, из которой сделают
-// интервал разбором текста.
+// Вторая редакция писала `$1 * INTERVAL '1 day'` без приведения — и
+// сломалась ТОЖЕ: Postgres вывел параметр как double precision (такой
+// оператор с интервалом есть), после чего `date - double precision` не
+// нашлось. Оба раза отказ приходил только на живой базе.
+//
+// Приведение `::int` в ОБОИХ местах снимает вывод типа как таковой:
+// гадать больше нечего. Проверяется это теперь не глазами, а прогоном
+// PREPARE на настоящей схеме — scripts/tests/test_sql_prepares.py.
 const adminRosterSQL = `
 SELECT DISTINCT source_name FROM CollectedMatches
- WHERE collected_at > NOW() - ($1 * INTERVAL '1 day')
+ WHERE collected_at > NOW() - ($1::int * INTERVAL '1 day')
 UNION
 SELECT DISTINCT source FROM ApiBudget
- WHERE day > CURRENT_DATE - $1`
+ WHERE day > CURRENT_DATE - $1::int`
 
 const adminCollectedSQL = `
 SELECT source_name, count(*), count(*) FILTER (WHERE has_replay)
