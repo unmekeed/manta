@@ -96,6 +96,28 @@ Grafana|http|3000|/"
             warn "$name: $scheme://$ip:$port — НЕ отвечает"
         fi
     done
+    # Проброшенное через `tailscale serve` живёт НЕ на ip:порт, а на 443
+    # по имени машины в сети. Проверка одних лишь портов после проброса
+    # говорила бы «не отвечает» при работающем доступе — то есть ошибалась
+    # бы в другую сторону, чем первая редакция, но так же уверенно.
+    #
+    # Адрес не собираем из кусков и не угадываем: `serve status` печатает
+    # его сам, и это единственный источник, который не разъедется с
+    # действительностью.
+    local served
+    served=$(tailscale serve status 2>/dev/null |
+             grep -o 'https://[A-Za-z0-9._-]*' | head -1)
+    if [ -n "$served" ]; then
+        echo
+        if curl -sk -o /dev/null --max-time 5 "$served/api/v1/matches"; then
+            ok "через tailscale serve: $served/api/v1/matches"
+        else
+            warn "проброс объявлен ($served), но API по нему не отвечает"
+        fi
+        echo "  MANTA_API_BASE для apps/manta-site: $served"
+        return 0
+    fi
+
     echo
     echo "  Если не отвечает ничего — это ожидаемо на свежей установке:"
     echo "  сервисы слушают 127.0.0.1, и соединение из частной сети до них"
