@@ -117,6 +117,51 @@ def _shard_from_env() -> Shard:
                  count=int(os.getenv("COLLECTOR_SHARD_COUNT", "1")))
 
 
+# Общая память источников об отказах (спринт 204). Подключение ленивое и
+# одно на процесс: коллектор — долгоживущий демон, а открывать соединение
+# на каждый отвергнутый матч значило бы платить за память больше, чем за
+# сбор.
+_declines_db = None
+
+
+def _declines_conn():
+    global _declines_db
+    if _declines_db is None or getattr(_declines_db, "closed", 1):
+        import psycopg
+
+        _declines_db = psycopg.connect(
+            os.getenv("POSTGRES_DSN",
+                      "postgresql://dota:dota_dev_password@localhost:5432/manta"),
+            connect_timeout=10)
+    return _declines_db
+
+
+def _decline_writer(source_name: str):
+    """Колбэк «я сдался» для источника.
+
+    Источник о нашей базе не знает и знать не должен — он лишь сообщает
+    факт. Та же граница, что и в остальном ACL.
+    """
+    from .declines import record
+
+    def write(match_id: int, reason: str, attempts: int) -> None:
+        record(_declines_conn(), source_name, match_id, reason, attempts)
+
+    return write
+
+
+def _declined_reader():
+    """Читатель отказов НАПАРНИКА для PartnerSplit."""
+    from .declines import declined_by
+
+    hours = float(os.getenv("DECLINE_WINDOW_H", "6"))
+
+    def read(partner_collected_as: str) -> set:
+        return declined_by(_declines_conn(), partner_collected_as, hours)
+
+    return read
+
+
 def _detail_split(name: str) -> SourceSplit:
     """Доля кандидатов этого источника среди источников деталей машины.
 
@@ -152,7 +197,8 @@ def _detail_split(name: str) -> SourceSplit:
     return PartnerSplit(
         mine, my_name=COLLECTED_AS[name], partner_name=COLLECTED_AS[partner],
         last_collected=_last_collected,
-        window_s=float(os.getenv("PARTNER_SILENCE_H", "6")) * 3600)
+        window_s=float(os.getenv("PARTNER_SILENCE_H", "6")) * 3600,
+        declined_by_partner=_declined_reader())
 
 
 # Источники, делящие ОДИН листинг: кто чью долю может забрать.
@@ -368,6 +414,12 @@ def build_source(name: str):
             # Свежий матч, которого STRATZ ещё не распарсил, пробуется
             # несколько циклов вместо вечного отказа (спринт 87).
             retry_attempts=int(os.getenv("STRATZ_RETRY_ATTEMPTS", "3")),
+            # Сдавшись окончательно, источник отдаёт матч напарнику: они
+            # НЕ РАВНОСИЛЬНЫ на общих кандидатах, и без этого 36% потока
+            # не собирал никто (спринт 204).
+            on_decline=_decline_writer(
+                "stratz_timeline" if not name.endswith("-pro")
+                else "stratz_timeline_pro"),
             detail_budget=int(stratz_budget) if stratz_budget else None,
             # Отступ от вершины листинга: STRATZ отстаёт от OpenDota, и
             # без него 87 вызовов из 100 уходили на матчи, которых у

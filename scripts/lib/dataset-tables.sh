@@ -100,13 +100,18 @@ PG_TABLES=(collectedmatches matchreports matchsummaries playerranks
 #   Пустые таблицы переносить нечего; удалить их — отдельный разговор, и
 #   молчаливо это делать нельзя.
 #
+#   sourcedeclines (спринт 204) — рабочая память источников этой машины
+#   о том, за какие матчи они брались и не смогли. Строки живут часами и
+#   осмысленны только вместе с текущим окном листинга; чужие означали бы
+#   отказы по матчам, которых наш листинг никогда не показывал.
+#
 #   modelversions (спринт 202) — история решений гейта КОНКРЕТНОЙ машины.
 #   У каждой свой реестр моделей, свои версии и свой prod, поэтому
 #   перенос перемешал бы две несвязанные истории: строки чужой машины
 #   встали бы в один ряд со своими, и вопрос «насколько съехал НАШ prod»
 #   стал бы неотвечаемым — а таблица ради него и заведена.
 PG_SKIPPED_TABLES=(collectorcursor apibudget eventoutbox analysisjobs
-                   modelversions
+                   modelversions sourcedeclines
                    players accounts tournaments matches matchplayers
                    subscriptions)
 

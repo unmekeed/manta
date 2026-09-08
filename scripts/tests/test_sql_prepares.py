@@ -48,6 +48,7 @@ MIGRATIONS = ROOT / "infra" / "migrations" / "postgres"
 SQL_SOURCES = [
     ROOT / "apps" / "api-gateway" / "internal" / "handlers" / "admin_status.go",
     ROOT / "apps" / "ml-service" / "src" / "training" / "history.py",
+    ROOT / "apps" / "data-collector" / "src" / "collector" / "declines.py",
 ]
 
 # Константа с запросом — в Go через обратные кавычки, в Python через

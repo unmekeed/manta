@@ -14,6 +14,10 @@ x-collector-env:
   # общее значение занял бы первый стартовавший (инцидент 2026-07-27).
   collector-env: &collector-env
       BUDGET_RETRY_S: "${BUDGET_RETRY_S:-3600}"
+      # Окно, за которое напарник видит отвергнутые матчи (204).
+      # Шесть часов: матч старше окна листинга напарнику уже не
+      # встретится, и держать его в памяти незачем.
+      DECLINE_WINDOW_H: "${DECLINE_WINDOW_H:-6}"
       CANDIDATES_LIMIT: "${CANDIDATES_LIMIT:-20}"
       COLLECTOR_SHARD_COUNT: "${COLLECTOR_SHARD_COUNT:-1}"
       COLLECTOR_SHARD_ID: "${COLLECTOR_SHARD_ID:-0}"

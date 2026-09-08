@@ -205,7 +205,8 @@ class PartnerSplit:
 
     def __init__(self, mine: "SourceSplit", my_name: str, partner_name: str,
                  last_collected, window_s: float = 21600.0,
-                 refresh_s: float = 300.0, clock=None) -> None:
+                 refresh_s: float = 300.0, clock=None,
+                 declined_by_partner=None) -> None:
         self._mine = mine
         self._me = my_name
         self._partner = partner_name
@@ -215,6 +216,10 @@ class PartnerSplit:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._solo = False
         self._checked_at: float | None = None
+        # Матчи, которые напарник забрал и не смог (спринт 204). Их берём
+        # СВЕРХ своей доли: иначе они не достаются никому.
+        self._declined_probe = declined_by_partner
+        self._declined: set[int] = set()
 
     # Своя доля видна снаружи так же, как у SourceSplit: это ЗАМЕНА, а не
     # обёртка сбоку. Читающий «какая у источника доля» не должен знать,
@@ -230,7 +235,20 @@ class PartnerSplit:
     def accepts(self, match_id: int) -> bool:
         if self._alone():
             return True
-        return self._mine.accepts(match_id)
+        if self._mine.accepts(match_id):
+            return True
+        # Чужая доля — но напарник по этому матчу СДАЛСЯ (спринт 204).
+        #
+        # Источники не равносильны на общих кандидатах: листинг
+        # принадлежит OpenDota, и детали любого его матча она отдаст, а
+        # STRATZ отдаст лишь те, что успел разобрать у себя. Замер
+        # 08.09.2026: из доли STRATZ он не смог 70%, то есть 36% всего
+        # потока не собирал НИКТО — фильтр доли отсекал эти матчи до
+        # запроса деталей.
+        #
+        # Порядок проверок важен: своя доля сначала, чужая потом. Иначе
+        # мы бы каждый раз спрашивали базу про матчи, которые и так наши.
+        return match_id in self._declined_set()
 
     def _alone(self) -> bool:
         """Забрал ли я долю напарника; ответ кэшируется на refresh_s.
@@ -245,12 +263,34 @@ class PartnerSplit:
         self._checked_at = now
         was = self._solo
         self._solo = self._decide()
+        self._declined = self._fetch_declined()
         if self._solo != was:
             logger.warning(
                 "доля источника %s %s: последний собранный им матч старше "
                 "%.0f ч", self._partner,
                 "ЗАБРАНА" if self._solo else "возвращена", self._window / 3600)
         return self._solo
+
+    def _declined_set(self) -> set[int]:
+        """Отвергнутое напарником; обновляется на том же кэше, что живость.
+
+        Отдельный поход в базу на каждого кандидата стоил бы дороже
+        сбора: `accepts` вызывается сотни раз за цикл.
+        """
+        self._alone()          # обновит кэш, если пора
+        return self._declined
+
+    def _fetch_declined(self) -> set[int]:
+        if self._declined_probe is None:
+            return set()
+        try:
+            return self._declined_probe(self._partner)
+        except Exception as exc:  # noqa: BLE001 — общая память не обязательна
+            logger.warning("отказы напарника %s не прочитаны: %s",
+                           self._partner, exc)
+            # Прежнее множество, а не пустое: недоступная база — это
+            # незнание, а не свидетельство, что напарник вдруг всё смог.
+            return self._declined
 
     def _decide(self) -> bool:
         try:

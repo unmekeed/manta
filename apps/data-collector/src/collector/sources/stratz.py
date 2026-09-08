@@ -449,7 +449,8 @@ class StratzTimelineSource:
                  id_lag_min: int = 30_000,
                  id_lag_max: int = 400_000,
                  quota_floor: int = 500,
-                 batch_size: int = 1) -> None:
+                 batch_size: int = 1,
+                 on_decline=None) -> None:
         assert mode in ("public", "pro")
         if not token:
             raise ValueError(
@@ -516,6 +517,12 @@ class StratzTimelineSource:
         # чтобы при появлении подходящего токена включить пакет одной
         # переменной, а не переписывать цикл заново.
         self._batch_size = max(int(batch_size), 1)
+        # Кого позвать, когда матч окончательно не дался (спринт 204).
+        # Источник не знает про нашу базу — он лишь сообщает факт,
+        # а куда его записать, решает вызывающий. Это та же граница,
+        # что и в остальном ACL: источник ничего не знает о нашей
+        # стороне, мы ничего не знаем о его формате.
+        self._on_decline = on_decline
         # Справочник патчей OpenDota [(дата, id)]; читается лениво.
         self._patches: list[tuple[int, int]] = []
         self._patch_map_at = -PATCH_MAP_RETRY_S
@@ -651,6 +658,34 @@ class StratzTimelineSource:
                              source_cursor=str(mid), patch=patch,
                              avg_rank=stratz_rank(m),
                              draft=draft_row(m), raw={})
+
+    def defer_match(self, mid: int, kind: str = "нет матча") -> bool:
+        """Отложить матч; True — попытки исчерпаны, сдались окончательно.
+
+        ВЫНЕСЕНО ИЗ ЗАМЫКАНИЯ (спринт 204). Логика жила внутри `defer` в
+        теле `fetch_new`, и вызвать её из теста было нельзя: проверялась
+        функция, а не проводка. Ровно на этом уже спотыкался спринт 195 —
+        `collect_once` не вызывал `_announce`, и ни один тест этого не
+        замечал.
+
+        О напарнике сообщаем ИМЕННО ПРИ ИСЧЕРПАНИИ, а не при первой
+        неудаче: пока матч в `_pending`, мы ещё собираемся его взять, и
+        отдать его сейчас значило бы завести драку за один матч — то
+        самое, ради предотвращения чего деление и заведено.
+        """
+        n = self._pending.get(mid, 0) + 1
+        self._pending[mid] = n
+        if n < self._retry_attempts:
+            return False
+        del self._pending[mid]
+        self._rejected.add(mid)
+        if self._on_decline is not None:
+            try:
+                self._on_decline(mid, kind, n)
+            except Exception as exc:  # noqa: BLE001 — общая память не обязательна
+                logger.warning("матч %d: отказ не передан напарнику: %s",
+                               mid, exc)
+        return True
 
     def _adapt_lag(self, calls: int, misses: int) -> None:
         """Подстроить отступ по доле промахов прошедшего цикла.
@@ -868,11 +903,7 @@ class StratzTimelineSource:
             Постоянные причины (режим, лобби, длительность, патч,
             неразбор ответа) по-прежнему уходят в _rejected сразу.
             """
-            n = self._pending.get(mid, 0) + 1
-            self._pending[mid] = n
-            if n >= self._retry_attempts:
-                del self._pending[mid]
-                self._rejected.add(mid)
+            if self.defer_match(mid, kind):
                 stats["нет данных"] += 1
             else:
                 stats["ждут парсинга"] += 1

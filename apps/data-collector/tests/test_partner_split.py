@@ -204,3 +204,118 @@ def test_every_partner_has_a_collected_name():
 
     for name, partner in LISTING_PARTNERS.items():
         assert name in COLLECTED_AS and partner in COLLECTED_AS
+
+
+# -- отвергнутое напарником (спринт 204) ---------------------------------------
+#
+# ЗАМЕР 08.09.2026, три цикла подряд: из доли STRATZ он не смог 70%, что
+# составляет 36% ВСЕГО публичного потока. Это не поломка, а следствие
+# устройства деления: кандидаты берутся из листинга OpenDota, и источники
+# на них НЕ РАВНОСИЛЬНЫ. OpenDota отдаст детали любого матча из своего же
+# листинга; STRATZ — только тех, что успел разобрать у себя.
+#
+# Матч, который STRATZ забрал и не смог, до OpenDota не доходил НИКОГДА:
+# фильтр доли отсекал его ещё до запроса деталей.
+
+def split_with_declines(declined, partner_age_h=1, my_age_h=1):
+    """Делитель, у которого напарник отверг перечисленные матчи."""
+    def probe(name):
+        age = {"me": my_age_h, "partner": partner_age_h}[name]
+        return None if age is None else NOW - timedelta(hours=age)
+
+    return PartnerSplit(SourceSplit(split_id=0, count=2),
+                        my_name="me", partner_name="partner",
+                        last_collected=probe, window_s=WINDOW_S,
+                        refresh_s=300.0, clock=lambda: NOW,
+                        declined_by_partner=lambda _p: set(declined))
+
+
+def test_a_match_the_partner_gave_up_on_is_taken():
+    """ГЛАВНОЕ: отвергнутый напарником матч берётся сверх своей доли.
+
+    Без этого он не достаётся никому — и это не единичный случай, а
+    36% потока.
+    """
+    s = split_with_declines({PARTNERS})
+    assert s.accepts(PARTNERS), (
+        "матч, который напарник забрал и не смог, снова потерян")
+
+
+def test_the_rest_of_the_partner_share_stays_with_the_partner():
+    """Берём только СДАВШИЕСЯ матчи, а не всю чужую долю.
+
+    Иначе деление перестало бы существовать, и оба источника писали бы в
+    витрину одни и те же матчи — ReplacingMergeTree оставит вставленную
+    последней, и строка STRATZ затрёт строку OpenDota вместе с фичами
+    трека F.
+    """
+    # PARTNERS_OTHER — ЕЩЁ ОДИН матч чужой доли, не отвергнутый. Шаг
+    # именно 20, а не 10: деление идёт по (match_id // 10) % 2, и
+    # соседняя десятка попадает в МОЮ долю. Первая редакция брала +10 и
+    # проверяла бы, что я беру собственный матч, — то есть ничего.
+    other = PARTNERS + 20
+    assert not SourceSplit(split_id=0, count=2).accepts(other), (
+        "фикстура сломана: контрольный матч попал в мою долю")
+
+    s = split_with_declines({PARTNERS})
+    assert not s.accepts(other), (
+        "забрана вся доля напарника, а не только отвергнутое им")
+
+
+def test_my_own_share_needs_no_lookup():
+    """Свои матчи берутся без обращения к списку отказов.
+
+    Порядок проверок не косметика: `accepts` вызывается на каждого
+    кандидата, и спрашивать про свои же матчи значило бы платить за
+    ответ, который известен заранее.
+    """
+    asked = []
+
+    def probe(name):
+        return NOW - timedelta(hours=1)
+
+    s = PartnerSplit(SourceSplit(split_id=0, count=2), my_name="me",
+                     partner_name="partner", last_collected=probe,
+                     window_s=WINDOW_S, refresh_s=300.0, clock=lambda: NOW,
+                     declined_by_partner=lambda p: asked.append(p) or set())
+    s.accepts(MINE)
+    assert len(asked) <= 1, (
+        f"список отказов запрошен {len(asked)} раз на один свой матч")
+
+
+def test_without_the_shared_memory_nothing_changes():
+    """Без общей памяти делитель ведёт себя как прежде.
+
+    Общая память — ускоритель, а не условие работы: машина без миграции
+    (или с недоступной базой) обязана собирать так же, как до спринта
+    204, а не хуже.
+    """
+    s = PartnerSplit(SourceSplit(split_id=0, count=2), my_name="me",
+                     partner_name="partner",
+                     last_collected=lambda n: NOW - timedelta(hours=1),
+                     window_s=WINDOW_S, refresh_s=300.0, clock=lambda: NOW)
+    assert s.accepts(MINE) and not s.accepts(PARTNERS)
+
+
+def test_an_unreadable_decline_list_keeps_the_previous_one():
+    """Ошибка чтения НЕ обнуляет уже известные отказы.
+
+    Пустое множество означало бы «напарник вдруг всё смог», а недоступная
+    база — это незнание. Обнулив список, мы вернули бы потерю тех самых
+    36% ровно на время недоступности, и никто бы этого не заметил.
+    """
+    state = {"fail": False}
+
+    def flaky(_partner):
+        if state["fail"]:
+            raise RuntimeError("база молчит")
+        return {PARTNERS}
+
+    s = PartnerSplit(SourceSplit(split_id=0, count=2), my_name="me",
+                     partner_name="partner",
+                     last_collected=lambda n: NOW - timedelta(hours=1),
+                     window_s=WINDOW_S, refresh_s=0.0, clock=lambda: NOW,
+                     declined_by_partner=flaky)
+    assert s.accepts(PARTNERS)
+    state["fail"] = True
+    assert s.accepts(PARTNERS), "известные отказы забыты из-за сбоя чтения"
