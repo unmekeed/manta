@@ -34,9 +34,12 @@ def _dataset_size() -> int | None:
 
 
 def main() -> int:
+    from .ratchet import CHAMPION_STAGE, stage_version
+
     reg = registry_from_env()
     prod = reg.stage_metadata(MODEL)
     versions = reg.list_versions(MODEL)
+    champ = stage_version(reg, MODEL, CHAMPION_STAGE)
 
     print("=" * 60)
     print("  Manta · Win Probability — статус обучения")
@@ -51,6 +54,22 @@ def main() -> int:
               f"   (цель ≤ 0.18)")
         print(f"  Brier валидация    : {m.get('brier_calibrated', '—')}")
         print(f"  обучена на         : {prod['dataset']['matches']} матчах")
+
+    # Планка храповика (спринт 207). Показывается версией, а НЕ её
+    # сохранённым Brier: числа разных запусков посчитаны на разных
+    # данных — эталон пересобирается по мере прихода про-матчей, — и
+    # поставить их рядом значило бы предложить сравнение, которое ничего
+    # не значит. Именно от такого сравнения гейт и избавлялся.
+    if champ is None:
+        print("\nЯКОРЬ      : не назначен — храповик заработает с первой "
+              "продвинутой версии")
+    else:
+        same = prod and champ == prod["registry_version"]
+        print(f"\nЯКОРЬ      : {champ}"
+              f"{'  (= production)' if same else '  (production от него ушла)'}")
+        print("  кандидат обязан быть не хуже ЭТОЙ версии, а не только")
+        print("  текущего прода: иначе серия «незначимых» ухудшений")
+        print("  проходит беспрепятственно и суммируется.")
 
     n = _dataset_size()
     if n is not None and prod is not None:
@@ -71,8 +90,12 @@ def main() -> int:
     for v in versions[-5:]:
         _, meta = reg.resolve(MODEL, v)
         bm = meta["metrics"].get("brier_benchmark_pro", "?")
-        prod_flag = " ← PRODUCTION" if prod and v == prod["registry_version"] else ""
-        print(f"  {v}  эталон={bm}  датасет={meta['dataset']['matches']}{prod_flag}")
+        flags = ""
+        if prod and v == prod["registry_version"]:
+            flags += " ← PRODUCTION"
+        if v == champ:
+            flags += " ← ЯКОРЬ"
+        print(f"  {v}  эталон={bm}  датасет={meta['dataset']['matches']}{flags}")
     return 0
 
 

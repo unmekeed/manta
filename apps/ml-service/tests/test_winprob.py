@@ -681,11 +681,13 @@ def test_the_first_holdout_decides_when_the_two_disagree(monkeypatch):
     verdicts = {"benchmark_pro": False, "valid": True}
 
     def fake_judge(new_art, prod_art, prod_max, X, y, groups, kind, tol):
-        # Четвёртым элементом — разобранная оценка (спринт 202). Заглушка
-        # обязана отдавать её так же, как настоящая функция: заглушка,
-        # устроенная проще боевой, проверяет несуществующую систему.
+        # Четвёртым элементом — разобранная оценка (спринт 202), пятым —
+        # сам holdout после фильтрации (спринт 207: на нём же считается
+        # храповик). Заглушка обязана отдавать их так же, как настоящая
+        # функция: заглушка, устроенная проще боевой, проверяет
+        # несуществующую систему.
         return (verdicts[kind], f"{kind}: подстановка", kind,
-                {"kind": kind, "ok": verdicts[kind]})
+                {"kind": kind, "ok": verdicts[kind]}, (X, y, groups))
 
     class TwoHoldouts:
         def eval_holdouts(self):
@@ -849,8 +851,10 @@ def test_the_judgement_detail_carries_what_the_history_needs(monkeypatch):
     # которой гейт принял решение.
     y = np.array([1, 0, 1, 0])
     groups = np.array([1, 1, 2, 2])
-    ok, text, kind, detail = tw._judge_holdout(
+    ok, text, kind, detail, used = tw._judge_holdout(
         {}, {}, None, np.zeros((4, 1)), y, groups, "benchmark_pro", 0.001)
+    assert used is not None and len(used[1]) == 4, (
+        "holdout не возвращён — храповику не на чем считаться")
 
     for key in ("kind", "n_matches", "brier_new", "brier_prod", "delta",
                 "sigma", "ok"):

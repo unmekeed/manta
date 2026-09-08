@@ -445,9 +445,51 @@ def _paired_bootstrap_delta(y, p_new, p_prod, groups, n_boot: int = 200,
 from .ablation import MIN_EFFECT as GATE_TOL_FLOOR  # noqa: E402
 
 
+def _compare(new_art: dict, ref_art: dict, X, y, groups, kind: str,
+             tol_floor: float, ref: str = "prod"):
+    """Одно сравнение двух моделей на ОДНИХ данных: (ok, текст, detail).
+
+    Вынесено из `_judge_holdout` в спринте 207: тем же сравнением
+    кандидат меряется и с production, и с якорем-чемпионом (ratchet.py).
+    Своя копия арифметики для якоря означала бы, что «значимо хуже» у
+    двух проверок считается по-разному, — и расхождение проявилось бы не
+    падением, а разными вердиктами на одних числах.
+
+    `ref` — с КЕМ сравнивают. Участвует только в тексте, но участвует
+    обязательно: «значимо хуже» без указания, хуже чего, — половина
+    диагноза.
+    """
+    p_new = predict_calibrated(new_art, X)
+    p_ref = predict_calibrated(ref_art, X)
+    b_new, b_ref = _brier(y, p_new), _brier(y, p_ref)
+    delta, std = _paired_bootstrap_delta(y, p_new, p_ref, groups)
+    tol = max(tol_floor, std)
+    ok = delta <= tol
+    label = {"benchmark_pro": "про-эталон",
+             "fresh": "свежие матчи (никто не видел)"}.get(kind, "валидация")
+    n_m = len(set(groups.tolist()))
+    verdict = f"не хуже {ref}" if ok else f"значимо хуже {ref}"
+    text = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
+            f"{ref} {b_ref:.4f} (Δ{delta:+.4f}, σ{std:.4f}) — {verdict}")
+    # Разобранная форма той же оценки (спринт 202). Текст годится
+    # человеку, но по нему нельзя посчитать, НАСКОЛЬКО съехал prod за
+    # десять промоушенов, — а именно этот вопрос и оказался нечем
+    # ответить, когда обнаружился храповик гейта.
+    detail = {"kind": kind, "n_matches": n_m, "brier_new": round(b_new, 6),
+              "brier_prod": round(b_ref, 6), "delta": round(delta, 6),
+              "sigma": round(std, 6), "tol": round(tol, 6), "ok": bool(ok),
+              "ref": ref}
+    return ok, text, detail
+
+
 def _judge_holdout(new_art: dict, prod_art: dict, prod_max,
                    X, y, groups, kind: str, tol_floor: float):
-    """Одна оценка: (прошёл ли, текст, kind). Решение принимается не здесь."""
+    """Одна оценка против production: (прошёл ли, текст, kind, detail).
+
+    Решение принимается не здесь. Возвращает ещё и сам holdout после
+    возможной фильтрации: по нему же считается храповик, и считать его
+    надо на ТЕХ ЖЕ данных, иначе две проверки говорили бы о разном.
+    """
     # Матчи новее всего, что видела production, — идеальный holdout: их не
     # видел никто (prod — потому что их ещё не существовало, кандидат —
     # потому что валидация исключена из его обучения). Снимает смещение
@@ -459,32 +501,18 @@ def _judge_holdout(new_art: dict, prod_art: dict, prod_max,
             X, y, groups = X[fresh], y[fresh], groups[fresh]
             kind = "fresh"
     if len(y) == 0:
-        return None, None, kind
-    p_new = predict_calibrated(new_art, X)
-    p_prod = predict_calibrated(prod_art, X)
-    b_new, b_prod = _brier(y, p_new), _brier(y, p_prod)
-    delta, std = _paired_bootstrap_delta(y, p_new, p_prod, groups)
-    tol = max(tol_floor, std)
-    ok = delta <= tol
-    label = {"benchmark_pro": "про-эталон",
-             "fresh": "свежие матчи (никто не видел)"}.get(kind, "валидация")
-    n_m = len(set(groups.tolist()))
-    verdict = "не хуже prod" if ok else "значимо хуже prod"
-    text = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
-            f"prod {b_prod:.4f} (Δ{delta:+.4f}, σ{std:.4f}) — {verdict}")
-    # Разобранная форма той же оценки (спринт 202). Текст годится
-    # человеку, но по нему нельзя посчитать, НАСКОЛЬКО съехал prod за
-    # десять промоушенов, — а именно этот вопрос и оказался нечем
-    # ответить, когда обнаружился храповик гейта.
-    detail = {"kind": kind, "n_matches": n_m, "brier_new": round(b_new, 6),
-              "brier_prod": round(b_prod, 6), "delta": round(delta, 6),
-              "sigma": round(std, 6), "ok": bool(ok)}
-    return ok, text, kind, detail
+        return None, None, kind, None, None
+    ok, text, detail = _compare(new_art, prod_art, X, y, groups, kind,
+                                tol_floor)
+    return ok, text, kind, detail, (X, y, groups)
 
 
 def evaluate_gate(new_art: dict, prod_art: dict, ds,
                   tol_floor: float = GATE_TOL_FLOOR,
-                  holdouts: list | None = None) -> tuple[bool, str]:
+                  holdouts: list | None = None,
+                  champion: dict | None = None,
+                  champion_note: str = "",
+                  beat_champion: list | None = None) -> tuple[bool, str]:
     """Честный гейт: обе модели считаются на ОДНОМ holdout текущих данных.
 
     Убирает залипание на «удачном» маленьком prod-датасете — production
@@ -499,24 +527,62 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
     вообще или только на двух десятках про-матчей? Это разные диагнозы —
     чинить обучение или признать эталон слишком маленьким, — а стоит
     вторая цифра одного лишнего предсказания на уже загруженной модели.
+
+    ХРАПОВИК (спринт 207, G1). Пройти prod мало: кандидат обязан быть не
+    значимо хуже ЯКОРЯ — лучшей известной версии (см. ratchet.py). Без
+    этого серия ничтожных по отдельности ухудшений проходит
+    беспрепятственно и суммируется: 0.1553 → 0.1565 → 0.1565 → 0.1578 за
+    один день, каждый шаг в пределах σ≈0.0009, итог +0.0025.
+
+    Якорь считается на ТОМ ЖЕ holdout, что и решающее сравнение с prod:
+    два вердикта на разных выборках противоречили бы друг другу не по
+    существу, а по данным.
     """
     prod_max = (prod_art.get("dataset") or {}).get("max_match_id")
-    decided, parts = None, []
+    decided, parts, decisive = None, [], None
     # Список заполняется по ссылке: сигнатура возврата у гейта
     # двухэлементная и её читают в нескольких местах, а ломать её ради
     # диагностики значило бы тронуть код промоушена ради журнала.
     details = [] if holdouts is None else holdouts
     for X, y, groups, kind in ds.eval_holdouts():
-        ok, text, kind, detail = _judge_holdout(new_art, prod_art, prod_max,
-                                                X, y, groups, kind, tol_floor)
+        ok, text, kind, detail, used = _judge_holdout(
+            new_art, prod_art, prod_max, X, y, groups, kind, tol_floor)
         if ok is None:
             continue
         parts.append(text)
         details.append(detail)
         if decided is None:
-            decided = ok
+            decided, decisive = ok, (used, kind)
     if decided is None:
         return True, "нет общего holdout — продвигаем"
+
+    if decisive is not None:
+        (aX, ay, agroups), akind = decisive
+        if champion is not None:
+            ok_a, text_a, detail_a = _compare(new_art, champion, aX, ay,
+                                              agroups, akind, tol_floor,
+                                              ref="якорь")
+            detail_a["ratchet"] = True
+            details.append(detail_a)
+            # Планка движется только вверх и только по ДОКАЗАННОМУ
+            # улучшению: подняв её на ничью, мы завели бы тот же храповик
+            # заново, только с лишним шагом.
+            if beat_champion is not None and \
+                    detail_a["delta"] <= -detail_a["tol"]:
+                beat_champion.append(detail_a)
+            if not ok_a:
+                # Отказ по якорю идёт ПЕРВЫМ: это и есть причина, а
+                # сравнение с prod — контекст, на фоне которого решение
+                # выглядит странно («не хуже prod, но отклонён»).
+                parts.insert(0, f"ХРАПОВИК: {text_a}")
+                return False, "; ".join(parts)
+            parts.append(f"якорь: {text_a}")
+        elif champion_note:
+            # Отсутствие ≠ ноль: «храповик не применён» обязано выглядеть
+            # иначе, чем «храповик пройден», иначе недоступное хранилище
+            # молча вернуло бы поведение до спринта 207.
+            parts.append(f"храповик не применён ({champion_note})")
+
     # Решающая оценка идёт первой, справочные за ней: читающий отказ должен
     # увидеть причину раньше контекста.
     return decided, "; ".join(parts)
@@ -554,12 +620,24 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
                 "первой доверенной версией: %s", exc)
         prod_bytes = None
 
+    from .ratchet import CHAMPION_STAGE, load_champion, set_champion, stage_version
+
     holdouts: list = []
+    beat_champion: list = []
+    # Читается ОДИН раз и до ветвлений: этому же значению решать, заводить
+    # ли якорь впервые. Прочитай сравнение и заведение стейдж каждое сами,
+    # они разошлись бы ровно тогда, когда он между чтениями меняется.
+    champ_version = stage_version(reg, MODEL_NAME, CHAMPION_STAGE)
     if prod_bytes is None:
         ok, reason = True, "первая версия"
     elif ds is not None:
         prod_art = joblib.load(io.BytesIO(prod_bytes))
-        ok, reason = evaluate_gate(artifact, prod_art, ds, holdouts=holdouts)
+        champ, note = load_champion(
+            reg, MODEL_NAME, champ_version,
+            stage_version(reg, MODEL_NAME, "production"))
+        ok, reason = evaluate_gate(artifact, prod_art, ds, holdouts=holdouts,
+                                   champion=champ, champion_note=note,
+                                   beat_champion=beat_champion)
     else:
         prod = reg.stage_metadata(MODEL_NAME)
         ok, reason = should_promote(artifact["metrics"],
@@ -567,6 +645,16 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
     if ok:
         reg.promote(MODEL_NAME, version)
         logger_.info("registry: %s promoted (%s)", version, reason)
+        # Планка (спринт 207). Поднимается ТОЛЬКО по доказанному
+        # улучшению над якорем — и заводится, когда якоря ещё нет:
+        # первая же продвинутая версия становится точкой отсчёта, иначе
+        # храповик начал бы работать неизвестно с какого дня.
+        #
+        # Запись планки не имеет права отменить промоушен: модель —
+        # продукт, планка — учёт. Тот же порядок приоритетов, по которому
+        # карточка матча пишется после отчёта, а не вместо него.
+        if beat_champion or not champ_version:
+            set_champion(reg, MODEL_NAME, version)
     else:
         logger_.warning("registry: %s NOT promoted (%s), версия сохранена",
                         version, reason)
