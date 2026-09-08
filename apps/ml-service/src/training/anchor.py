@@ -66,8 +66,13 @@ def candidates(reg, limit: int, keep: set[str]) -> list[str]:
     return sorted(set(versions[-limit:]) | {k for k in keep if k in versions})
 
 
-def evaluate(reg, names: list[str], X, y, groups) -> list[tuple[str, float]]:
-    """(версия, Brier на сегодняшнем holdout) для всех доступных версий.
+def evaluate(reg, names: list[str], X, y, groups
+             ) -> list[tuple[str, float, object]]:
+    """(версия, Brier, предсказания) на сегодняшнем holdout.
+
+    Предсказания возвращаются, а не выбрасываются: по ним считается
+    разброс разницы между двумя версиями, а без него Brier'ы — числа без
+    масштаба, и «хуже на 0.0024» нельзя отличить от «одно и то же».
 
     Недоступная версия ПРОПУСКАЕТСЯ с предупреждением, а не роняет
     выбор: одна битая контрольная сумма не повод остаться без якоря
@@ -82,10 +87,29 @@ def evaluate(reg, names: list[str], X, y, groups) -> list[tuple[str, float]]:
         try:
             blob, _ = reg.resolve(MODEL_NAME, v)
             art = joblib.load(io.BytesIO(blob))
-            out.append((v, float(_brier(y, predict_calibrated(art, X)))))
+            p = predict_calibrated(art, X)
+            out.append((v, float(_brier(y, p)), p))
         except Exception as exc:  # noqa: BLE001
             logger.warning("версия %s пропущена: %s", v, exc)
     return out
+
+
+def detectable(y, p_worse, p_better, groups) -> tuple[float, float, float]:
+    """(разрыв, σ разрыва, допуск гейта) между двумя версиями.
+
+    ЗАЧЕМ ОТДЕЛЬНО. Храповик отклоняет кандидата, когда Δ > max(порог,
+    σ). Значит, разрыв МЕНЬШЕ σ он не заметит — сколько бы его ни
+    показывали в таблице. Планка, установленная на неразличимую разницу,
+    выглядит работающей и не делает ничего: присутствие ≠ пригодность.
+
+    Число нужно и само по себе: σ, съедающий разрывы между версиями,
+    означает, что эталон мал для различий этого размера (пункт G4
+    роадмапа), и следующий шаг — растить эталон, а не крутить пороги.
+    """
+    from .train_winprob import GATE_TOL_FLOOR, _paired_bootstrap_delta
+
+    delta, sigma = _paired_bootstrap_delta(y, p_worse, p_better, groups)
+    return delta, sigma, max(GATE_TOL_FLOOR, sigma)
 
 
 def main() -> int:
@@ -128,10 +152,10 @@ def main() -> int:
         return 1
 
     scored.sort(key=lambda p: p[1])
-    best, best_brier = scored[0]
+    best, best_brier, best_p = scored[0]
     print(f"\nВсе на ОДНИХ данных, посчитано сейчас "
           f"(Brier, меньше — лучше):")
-    for v, b in scored:
+    for v, b, _ in scored:
         marks = ""
         if v == prod:
             marks += "  ← PRODUCTION"
@@ -141,11 +165,25 @@ def main() -> int:
             marks += "  ← ЛУЧШАЯ"
         print(f"  {v}  {b:.4f}{marks}")
 
-    if prod:
-        by_name = dict(scored)
-        if prod in by_name:
-            gap = by_name[prod] - best_brier
-            print(f"\nproduction хуже лучшей на {gap:+.4f}")
+    # Разрыв сам по себе ничего не говорит: храповик отклоняет кандидата
+    # при Δ > max(порог, σ), то есть разрыв МЕНЬШЕ σ он не заметит. Планка
+    # на неразличимой разнице выглядит работающей и не делает ничего —
+    # присутствие ≠ пригодность.
+    by_name = {v: (b, p) for v, b, p in scored}
+    if prod and prod in by_name and prod != best:
+        prod_b, prod_p = by_name[prod]
+        gap, sigma, tol = detectable(y, prod_p, best_p, groups)
+        print(f"\nproduction хуже лучшей на {gap:+.4f} "
+              f"(σ{sigma:.4f}, допуск гейта {tol:.4f})")
+        if gap > tol:
+            print("  РАЗЛИЧИМО: храповик такой разрыв заметит и отклонит "
+                  "кандидата, съехавшего до нынешнего прода.")
+        else:
+            print("  В ПРЕДЕЛАХ ШУМА: храповик такой разрыв НЕ ЗАМЕТИТ. "
+                  "Планка стоит, но не кусается.")
+            print(f"  Эталон в {n_m} матчей мал для различий этого "
+                  f"размера — это пункт G4 роадмапа, и лечится он ростом "
+                  f"эталона, а не правкой порогов.")
 
     if not args.apply:
         print("\nПоказ без изменений. Поставить: добавить --apply")
