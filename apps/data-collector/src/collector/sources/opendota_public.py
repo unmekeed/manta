@@ -25,6 +25,7 @@ import requests
 from .. import budget
 from . import MatchRef, Shard, with_api_key
 from .opendota import DEM_MAGIC, OpenDotaSource
+from .opendota_timeline import avg_rank
 
 logger = logging.getLogger("collector.opendota_public")
 
@@ -130,6 +131,10 @@ class OpenDotaPublicSource:
                 tier=self.TIER,
                 source_cursor=str(match_id),
                 patch=int(detail.get("patch") or 0),
+                # Ранг берётся из УЖЕ ОПЛАЧЕННОГО ответа: детали этого
+                # матча запрошены строкой выше, и ранги в них есть.
+                # Отдельного вызова не стоит ни цента (спринт 199).
+                avg_rank=avg_rank(detail),
             )
 
     def _match_detail(self, match_id: int) -> dict | None:

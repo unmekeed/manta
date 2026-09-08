@@ -178,7 +178,8 @@ class Extractor:
 
     def process_match(self, match_id: int, players: list[dict], winner: str,
                       duration_s: float, trace_id: str | None,
-                      tier: str = "", patch: int = 0) -> dict:
+                      tier: str = "", patch: int = 0,
+                      avg_rank: int = 0) -> dict:
         roster = Roster.from_players(players, winner)
 
         economy = self.ch.select(
@@ -221,6 +222,11 @@ class Extractor:
             r["match_id"] = match_id
             r["tier"] = tier
             r["patch"] = patch
+            # Ранг доезжает с реплейного пути с спринта 199. До него
+            # колонка оставалась нулевой у 85% матчей, и ярлык tier
+            # не сверялся ни с чем: у реплейных источников он —
+            # константа класса, а не свойство матча.
+            r["avg_rank"] = avg_rank
 
         # Драки пишем ДО витрин: ReplayEvents живёт 14 дней, и это
         # единственный шанс сохранить размен. Сбой здесь не должен
@@ -401,13 +407,19 @@ class Extractor:
                 winner = "Radiant" if won_teams == {2} else "Dire"
                 duration = float(prows[0].get("duration_s", 0))
                 tier_rows = self.ch.select(
-                    "SELECT any(tier) AS tier, any(patch) AS patch"
+                    "SELECT any(tier) AS tier, any(patch) AS patch,"
+                    "       max(avg_rank) AS avg_rank"
                     "  FROM MatchTimelineFeatures"
                     " WHERE match_id = {match_id:UInt64}", {"match_id": mid})
                 tier = str(tier_rows[0]["tier"]) if tier_rows else ""
                 patch = int(tier_rows[0].get("patch") or 0) if tier_rows else 0
+                # max, а не any: строки витрины у одного матча могут
+                # различаться нулём и настоящим рангом, а ноль здесь
+                # означает «не знаем» и проигрывает любому значению.
+                rank = int(tier_rows[0].get("avg_rank") or 0) if tier_rows else 0
                 self.process_match(mid, players, winner, duration,
-                                   trace_id=None, tier=tier, patch=patch)
+                                   trace_id=None, tier=tier, patch=patch,
+                                   avg_rank=rank)
                 done += 1
             except Exception:  # noqa: BLE001
                 logger.exception("backfill failed for match %s", mid)
@@ -459,6 +471,7 @@ class Extractor:
             duration_s = float(payload.get("duration_s", 0))
             tier = str(payload.get("tier", "") or "")
             patch = int(payload.get("patch") or 0)
+            avg_rank = int(payload.get("avg_rank") or 0)
         except (ValueError, KeyError, TypeError) as exc:
             logger.error("bad replay.parsed event, skipping: %s", exc)
             return
@@ -469,7 +482,8 @@ class Extractor:
         try:
             with FEATURES_DURATION.time():
                 self.process_match(match_id, players, winner, duration_s,
-                                   env.get("trace_id"), tier=tier, patch=patch)
+                                   env.get("trace_id"), tier=tier,
+                                   patch=patch, avg_rank=avg_rank)
             FEATURES_CALCULATED.inc()
         except Exception:  # noqa: BLE001 — логируем и не блокируем партицию
             FEATURES_FAILED.inc()

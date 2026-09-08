@@ -43,6 +43,11 @@ type matchDownloaded struct {
 	Source    string `json:"source"`
 	Tier      string `json:"tier"`  // Premium | Professional | ... (Гл. 4.2)
 	Patch     int    `json:"patch"` // id патча OpenDota; 0 — неизвестен (A9)
+	// Средний ранг матча (тир×10 + звезда); 0 — неизвестен (спринт 199).
+	// Парсер его не считает и не толкует — только переносит дальше, как
+	// tier и patch: судить о разметке датасета будет тот, кто читает
+	// витрину, а для этого значение должно до неё доехать.
+	AvgRank int `json:"avg_rank"`
 }
 
 type Consumer struct {
@@ -136,6 +141,7 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 			"match_id":      res.MatchID,
 			"tier":          msg.Tier,
 			"patch":         msg.Patch,
+			"avg_rank":      msg.AvgRank,
 			"winner":        res.Winner,
 			"duration_s":    res.DurationS,
 			"players":       res.Players,

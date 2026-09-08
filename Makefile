@@ -303,6 +303,10 @@ stop:          ## Остановить хостовые процессы (кон
 daily-report:  ## Снимок doctor+collect-report+ml-audit в MANTA_REPORT_DIR (30 дней)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/daily-report.sh
 
+tier-audit:    ## Сверить ярлык tier с наблюдаемым рангом: ARGS="--days 30"
+	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs \
+		python3 tools/tier_audit.py $(ARGS)
+
 tailscale:     ## Частный доступ к метрикам и API без домена: ARGS=--check
 	./scripts/tailscale-setup.sh $(ARGS)
 

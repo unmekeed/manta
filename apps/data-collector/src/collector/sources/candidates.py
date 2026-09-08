@@ -40,6 +40,7 @@ from ..salts import SaltStore
 from . import MatchRef, PermanentDownloadError, Shard
 from .opendota import OpenDotaSource
 from .steam import ANONYMOUS_ACCOUNT_ID
+from .opendota_timeline import avg_rank
 
 logger = logging.getLogger("collector.candidates_source")
 
@@ -185,6 +186,9 @@ class CandidateSource:
                 tier=self.TIER,
                 source_cursor=str(cand.match_id),
                 patch=int((detail or {}).get("patch") or 0),
+                # Из уже оплаченного ответа — тот же, из которого взяты
+                # адрес реплея и патч (спринт 199).
+                avg_rank=avg_rank(detail or {}),
             )
         self.last_cycle = stats
         logger.info("цикл кандидатов: %s",

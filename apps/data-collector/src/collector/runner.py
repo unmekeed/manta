@@ -135,6 +135,7 @@ def build_envelope(ref: MatchRef, replay_url: str, source_name: str,
             "replay_url": replay_url,
             "tier": ref.tier,
             "patch": ref.patch,
+            "avg_rank": ref.avg_rank,
             "source": source_name,
         },
     }
