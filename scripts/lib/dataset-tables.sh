@@ -99,7 +99,14 @@ PG_TABLES=(collectedmatches matchreports matchsummaries playerranks
 #   пор в код не попали ни разу (проверено поиском по INSERT/SELECT).
 #   Пустые таблицы переносить нечего; удалить их — отдельный разговор, и
 #   молчаливо это делать нельзя.
+#
+#   modelversions (спринт 202) — история решений гейта КОНКРЕТНОЙ машины.
+#   У каждой свой реестр моделей, свои версии и свой prod, поэтому
+#   перенос перемешал бы две несвязанные истории: строки чужой машины
+#   встали бы в один ряд со своими, и вопрос «насколько съехал НАШ prod»
+#   стал бы неотвечаемым — а таблица ради него и заведена.
 PG_SKIPPED_TABLES=(collectorcursor apibudget eventoutbox analysisjobs
+                   modelversions
                    players accounts tournaments matches matchplayers
                    subscriptions)
 

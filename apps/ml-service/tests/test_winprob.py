@@ -681,7 +681,11 @@ def test_the_first_holdout_decides_when_the_two_disagree(monkeypatch):
     verdicts = {"benchmark_pro": False, "valid": True}
 
     def fake_judge(new_art, prod_art, prod_max, X, y, groups, kind, tol):
-        return verdicts[kind], f"{kind}: подстановка", kind
+        # Четвёртым элементом — разобранная оценка (спринт 202). Заглушка
+        # обязана отдавать её так же, как настоящая функция: заглушка,
+        # устроенная проще боевой, проверяет несуществующую систему.
+        return (verdicts[kind], f"{kind}: подстановка", kind,
+                {"kind": kind, "ok": verdicts[kind]})
 
     class TwoHoldouts:
         def eval_holdouts(self):
@@ -809,3 +813,50 @@ def test_mirroring_flips_differences_but_not_time():
         "перевес стороны")
     assert mirrored[idx["game_time"]] == 900.0
     assert ym.tolist() == [1, 0]
+
+
+def test_the_judgement_detail_carries_what_the_history_needs(monkeypatch):
+    """Разобранная оценка содержит всё, чем измеряется храповик (202).
+
+    ПОЧЕМУ ЭТОТ ТЕСТ ЕСТЬ. Соседний тест в test_history.py проверял
+    наличие `brier_prod` на РУКОПИСНОЙ фикстуре — то есть на словаре,
+    который я сам и написал. Мутация «перестать класть brier_prod в
+    настоящую оценку» его пережила: фикстура осталась прежней, потому что
+    к коду отношения не имела.
+
+    Здесь опрашивается НАСТОЯЩИЙ `_judge_holdout`. Предсказания
+    подменены, потому что строить два артефакта ради формы словаря
+    дорого, — но словарь собирает боевая функция, и его состав меняется
+    только вместе с ней.
+
+    Без `brier_prod` история хранит лишь качество кандидатов, а храповик
+    виден ТОЛЬКО по тому, как съезжает планка прода: 0.1553 → 0.1578 за
+    сутки четырьмя «незначимыми» шагами.
+    """
+    from training import train_winprob as tw
+
+    calls = iter([np.array([0.6, 0.4, 0.7, 0.3]),   # кандидат
+                  np.array([0.5, 0.5, 0.5, 0.5])])  # prod
+    monkeypatch.setattr(tw, "predict_calibrated", lambda art, X: next(calls))
+
+    # Четыре СТРОКИ, но ДВА матча. Числа разведены намеренно: с
+    # groups = [1,2,3,4] «строк» и «матчей» совпадало бы, и мутация
+    # «считать n_matches по строкам» проходила бы незамеченной. Она и
+    # прошла на первой редакции этой фикстуры.
+    #
+    # Разница не косметическая: holdout из 526 строк и из 526 МАТЧЕЙ —
+    # разные величины, и по первой нельзя судить, велика ли выборка, на
+    # которой гейт принял решение.
+    y = np.array([1, 0, 1, 0])
+    groups = np.array([1, 1, 2, 2])
+    ok, text, kind, detail = tw._judge_holdout(
+        {}, {}, None, np.zeros((4, 1)), y, groups, "benchmark_pro", 0.001)
+
+    for key in ("kind", "n_matches", "brier_new", "brier_prod", "delta",
+                "sigma", "ok"):
+        assert key in detail, (
+            f"в разобранной оценке нет {key!r} — история не сможет "
+            f"ответить, насколько съехала планка")
+    assert detail["brier_prod"] > 0, "Brier прода не посчитан"
+    assert detail["n_matches"] == 2, (
+        "число матчей посчитано по строкам: 4 строки это 2 матча")

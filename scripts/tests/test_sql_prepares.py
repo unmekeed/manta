@@ -47,10 +47,14 @@ MIGRATIONS = ROOT / "infra" / "migrations" / "postgres"
 # что хуже, молча НЕ проверяться).
 SQL_SOURCES = [
     ROOT / "apps" / "api-gateway" / "internal" / "handlers" / "admin_status.go",
+    ROOT / "apps" / "ml-service" / "src" / "training" / "history.py",
 ]
 
-# Go-константа вида `const somethingSQL = ` + обратная кавычка + текст.
-SQL_CONST = re.compile(r"const\s+(\w*SQL)\s*=\s*`([^`]*)`", re.S)
+# Константа с запросом — в Go через обратные кавычки, в Python через
+# тройные. Форма разная, беда одна: запрос, который никто не выполнял.
+SQL_CONST = re.compile(
+    r"(?:const\s+)?(\w*(?:SQL|_SQL))\s*=\s*(?:`([^`]*)`|\"\"\"(.*?)\"\"\")",
+    re.S)
 
 
 def pg_bin() -> Path | None:
@@ -142,8 +146,24 @@ def statements() -> list[tuple[str, str, str]]:
     out = []
     for path in SQL_SOURCES:
         src = path.read_text(encoding="utf-8")
-        for name, body in SQL_CONST.findall(src):
-            out.append((path.name, name, body.strip()))
+        for name, go_body, py_body in SQL_CONST.findall(src):
+            body = (go_body or py_body).strip()
+            if not body:
+                continue
+            # Именованные параметры psycopg (%(имя)s) для Postgres —
+            # синтаксическая ошибка: он ждёт $N. Подставляем позиционные,
+            # сохраняя ОДИН и тот же номер за одним именем — иначе
+            # проверка «повторный параметр приведён явно» проверяла бы
+            # выдуманный запрос.
+            order: dict[str, int] = {}
+
+            def to_dollar(m):
+                nm = m.group(1)
+                order.setdefault(nm, len(order) + 1)
+                return f"${order[nm]}"
+
+            body = re.sub(r"%\((\w+)\)s", to_dollar, body)
+            out.append((path.name, name, body))
     return out
 
 

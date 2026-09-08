@@ -472,11 +472,19 @@ def _judge_holdout(new_art: dict, prod_art: dict, prod_max,
     verdict = "не хуже prod" if ok else "значимо хуже prod"
     text = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
             f"prod {b_prod:.4f} (Δ{delta:+.4f}, σ{std:.4f}) — {verdict}")
-    return ok, text, kind
+    # Разобранная форма той же оценки (спринт 202). Текст годится
+    # человеку, но по нему нельзя посчитать, НАСКОЛЬКО съехал prod за
+    # десять промоушенов, — а именно этот вопрос и оказался нечем
+    # ответить, когда обнаружился храповик гейта.
+    detail = {"kind": kind, "n_matches": n_m, "brier_new": round(b_new, 6),
+              "brier_prod": round(b_prod, 6), "delta": round(delta, 6),
+              "sigma": round(std, 6), "ok": bool(ok)}
+    return ok, text, kind, detail
 
 
 def evaluate_gate(new_art: dict, prod_art: dict, ds,
-                  tol_floor: float = GATE_TOL_FLOOR) -> tuple[bool, str]:
+                  tol_floor: float = GATE_TOL_FLOOR,
+                  holdouts: list | None = None) -> tuple[bool, str]:
     """Честный гейт: обе модели считаются на ОДНОМ holdout текущих данных.
 
     Убирает залипание на «удачном» маленьком prod-датасете — production
@@ -494,12 +502,17 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
     """
     prod_max = (prod_art.get("dataset") or {}).get("max_match_id")
     decided, parts = None, []
+    # Список заполняется по ссылке: сигнатура возврата у гейта
+    # двухэлементная и её читают в нескольких местах, а ломать её ради
+    # диагностики значило бы тронуть код промоушена ради журнала.
+    details = [] if holdouts is None else holdouts
     for X, y, groups, kind in ds.eval_holdouts():
-        ok, text, kind = _judge_holdout(new_art, prod_art, prod_max,
-                                        X, y, groups, kind, tol_floor)
+        ok, text, kind, detail = _judge_holdout(new_art, prod_art, prod_max,
+                                                X, y, groups, kind, tol_floor)
         if ok is None:
             continue
         parts.append(text)
+        details.append(detail)
         if decided is None:
             decided = ok
     if decided is None:
@@ -541,11 +554,12 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
                 "первой доверенной версией: %s", exc)
         prod_bytes = None
 
+    holdouts: list = []
     if prod_bytes is None:
         ok, reason = True, "первая версия"
     elif ds is not None:
         prod_art = joblib.load(io.BytesIO(prod_bytes))
-        ok, reason = evaluate_gate(artifact, prod_art, ds)
+        ok, reason = evaluate_gate(artifact, prod_art, ds, holdouts=holdouts)
     else:
         prod = reg.stage_metadata(MODEL_NAME)
         ok, reason = should_promote(artifact["metrics"],
@@ -556,6 +570,14 @@ def push_with_gate(artifact: dict, out_path: Path, logger_, ds=None
     else:
         logger_.warning("registry: %s NOT promoted (%s), версия сохранена",
                         version, reason)
+
+    # Журнал пишется ПОСЛЕ решения и не может на него повлиять (спринт
+    # 202). Без него вопрос «насколько съехал prod за десять промоушенов»
+    # остаётся археологией по чату, чем он и был, когда обнаружился
+    # храповик гейта.
+    from .history import record
+
+    record(MODEL_NAME, version, ok, reason, artifact, holdouts)
     return version, ok, reason
 
 
