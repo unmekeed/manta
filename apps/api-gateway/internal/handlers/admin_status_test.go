@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Страница состояния сбора (спринт 198).
@@ -23,6 +24,19 @@ import (
 // «показывать нулём» вынесено из SQL в `mergeSources` именно затем,
 // чтобы его можно было проверить.
 
+// names — перечень источников без времени последнего цикла.
+//
+// Отдельным помощником, а не литералом в каждом тесте: время цикла
+// проверяется своими тестами ниже, и загромождать им проверки про
+// счётчики значило бы прятать проверяемое свойство за шумом.
+func names(list ...string) map[string]*time.Time {
+	out := map[string]*time.Time{}
+	for _, n := range list {
+		out[n] = nil
+	}
+	return out
+}
+
 func bySource(got []adminSource) map[string]adminSource {
 	out := map[string]adminSource{}
 	for _, s := range got {
@@ -34,7 +48,7 @@ func bySource(got []adminSource) map[string]adminSource {
 func TestASilentSourceIsShownAsZeroNotOmitted(t *testing.T) {
 	// Ровно расклад 07.09: opendota собирает, stratz жжёт вызовы впустую.
 	got := mergeSources(
-		[]string{"opendota_timeline", "stratz_timeline"},
+		names("opendota_timeline", "stratz_timeline"),
 		map[string]collectedRow{"opendota_timeline": {Matches: 41, WithReplay: 0}},
 		map[string]int64{"opendota_timeline": 912, "stratz_timeline": 52},
 	)
@@ -60,7 +74,7 @@ func TestASourceWithNoCallsAtAllIsStillShown(t *testing.T) {
 	// процесс упал, контейнер не поднялся, ключ пуст. Самый тихий из
 	// возможных отказов — и потому обязан быть виден.
 	got := mergeSources(
-		[]string{"opendota_timeline", "salts"},
+		names("opendota_timeline", "salts"),
 		map[string]collectedRow{"opendota_timeline": {Matches: 5}},
 		map[string]int64{"opendota_timeline": 100},
 	)
@@ -78,7 +92,7 @@ func TestReplayCountIsKeptSeparateFromTheTotal(t *testing.T) {
 	// пряталось бы за исправным JSON-путём — ровно так его и не замечали
 	// 3–6 сентября.
 	got := mergeSources(
-		[]string{"candidates"},
+		names("candidates"),
 		map[string]collectedRow{"candidates": {Matches: 20, WithReplay: 3}},
 		nil,
 	)
@@ -93,7 +107,7 @@ func TestSilentSourcesGroupAtTheBottom(t *testing.T) {
 	// читают глазами и сравнивают с тем, что было вчера, поэтому порядок
 	// обязан быть устойчивым, а не зависеть от порядка строк из базы.
 	got := mergeSources(
-		[]string{"zzz", "aaa", "opendota_timeline", "bbb"},
+		names("zzz", "aaa", "opendota_timeline", "bbb"),
 		map[string]collectedRow{"opendota_timeline": {Matches: 7}},
 		nil,
 	)
@@ -161,12 +175,10 @@ func TestUnknownLatestIsNullNotZeroTime(t *testing.T) {
 // таблиц. Фикстура намеренно НЕ придумана: прежние тесты брали имена в
 // одном написании, и потому задвоение через них проходило насквозь.
 // «Вход должен быть боевым» — правило проекта, применённое к себе.
-var liveRoster = []string{
-	"opendota_public", "salts", "opendota", "stratz_timeline",
+var liveRoster = names("opendota_public", "salts", "opendota", "stratz_timeline",
 	"opendota_timeline", "gc-salts", "opendota-league", "opendota-public",
 	"opendota-timeline", "opendota-timeline-pro", "opendota_league",
-	"opendota_timeline_pro", "stratz-timeline",
-}
+	"opendota_timeline_pro", "stratz-timeline")
 
 func TestOneSourcePerRowDespiteTwoSpellings(t *testing.T) {
 	// ГЛАВНОЕ. CollectedMatches пишет `opendota_timeline`, ApiBudget —
@@ -220,7 +232,7 @@ func TestSaltsAndGcSaltsStayApart(t *testing.T) {
 	// дефиса на подчёркивание их не сливает, и сливать не должна: у них
 	// разная работа, и объединённая строка спрятала бы, что соли добывает
 	// одно, а матчи собирает другое.
-	got := mergeSources([]string{"salts", "gc-salts"},
+	got := mergeSources(names("salts", "gc-salts"),
 		map[string]collectedRow{"salts": {Matches: 32, WithReplay: 32}},
 		map[string]int64{"gc-salts": 8})
 	m := bySource(got)
@@ -241,5 +253,105 @@ func TestCountersLandOnTheCanonicalNameEvenWithoutARoster(t *testing.T) {
 		map[string]int64{"новый-источник": 11})
 	if len(got) != 1 || got[0].Matches != 3 || got[0].Calls != 11 {
 		t.Fatalf("счётчики без перечня потеряны: %+v", got)
+	}
+}
+
+// -- источник, простаивающий неделями (спринт 200) -----------------------------
+
+func TestASourceIdleForWeeksIsStillListed(t *testing.T) {
+	// ЖИВОЙ СЛУЧАЙ 08.09.2026. Первая работающая страница НЕ показала
+	// `candidates` — источник, за которым закреплено 58% бюджета вызовов.
+	// Он неделю не собрал ничего и не потратил ни вызова, и потому исчез:
+	// перечень строился из тех, кто ПИСАЛ за неделю.
+	//
+	// То есть страница, сделанная ради различения «источник умер» и
+	// «источника нет», сама же стёрла это различие — на самом важном
+	// источнике. Теперь перечень идёт из CollectorCursor: строка там
+	// заводится на каждый когда-либо работавший источник и от простоя не
+	// пропадает.
+	long := time.Now().Add(-30 * 24 * time.Hour)
+	got := mergeSources(
+		map[string]*time.Time{"candidates": &long, "salts": nil},
+		map[string]collectedRow{"salts": {Matches: 32, WithReplay: 32}},
+		nil)
+
+	s, ok := bySource(got)["candidates"]
+	if !ok {
+		t.Fatal("простаивающий источник пропал из списка — «умер» снова " +
+			"неотличимо от «его нет»")
+	}
+	if s.Matches != 0 || s.Calls != 0 {
+		t.Errorf("candidates: %+v, ждали нули", s)
+	}
+	if s.LastCycleAt == nil || !s.LastCycleAt.Equal(long) {
+		t.Errorf("не показано, КОГДА источник работал в последний раз: %+v", s)
+	}
+}
+
+func TestTheFresherCycleTimeWins(t *testing.T) {
+	// Курсор пишется под одним написанием имени, бюджет под другим
+	// (дефис против подчёркивания, спринт 198e). После канонизации в одну
+	// строку сходятся два времени, и взять надо БОЛЕЕ СВЕЖЕЕ: старое
+	// объявило бы работающий источник простаивающим.
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	recent := time.Now().Add(-1 * time.Hour)
+
+	// ПРОГОНЯЕТСЯ МНОГО РАЗ. Обход map в Go намеренно рандомизирован, и
+	// одиночный вызов проверяет лишь ОДИН порядок из двух. Первая
+	// редакция этого теста так и делала — и мутацию «брать первое
+	// непустое время» пережила: половину запусков она проходила по
+	// удаче. Недетерминированный тест хуже отсутствующего: он создаёт
+	// уверенность, которой не заслужил.
+	for i := 0; i < 50; i++ {
+		got := mergeSources(
+			map[string]*time.Time{"opendota-timeline": &old,
+				"opendota_timeline": &recent},
+			nil, nil)
+		if len(got) != 1 {
+			t.Fatalf("два написания дали %d строк: %+v", len(got), got)
+		}
+		if got[0].LastCycleAt == nil || !got[0].LastCycleAt.Equal(recent) {
+			t.Fatalf("прогон %d: взято не более свежее время: %+v",
+				i, got[0])
+		}
+	}
+}
+
+func TestTheRosterComesFromTheCursorRegistry(t *testing.T) {
+	// ЖИВОЙ СЛУЧАЙ 08.09.2026: `candidates` — источник с 58% бюджета —
+	// со страницы ИСЧЕЗ, потому что перечень строился из тех, кто ПИСАЛ
+	// за неделю, а он неделю ничего не писал.
+	//
+	// Проверка текстовая и потому слабая, но она закрывает дыру, которую
+	// не видит ничто другое: `mergeSources` получает перечень уже
+	// готовым, а тест PREPARE проверяет лишь то, что запрос валиден.
+	// Убери CollectorCursor — запрос останется валидным, тесты логики
+	// останутся зелёными, и источник снова пропадёт молча.
+	if !strings.Contains(adminRosterSQL, "CollectorCursor") {
+		t.Fatal("перечень источников больше не берётся из реестра курсоров " +
+			"— простаивающий источник снова исчезнет со страницы")
+	}
+	if !strings.Contains(adminRosterSQL, "updated_at") {
+		t.Fatal("время последнего цикла не запрашивается — «молчит» опять " +
+			"станет неотличимо от «его нет»")
+	}
+}
+
+func TestANeverRunSourceHasNullCycleTime(t *testing.T) {
+	// Источник есть в бюджете, но курсора у него нет: он ни разу не
+	// довёл цикл до конца. Нулевое время (0001-01-01) выглядело бы как
+	// «работал две тысячи лет назад» — то есть как поломка там, где
+	// верно «ни разу не работал».
+	got := mergeSources(map[string]*time.Time{"новый": nil}, nil,
+		map[string]int64{"новый": 5})
+	if got[0].LastCycleAt != nil {
+		t.Fatalf("время цикла выдумано: %v", *got[0].LastCycleAt)
+	}
+	body, err := json.Marshal(got[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(body), `"last_cycle_at":null`) {
+		t.Fatalf("неизвестное время сериализовано не как null: %s", body)
 	}
 }

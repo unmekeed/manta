@@ -39,6 +39,13 @@ type adminSource struct {
 	Matches    int64  `json:"matches"`
 	WithReplay int64  `json:"with_replay"`
 	Calls      int64  `json:"calls"`
+	// Когда источник последний раз ОТРАБОТАЛ цикл; null — никогда.
+	//
+	// Отличает «источник простаивает» от «источник работает, но ничего
+	// не находит». Без этого поля обе картинки — нули в matches и calls,
+	// а лечатся они по-разному: первое перезапуском, второе разбором
+	// фильтров.
+	LastCycleAt *time.Time `json:"last_cycle_at"`
 }
 
 type adminStatus struct {
@@ -107,11 +114,36 @@ const adminRosterDays = 7
 // Приведение `::int` в ОБОИХ местах снимает вывод типа как таковой:
 // гадать больше нечего. Проверяется это теперь не глазами, а прогоном
 // PREPARE на настоящей схеме — scripts/tests/test_sql_prepares.py.
+// РЕЕСТР ИСТОЧНИКОВ — из CollectorCursor (спринт 200).
+//
+// Первая редакция собирала перечень из тех, кто ПИСАЛ за неделю
+// (CollectedMatches ∪ ApiBudget). Первая же работающая страница показала,
+// чем это плохо: в списке не оказалось `candidates` — источника, за
+// которым закреплено 58% бюджета вызовов. Он неделю не собрал ничего и
+// не потратил ни вызова, и потому со страницы ИСЧЕЗ. То есть страница,
+// сделанная ради различения «источник умер» и «источника нет», сама же
+// это различие и стёрла — на самом важном источнике.
+//
+// CollectorCursor для этого годится куда лучше: в нём строка на КАЖДЫЙ
+// когда-либо работавший источник, и она не пропадает от простоя. Плюс
+// `updated_at` — время последнего успешного цикла, то есть ответ на
+// вопрос «он молчит или его нет».
+//
+// Объединение с прежними двумя таблицами оставлено: источник мог собрать
+// матч и упасть до записи курсора, и терять его из-за этого незачем.
+//
+// `NULL::timestamptz`, а не голый NULL: в UNION Postgres выводит тип
+// нетипизированного NULL как text и отказывается сводить его со
+// временем из первой ветки. Поймано прогоном PREPARE (спринт 198d) —
+// то есть до раскатки, а не пятисоткой на живой машине, как дважды до
+// него.
 const adminRosterSQL = `
-SELECT DISTINCT source_name FROM CollectedMatches
+SELECT source_name, updated_at FROM CollectorCursor
+UNION
+SELECT DISTINCT source_name, NULL::timestamptz FROM CollectedMatches
  WHERE collected_at > NOW() - ($1::int * INTERVAL '1 day')
 UNION
-SELECT DISTINCT source FROM ApiBudget
+SELECT DISTINCT source, NULL::timestamptz FROM ApiBudget
  WHERE day > CURRENT_DATE - $1::int`
 
 const adminCollectedSQL = `
@@ -163,7 +195,7 @@ func canonicalSource(name string) string {
 // источники собираются внизу ОДНОЙ группой, а не рассыпаны по списку.
 // Стабильность важнее красоты — страницу читают глазами и сравнивают с
 // тем, что было вчера.
-func mergeSources(roster []string, collected map[string]collectedRow,
+func mergeSources(roster map[string]*time.Time, collected map[string]collectedRow,
 	spent map[string]int64) []adminSource {
 	merged := map[string]*adminSource{}
 	order := []string{}
@@ -176,8 +208,14 @@ func mergeSources(roster []string, collected map[string]collectedRow,
 		order = append(order, key)
 		return merged[key]
 	}
-	for _, name := range roster {
-		add(name)
+	for name, seen := range roster {
+		s := add(name)
+		// Из двух написаний берём БОЛЕЕ СВЕЖЕЕ время: курсор пишется под
+		// одним именем, а бюджет под другим, и потерять более позднее
+		// значило бы объявить работающий источник простаивающим.
+		if seen != nil && (s.LastCycleAt == nil || seen.After(*s.LastCycleAt)) {
+			s.LastCycleAt = seen
+		}
 	}
 	// Счётчики раскладываются по КАНОНИЧЕСКОМУ имени, а не по тому, под
 	// которым пришли: иначе половина чисел осталась бы в строке, которой
@@ -240,7 +278,7 @@ func (h *Handlers) AdminStatus(w http.ResponseWriter, r *http.Request) {
 			"about:blank", "status query failed", err.Error())
 	}
 
-	var roster []string
+	roster := map[string]*time.Time{}
 	rows, err := h.DB.Query(ctx, adminRosterSQL, adminRosterDays)
 	if err != nil {
 		fail(err)
@@ -248,12 +286,17 @@ func (h *Handlers) AdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	for rows.Next() {
 		var name string
-		if err := rows.Scan(&name); err != nil {
+		var seen *time.Time
+		if err := rows.Scan(&name, &seen); err != nil {
 			rows.Close()
 			fail(err)
 			return
 		}
-		roster = append(roster, name)
+		// UNION даёт одно имя несколько раз: из курсора со временем, из
+		// прочих таблиц без него. Побеждает непустое.
+		if cur, ok := roster[name]; !ok || cur == nil {
+			roster[name] = seen
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
