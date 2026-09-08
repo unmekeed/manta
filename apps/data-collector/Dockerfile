@@ -14,6 +14,13 @@ WORKDIR /app
 COPY apps/data-collector/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY apps/data-collector/src/ src/
+# tools/ — не роскошь (спринт 208). Разовые разборы (`tier_audit.py`,
+# `republish_orphans.py`) нужны ИМЕННО на боевой машине, а зависимости у
+# них те же, что у сервиса, и стоят только здесь. Пока каталога в образе
+# не было, `make tier-audit` гонял хостовый python3 и падал на первом же
+# импорте, а `republish_orphans.py` заносили внутрь через `docker cp`
+# руками — то есть цена уже платилась, просто вручную.
+COPY apps/data-collector/tools/ tools/
 COPY libs/ libs/
 ENV PYTHONPATH=/app/src:/app/libs
 USER nobody

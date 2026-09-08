@@ -9,6 +9,10 @@ WORKDIR /app
 COPY apps/feature-extractor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY apps/feature-extractor/src/ src/
+# tools/ — по той же причине, что у data-collector (спринт 208):
+# `backfill_farm_core.py` досчитывает фичи на БОЕВОЙ витрине, а его
+# зависимости стоят только в образе.
+COPY apps/feature-extractor/tools/ tools/
 COPY libs/ libs/
 ENV PYTHONPATH=/app/src:/app/libs
 USER nobody

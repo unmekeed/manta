@@ -163,7 +163,7 @@ ml-serve:      ## Запустить gRPC-сервер ML Service
 	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m app
 
 ml-train:      ## Обучить Win Probability (реальные матчи из ClickHouse)
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.train_winprob $(TRAIN_ARGS)
+	./scripts/in-image.sh ml-write -m training.train_winprob $(TRAIN_ARGS)
 
 report-gen:    ## Запустить Report Generator (Kafka-петля)
 	cd apps/report-generator && PYTHONPATH=src:$(CURDIR)/libs python3 -m reportgen
@@ -181,25 +181,25 @@ fs-serve:      ## Feature Store: онлайн-фичи поверх Redis (:5005
 	cd apps/feature-store && PYTHONPATH=src:$(CURDIR)/libs python3 -m serve_features
 
 ml-train-risk: ## Обучить Death-Risk модель на реплейных позициях (C5)
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.risk $(RISK_ARGS)
+	./scripts/in-image.sh ml-write -m training.risk $(RISK_ARGS)
 
 ml-train-laning: ## Обучить Laning-модель на combat-логе первых 5 минут (C5)
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.laning $(LANING_ARGS)
+	./scripts/in-image.sh ml-write -m training.laning $(LANING_ARGS)
 
 ml-train-draft: ## Draft Prior: P(win|составы) + OOF-прайоры в MatchDraft (F3)
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.draft_prior $(DRAFT_ARGS)
+	./scripts/in-image.sh ml-write -m training.draft_prior $(DRAFT_ARGS)
 
 ml-tune:       ## Подбор гиперпараметров WP через Optuna (F7): ARGS="--trials 60 --apply"
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.tune $(ARGS)
+	./scripts/in-image.sh ml-write -m training.tune $(ARGS)
 
 ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.auto
+	./scripts/in-image.sh ml-write -m training.auto
 
 ml-status:     ## Статус обучения: production-версия, разрыв датасета, кандидаты
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.status
+	./scripts/in-image.sh ml-read -m training.status
 
 ml-ablation:   ## Ablation фич WP: какая заслужила место (ARGS="--each")
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.ablation $(ARGS)
+	./scripts/in-image.sh ml-write -m training.ablation $(ARGS)
 
 wp-rates-sql-test: pytest-check ## Проверить окна производных (G1) на живом ClickHouse
 	cd apps/ml-service && MANTA_TEST_CH=1 \
@@ -292,7 +292,7 @@ gc-probe:      ## Замер GC: ARGS=login | "details --limit 200" | bulk
 	$(GC_VENV)/bin/python scripts/gc-probe.py $(ARGS)
 
 ml-audit:      ## Аудит датасета: сдвиг приора, длительности, дубли
-	cd apps/ml-service && PYTHONPATH=src:$(CURDIR)/libs python3 -m training.audit
+	./scripts/in-image.sh ml-read -m training.audit
 
 recover:       ## Восстановить dev-стек после перезапуска среды (идемпотентно)
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/dev-recover.sh
@@ -307,8 +307,7 @@ smoke:         ## Прогнать матч сквозь конвейер и д�
 	./scripts/smoke.sh $(ARGS)
 
 tier-audit:    ## Сверить ярлык tier с наблюдаемым рангом: ARGS="--days 30"
-	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs \
-		python3 tools/tier_audit.py $(ARGS)
+	./scripts/in-image.sh collect tools/tier_audit.py $(ARGS)
 
 tailscale:     ## Частный доступ к метрикам и API без домена: ARGS=--check
 	./scripts/tailscale-setup.sh $(ARGS)
@@ -320,7 +319,7 @@ collect-report: ## Почему упал темп сбора + покрытие 
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/collect-report.sh $(ARGS)
 
 backfill:      ## Пересчёт фич по сохранённому JSON, без вызовов API: ARGS="--limit 50"
-	cd apps/data-collector && PYTHONPATH=src:$(CURDIR)/libs python3 -m collector.backfill $(ARGS)
+	./scripts/in-image.sh collect -m collector.backfill $(ARGS)
 
 vps-bootstrap: ## Развернуть Manta на чистом VPS: ARGS=--check
 	./scripts/vps-bootstrap.sh $(ARGS)
@@ -345,8 +344,7 @@ peer-sync:     ## Втянуть слепки соседних машин из �
 	./scripts/peer-sync.sh $(ARGS)
 
 farm-core-backfill: ## Досчитать farm_core на старых матчах: ARGS="--dry-run"
-	cd apps/feature-extractor && PYTHONPATH=src:$(CURDIR)/libs \
-		python3 tools/backfill_farm_core.py $(ARGS)
+	./scripts/in-image.sh features tools/backfill_farm_core.py $(ARGS)
 
 ranks-harvest: ## Посеять кэш рангов из сохранённого JSON в MinIO, без вызовов API
 	MANTA_TRAIN_ENV=$(MANTA_TRAIN_ENV) ./scripts/ranks.sh harvest $(ARGS)
