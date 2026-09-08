@@ -91,7 +91,7 @@ class ModelSlot:
         self._spec = spec
         self._retry_after = retry_after_s
         self._refresh_after = refresh_after_s
-        self._load = loader or (lambda s: WinProbability(_resolve_model_path(s)))
+        self._load = loader or load_model
         self._probe = prober or _stage_version_of
         self._clock = clock or time.monotonic
         self._model: WinProbability | None = None
@@ -296,12 +296,22 @@ def _stage_version_of(spec: str | os.PathLike) -> str | None:
     return registry_from_env().stage_version(name, ref or "production")
 
 
-def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
-    """`registry://name/ref` → скачать из реестра во временный файл;
-    иначе — локальный путь как есть."""
+def _resolve_model(spec: str | os.PathLike
+                   ) -> tuple[str | os.PathLike, str | None]:
+    """(путь к весам, версия реестра) для `registry://name/ref`.
+
+    Версия возвращается ИЗ ТОГО ЖЕ `resolve`, которым скачаны веса
+    (спринт 212). Спросить её отдельным `stage_version` было бы почти то
+    же самое и всё-таки неверно: между скачиванием и опросом стейдж может
+    смениться, и отчёт приписали бы не той версии — а именно по этому
+    полю потом отвечают на вопрос «какая модель это посчитала».
+
+    Локальный путь версии реестра не имеет: None, и предиктор остаётся
+    при semver из артефакта.
+    """
     spec_s = str(spec)
     if not spec_s.startswith("registry://"):
-        return spec
+        return spec, None
     import tempfile
 
     from registry import registry_from_env
@@ -311,9 +321,35 @@ def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
     tmp = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
     tmp.write(artifact)
     tmp.close()
-    logger.info("model resolved from registry: %s (%s)",
-                meta.get("registry_version"), spec_s)
-    return tmp.name
+    version = meta.get("registry_version")
+    logger.info("model resolved from registry: %s (%s)", version, spec_s)
+    return tmp.name, version
+
+
+def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
+    """Только путь — для мест, которым версия не нужна."""
+    return _resolve_model(spec)[0]
+
+
+def load_model(spec: str | os.PathLike) -> WinProbability:
+    """Загрузить модель, ПРОСТАВИВ ей версию реестра.
+
+    ЗАЧЕМ. `art["model_version"]` — это semver, записанный при обучении,
+    и он один и тот же у всех версий реестра: 08.09.2026 их было 26, и
+    все — «0.9.0». Отчёт хранил именно его, поэтому по отчёту нельзя было
+    сказать, КАКАЯ модель его посчитала, — а в тот же день выяснилось,
+    что production съехала на 2.4σ, и вопрос «какие отчёты сделаны хуже»
+    оказалось нечем задать. Проверить откат по отчёту тоже было нельзя.
+
+    Semver остаётся, когда версии реестра нет (локальный файл, тесты):
+    отсутствие ≠ ноль, и «не из реестра» не должно выглядеть как «версия
+    неизвестна».
+    """
+    path, version = _resolve_model(spec)
+    model = WinProbability(path)
+    if version:
+        model.version = version
+    return model
 
 
 def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server, int]:
@@ -339,7 +375,7 @@ def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server,
         if not spec:
             continue
         try:
-            extra[name] = WinProbability(_resolve_model_path(spec))
+            extra[name] = load_model(spec)
             logger.info("extra model %s loaded (%s)", name, spec)
         except Exception as e:  # noqa: BLE001 — опциональная модель
             logger.warning("%s model unavailable (%s): %s", name, spec, e)
