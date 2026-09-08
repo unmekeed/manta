@@ -89,12 +89,22 @@ const adminRosterDays = 7
 // «источник, ничего не собравший, всё равно показывается нулём» живёт
 // НЕ в SQL, а в mergeSources ниже: без живой базы SQL не проверить, а
 // это ровно то свойство, ради которого страница и делается.
+// $1 используется ДВАЖДЫ, и обе подстановки обязаны быть одного типа.
+//
+// Первая редакция писала `($1 || ' days')::interval` в одной половине и
+// `CURRENT_DATE - $1::int` в другой: конкатенация требует text, вычитание
+// из даты — int, и pgx не смог угодить обоим. Отказ пришёл только на
+// живой базе, первым же запросом: «cannot find encode plan».
+//
+// `$1 * INTERVAL '1 day'` берёт целое и снимает разнобой. Заодно это
+// честнее: число дней и есть число, а не строка, из которой сделают
+// интервал разбором текста.
 const adminRosterSQL = `
 SELECT DISTINCT source_name FROM CollectedMatches
- WHERE collected_at > NOW() - ($1 || ' days')::interval
+ WHERE collected_at > NOW() - ($1 * INTERVAL '1 day')
 UNION
 SELECT DISTINCT source FROM ApiBudget
- WHERE day > CURRENT_DATE - $1::int`
+ WHERE day > CURRENT_DATE - $1`
 
 const adminCollectedSQL = `
 SELECT source_name, count(*), count(*) FILTER (WHERE has_replay)
