@@ -303,26 +303,61 @@ def test_match_gate_does_not_rescue_a_measured_effect():
     assert "ПОЛЕЗНА" in v
 
 
-def test_match_count_reaches_the_verdict():
+def test_match_count_reaches_the_verdict(monkeypatch):
     """Число матчей должно ДОХОДИТЬ до вердикта, а не только до отчёта.
 
     Посчитать его и не передать — та же ошибка, только тише: отчёт
-    выглядит информативным, а решение принимается по-старому. Здесь фича
-    — чистый шум при полном покрытии строк, но матчей всего сотня: без
-    передачи числа матчей вердикт был бы «кандидат на удаление».
+    выглядит информативным, а решение принимается по-старому.
+
+    ПОЧЕМУ ПРОВОДКА, А НЕ ТЕКСТ ВЕРДИКТА. Первая редакция подсовывала
+    шумовую фичу и ждала ветку «вывод преждевременен», то есть полагалась
+    на то, что шум окажется статистически неразличим. Это свойство
+    РАЗБИЕНИЯ, а не кода: спринт 213 сделал сплит устойчивым к росту
+    датасета, состав валидации сменился, тот же шум стал различим — и
+    тест упал на исправном коде. Проверять надо передачу аргумента,
+    ровно то, о чём докстринг, а не то, какая ветка сегодня выпала.
     """
+    import training.ablation as abl
+
+    seen = {}
+    real = abl.verdict
+
+    def spy(delta, sigma, cov=1.0, matches=None):
+        seen["matches"] = matches
+        return real(delta, sigma, cov, matches)
+
+    monkeypatch.setattr(abl, "verdict", spy)
+
     ds = synth_matches(100, seed=31)
+    # Фичу надо ЗАПОЛНИТЬ: пустая отсекается раньше вердикта отдельной
+    # веткой («НЕИЗМЕРИМА»), и проводка осталась бы непроверенной.
     i = FEATURES.index("roshan_diff")
-    rng = np.random.default_rng(31)
-    ds.X[:, i] = rng.normal(size=len(ds.y))     # шум, но заполнено везде
+    ds.X[:, i] = np.random.default_rng(31).normal(size=len(ds.y))
 
     rows, _ = run(ds, {"F2_объективы": ["roshan_diff"]})
     r = rows[0]
     assert r["coverage"] == 1.0, "покрытие строк полное — гейт не о нём"
-    assert r["matches_observed"] < 2000
-    assert "преждевременен" in r["verdict"], r["verdict"]
-    assert str(r["matches_observed"]) in r["verdict"], (
-        "вердикт обязан назвать число, на котором он основан")
+    assert seen.get("matches") is not None, (
+        "число матчей до вердикта не доехало — решение принимается "
+        "по-старому, а отчёт выглядит информативным")
+    assert seen["matches"] == r["matches_observed"], (
+        f"в вердикт ушло {seen['matches']}, а в отчёт "
+        f"{r['matches_observed']} — это разные числа")
+
+
+def test_a_verdict_below_the_match_floor_says_so():
+    """Ниже порога по матчам вердикт называет число, на котором основан.
+
+    Отделено от проводки выше намеренно: здесь `verdict` зовётся напрямую
+    с заведомо незначимым эффектом, поэтому ветка не зависит от того, как
+    сегодня легло разбиение.
+    """
+    from training.ablation import MIN_VERDICT_MATCHES, verdict
+
+    v = verdict(0.0001, 0.002, cov=1.0, matches=100)
+    assert "преждевременен" in v, v
+    assert "100" in v and str(MIN_VERDICT_MATCHES) in v, (
+        "вердикт обязан назвать и число, на котором основан, и нужное")
 
 
 # -- выбор целей (спринт 134) -----------------------------------------------------
