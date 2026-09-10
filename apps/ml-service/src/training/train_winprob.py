@@ -444,6 +444,33 @@ def _paired_bootstrap_delta(y, p_new, p_prod, groups, n_boot: int = 200,
 # которой мы сами измеряем пользу.
 from .ablation import MIN_EFFECT as GATE_TOL_FLOOR  # noqa: E402
 
+# Сколько матчей нужно, чтобы выборка «свежих» вообще считалась.
+FRESH_MIN_MATCHES = int(os.getenv("GATE_FRESH_MIN", "30"))
+
+# Сколько нужно, чтобы она РЕШАЛА (спринт 214). Порог выше, чем для
+# показа: одно дело привести справочную цифру, другое — судить по ней.
+FRESH_DECIDES_MIN = int(os.getenv("GATE_FRESH_DECIDES", "50"))
+
+# Сторож про-домена. НЕ судья: решение с 10.09 принимает выборка свежих
+# матчей (владелец, спринт 214) — отчёты делаются для собранных матчей, а
+# они почти все публичные. Про-эталон ловит ОБВАЛ на про-домене, и потому
+# порог здесь на порядок выше допуска гейта (0.001): разница в пределах
+# нескольких допусков — это дрейф домена, а 0.01 Brier — поломка.
+#
+# Мягкость сторожа не от доброты. До спринта 213 про-эталон
+# перетасовывался, и старые версии мерились на матчах, которые видели при
+# обучении; пока обе стороны сравнения не обучены после 213, про-оценка
+# СИСТЕМАТИЧЕСКИ льстит той, что старше. Судить по ней в этот период
+# нельзя, а заметить обвал — можно.
+PRO_GUARD_MAX = float(os.getenv("GATE_PRO_GUARD", "0.01"))
+
+# Имена выборок в объяснении гейта. Один словарь на весь модуль: пока их
+# было два, они разъезжались молча — читатель Telegram видел одно имя,
+# читатель журнала другое.
+_LABELS = {"benchmark_pro": "про-эталон",
+           "fresh": "свежие матчи (никто не видел)",
+           "valid": "валидация"}
+
 
 def _compare(new_art: dict, ref_art: dict, X, y, groups, kind: str,
              tol_floor: float, ref: str = "prod"):
@@ -465,8 +492,7 @@ def _compare(new_art: dict, ref_art: dict, X, y, groups, kind: str,
     delta, std = _paired_bootstrap_delta(y, p_new, p_ref, groups)
     tol = max(tol_floor, std)
     ok = delta <= tol
-    label = {"benchmark_pro": "про-эталон",
-             "fresh": "свежие матчи (никто не видел)"}.get(kind, "валидация")
+    label = _LABELS.get(kind, "валидация")
     n_m = len(set(groups.tolist()))
     verdict = f"не хуже {ref}" if ok else f"значимо хуже {ref}"
     text = (f"{label}, одни данные ({n_m} матчей): new {b_new:.4f} vs "
@@ -495,9 +521,15 @@ def _judge_holdout(new_art: dict, prod_art: dict, prod_max,
     # потому что валидация исключена из его обучения). Снимает смещение
     # переходного периода, когда prod старой схемы обучала калибратор на
     # общем valid-сплите и имела на нём нечестное преимущество.
+    #
+    # `prod_max` — граница по ОБОИМ участникам сравнения (спринт 214):
+    # храповик судит того же кандидата против якоря, а якорь может быть
+    # обучен на более позднем датасете, чем production (после отката так и
+    # есть). Возьми мы границу только по прод, «никто не видел» осталось бы
+    # названием, а не свойством.
     if kind == "valid" and prod_max:
         fresh = groups > int(prod_max)
-        if len(set(groups[fresh].tolist())) >= 30:
+        if len(set(groups[fresh].tolist())) >= FRESH_MIN_MATCHES:
             X, y, groups = X[fresh], y[fresh], groups[fresh]
             kind = "fresh"
     if len(y) == 0:
@@ -521,8 +553,21 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
     пределах шума (± bootstrap-σ по матчам). При равенстве в пределах шума
     предпочитаем новую версию — она обучена на бОльших данных и устойчивее.
 
-    РЕШАЕТ первый holdout по приоритету (про-эталон, если он достаточно
-    велик), но СЧИТАЕТ и остальные, называя их в объяснении (спринт 174).
+    КТО РЕШАЕТ (спринт 214, пункт G2 роадмапа). Решает выборка СВЕЖИХ
+    матчей, если она набрала FRESH_DECIDES_MIN; иначе — первый holdout по
+    прежнему приоритету. Считаются и называются в объяснении все.
+
+    Почему свежие. Их не видел НИ ОДИН из участников сравнения, поэтому
+    это единственная оценка, свободная и от утечки, и от перетасовки
+    эталона. Про-эталон до спринта 213 перетасовывался, и старые версии
+    мерились на матчах, которые видели при обучении: 9–10 сентября это
+    дало семь отказов подряд, где на про кандидат «значимо хуже» семь раз
+    из семи, а на свежих — не хуже или лучше пять раз из пяти.
+
+    И по существу: отчёты делаются для собранных матчей, а они почти все
+    публичные (решение владельца 10.09). Про-эталон остаётся СТОРОЖЕМ —
+    ловит обвал на про-домене (PRO_GUARD_MAX), но не судит.
+
     Отказ с одной цифрой не отвечает на главный вопрос: кандидат стал хуже
     вообще или только на двух десятках про-матчей? Это разные диагнозы —
     чинить обучение или признать эталон слишком маленьким, — а стоит
@@ -538,23 +583,57 @@ def evaluate_gate(new_art: dict, prod_art: dict, ds,
     два вердикта на разных выборках противоречили бы друг другу не по
     существу, а по данным.
     """
+    # Граница «свежести» — по ОБОИМ участникам сравнения. Якорь может быть
+    # обучен на более позднем датасете, чем production (после отката так и
+    # есть), и тогда матчи новее прода он всё-таки видел.
     prod_max = (prod_art.get("dataset") or {}).get("max_match_id")
-    decided, parts, decisive = None, [], None
+    if champion is not None:
+        champ_max = (champion.get("dataset") or {}).get("max_match_id")
+        if champ_max and prod_max:
+            prod_max = max(int(prod_max), int(champ_max))
+        else:
+            prod_max = prod_max or champ_max
+
     # Список заполняется по ссылке: сигнатура возврата у гейта
     # двухэлементная и её читают в нескольких местах, а ломать её ради
     # диагностики значило бы тронуть код промоушена ради журнала.
     details = [] if holdouts is None else holdouts
+    judged = []
     for X, y, groups, kind in ds.eval_holdouts():
         ok, text, kind, detail, used = _judge_holdout(
             new_art, prod_art, prod_max, X, y, groups, kind, tol_floor)
         if ok is None:
             continue
-        parts.append(text)
         details.append(detail)
-        if decided is None:
-            decided, decisive = ok, (used, kind)
-    if decided is None:
+        judged.append((kind, ok, text, detail, used))
+    if not judged:
         return True, "нет общего holdout — продвигаем"
+
+    # РЕШАЮЩАЯ ОЦЕНКА. Свежие матчи, если их набралось достаточно: их не
+    # видел ни один участник сравнения. Иначе — прежний приоритет.
+    chosen = next((j for j in judged if j[0] == "fresh"
+                   and (j[3] or {}).get("n_matches", 0) >= FRESH_DECIDES_MIN),
+                  None)
+    if chosen is None:
+        chosen = judged[0]
+    decided, decisive = chosen[1], (chosen[4], chosen[0])
+
+    # Решающая оценка идёт ПЕРВОЙ, справочные за ней: читающий отказ должен
+    # увидеть причину раньше контекста. Раньше первой была просто первая по
+    # приоритету, и это совпадало с решающей; теперь решает не всегда она,
+    # и порядок приходится задавать явно.
+    parts = [f"решает {_LABELS.get(chosen[0], chosen[0])} — {chosen[2]}"]
+    parts += [j[2] for j in judged if j is not chosen]
+
+    # СТОРОЖ ПРО-ДОМЕНА. Не судья: ловит обвал, а не дрейф. Проверяется
+    # ДО храповика, потому что это более грубая поломка, и читатель должен
+    # увидеть её первой.
+    pro = next((j for j in judged if j[0] == "benchmark_pro"), None)
+    if pro is not None and (pro[3] or {}).get("delta", 0.0) > PRO_GUARD_MAX:
+        parts.insert(0, f"СТОРОЖ ПРО: хуже на {pro[3]['delta']:+.4f} при "
+                        f"допустимых {PRO_GUARD_MAX:.4f} — обвал на "
+                        f"про-домене")
+        return False, "; ".join(parts)
 
     if decisive is not None:
         (aX, ay, agroups), akind = decisive

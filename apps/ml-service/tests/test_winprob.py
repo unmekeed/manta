@@ -634,10 +634,13 @@ def test_gate_reports_both_holdouts_not_only_the_deciding_one():
 
 
 def test_the_deciding_holdout_comes_first_in_the_explanation():
-    """Причина отказа стоит раньше контекста.
+    """Причина отказа стоит раньше контекста, и названа решающей.
 
     Порядок здесь смысловой: справочная цифра, напечатанная первой,
-    читалась бы как причина решения — и чинили бы не то.
+    читалась бы как причина решения — и чинили бы не то. Со спринта 214
+    решает не всегда первая по приоритету, поэтому объяснение обязано
+    ГОВОРИТЬ, какая именно решила: без этого читатель по-прежнему считал
+    бы причиной верхнюю строку.
     """
     from training.train_winprob import train, evaluate_gate
     from training.dataset import PRO_TIER
@@ -646,7 +649,9 @@ def test_the_deciding_holdout_comes_first_in_the_explanation():
     ds.tiers = np.array([PRO_TIER if g % 2 == 0 else "" for g in ds.groups])
     art = train(ds, num_rounds=60)
     _, reason = evaluate_gate(art, art, ds)
-    assert reason.index("про-эталон") == 0, reason
+    assert reason.startswith("решает "), reason
+    # Решающая выборка названа, и её цифры идут раньше справочных.
+    assert reason.index("про-эталон") < reason.index("валидация"), reason
 
 
 def test_the_extra_holdout_does_not_change_the_verdict():
@@ -686,8 +691,15 @@ def test_the_first_holdout_decides_when_the_two_disagree(monkeypatch):
         # храповик). Заглушка обязана отдавать их так же, как настоящая
         # функция: заглушка, устроенная проще боевой, проверяет
         # несуществующую систему.
+        # Форма detail — как у настоящей функции. Заглушка, устроенная
+        # проще боевой, проверяет несуществующую систему: спринт 214
+        # добавил чтение `delta` и `n_matches`, и на урезанном словаре
+        # гейт свалился бы KeyError там, где в бою работает.
         return (verdicts[kind], f"{kind}: подстановка", kind,
-                {"kind": kind, "ok": verdicts[kind]}, (X, y, groups))
+                {"kind": kind, "n_matches": 40, "brier_new": 0.1,
+                 "brier_prod": 0.1, "delta": 0.0, "sigma": 0.001,
+                 "tol": 0.001, "ok": verdicts[kind], "ref": "prod"},
+                (X, y, groups))
 
     class TwoHoldouts:
         def eval_holdouts(self):
@@ -699,7 +711,7 @@ def test_the_first_holdout_decides_when_the_two_disagree(monkeypatch):
     monkeypatch.setattr(tw, "_judge_holdout", fake_judge)
     ok, reason = tw.evaluate_gate({}, {}, TwoHoldouts())
     assert ok is False, "решила справочная оценка, а не первая"
-    assert reason.startswith("benchmark_pro")
+    assert reason.index("benchmark_pro") < reason.index("valid"), reason
 
     verdicts["benchmark_pro"], verdicts["valid"] = True, False
     ok, _ = tw.evaluate_gate({}, {}, TwoHoldouts())
